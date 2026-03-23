@@ -85,6 +85,183 @@ Use cases:
 - Centrality metrics ([betweenness](https://en.wikipedia.org/wiki/Betweenness_centrality), [PageRank](https://en.wikipedia.org/wiki/PageRank), [eigenvector](https://en.wikipedia.org/wiki/Eigenvector_centrality))
 - Temporal snapshots — rebuild the graph per-year and diff
 
+## Roadmap
+
+### Near-term (gated on Phase 3)
+
+- **Public graph explorer** — D3.js force-directed visualization on wxyc.org. D3.js preferred over Sigma.js for flexibility; Sigma.js remains an option if performance is an issue at scale.
+- **Incremental pipeline updates** — Add new flowsheet entries to the graph without full pipeline re-runs.
+- **DJ taste profiles** — Per-DJ embeddings from play history. Which DJs are most adventurous? Which DJs' tastes overlap?
+- **Temporal analysis** — How the graph evolves year-over-year. Which edges appeared? Disappeared?
+- **`/graph/clusters` and `/graph/bridges` endpoints** — Precomputed community structure and cross-genre bridge artists.
+
+### Future data source: Digitized album reviews
+
+WXYC's physical library contains handwritten reviews pasted onto album covers — music directors' notes written at the moment a release entered the collection. A parallel digitization effort (image capture → OCR → text) is producing machine-readable review text linked to library releases by call number. This data encodes something no other source captures: explicit curatorial reasoning about *why* a release matters, in the reviewer's own words.
+
+#### What the review text contains
+
+Unlike flowsheet data (behavioral, implicit) or Discogs metadata (structured, external), reviews are **unstructured first-person curatorial judgments**. They typically include:
+
+- **Sonic descriptors** — Informal vocabulary that doesn't map to any genre taxonomy: "skittery," "lush," "angular," "kosmische," "zonked-out." This is how the station actually talks about music, unconstrained by Discogs' controlled tag set.
+- **Comparative references** — "Sounds like Broadcast meets Burial," "for fans of Tortoise," "imagine if Stereolab made a dub record." These are explicit artist-to-artist connections made by a knowledgeable listener.
+- **Enthusiasm and context** — "Absolutely essential, best thing on Drag City this year" vs. "decent, standard indie rock." Sentiment carries weight — not all rotation adds are equal.
+- **Temporal voice** — How the station's critical vocabulary evolves across decades. When do terms like "vaporwave" or "hyperpop" first appear in reviews?
+
+#### New edge types
+
+**Review Comparison** — When a review references another artist ("sounds like X," "Tortoise vibes," "imagine if Y made a Z record"), that's a directed edge from the reviewed artist to the referenced artist. This edge type is distinct from DJ transitions: it captures *conscious curatorial reasoning* rather than implicit behavioral patterns. A music director writing "sounds like Stereolab" is a stronger, more interpretable signal than two adjacent flowsheet plays.
+
+| Attribute | Value |
+|-----------|-------|
+| **Weight** | Confidence of reference extraction (explicit "sounds like" > implicit mention) |
+| **Metadata** | Context snippet from the review, reviewer identity if available, review date |
+| **Direction** | Reviewed artist → referenced artist |
+
+**Shared Review Language** — Artists whose reviews use the same sonic vocabulary — not because DJs play them together, but because reviewers *describe* them the same way. Derived by embedding extracted sonic descriptors and computing cosine similarity between artists' descriptor vectors. Two artists both described as "angular post-punk with kosmische undertones" are connected even if they've never appeared in the same flowsheet show.
+
+| Attribute | Value |
+|-----------|-------|
+| **Weight** | Cosine similarity of descriptor embeddings |
+| **Metadata** | Overlapping descriptors, representative review snippets |
+
+#### New node attributes from reviews
+
+| Attribute | Derivation | Semantic value |
+|-----------|------------|----------------|
+| Sonic descriptors | Keyword extraction from review text | WXYC-native style vocabulary, more expressive than Discogs tags |
+| Sentiment score | Sentiment analysis on review text | Enthusiasm level at time of acquisition |
+| Review descriptor embedding | Sentence transformer on extracted descriptors | Embedding-space clustering by aesthetic similarity |
+
+#### Analyses
+
+**Enthusiasm vs. airplay correlation** — Do releases with enthusiastic reviews get more plays? Which music directors' taste best predicts DJ adoption? This validates (or challenges) the assumption that rotation adds reflect station-wide consensus.
+
+**Sonic vocabulary evolution** — How the station's critical language changes over decades. Track when descriptors emerge, peak, and fade. This is cultural history with concrete timestamps.
+
+**Graph validation** — Explicit "sounds like X" comparisons serve as ground truth for DJ transition edges. If the PMI-weighted graph says Artist A and Artist B are closely related, and a review of Artist A also references Artist B, that's independent confirmation. Conversely, review references the graph misses reveal gaps in the flowsheet signal.
+
+#### Pipeline integration
+
+The digitization pipeline produces text linked to a library release (by call number or barcode scan). Integration with the semantic index pipeline:
+
+1. **Extract artist references** — NER and pattern matching (`"sounds like X"`, `"for fans of X"`, `"X meets Y"`) on review text
+2. **Resolve referenced artists** — Against the canonical artist mapping table (same Tier 1-4 process as flowsheet entries)
+3. **Extract sonic descriptors** — Keyword extraction or a fine-tuned classifier on the informal vocabulary
+4. **Compute descriptor embeddings** — Sentence transformer on per-artist descriptor sets
+5. **Store** — New tables in the SQLite graph database:
+
+**`review`** — One row per digitized review.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int | PK |
+| `artist_id` | int | FK → artist |
+| `release_id` | int | nullable, FK → library release |
+| `text` | text | Full review text |
+| `sentiment_score` | float | nullable |
+| `reviewer` | text | nullable (if identifiable) |
+| `review_date` | text | nullable (if identifiable) |
+
+**`review_comparison`** — Directed edges from explicit artist references in reviews.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `reviewed_artist_id` | int | FK → artist |
+| `referenced_artist_id` | int | FK → artist |
+| `review_id` | int | FK → review |
+| `context_snippet` | text | Surrounding text of the reference |
+| `confidence` | float | Extraction confidence |
+
+**`artist_descriptor`** — Sonic vocabulary per artist, extracted from reviews.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `artist_id` | int | FK → artist |
+| `descriptor` | text | e.g., "angular," "lush," "kosmische" |
+| `occurrence_count` | int | Across all reviews for this artist |
+
+#### Phasing
+
+This work is gated on the digitization effort producing linked, OCR'd text. It does not block any phase of the semantic index pipeline — the review edge types and node attributes are additive. When review data becomes available, it slots into the existing pipeline between Step 3 (Discogs enrichment) and Step 4 (edge extraction) as a parallel enrichment source.
+
+### Future data source: Wikidata
+
+[Wikidata](https://www.wikidata.org/) is a free, structured knowledge graph maintained by the Wikimedia Foundation. It contains ~1M music artist entities with machine-readable properties including genres, instruments, record labels, country of origin, active years, and — most valuably — **influence relationships**: `influenced by` (P737) and its inverse. These are musicological claims sourced from interviews, liner notes, and critical writing, curated by the Wikidata community under a CC0 (public domain) license.
+
+#### What it uniquely contributes
+
+Discogs captures structural relationships (who played on what record, who released on what label). Wikidata captures **musicological relationships** — documented influence, association, and lineage that exist independent of any recording or label. A Discogs edge says "these two artists share a producer." A Wikidata edge says "this artist cited that artist as a primary influence in a 1998 interview."
+
+#### New edge type: Documented Influence
+
+A directed edge from artist A to artist B when Wikidata records that A was influenced by B (or that B influenced A). This is the academic/musicological counterpart to the DJ transition edge — one is empirical (DJs program them together), the other is documented (critics and artists say the influence exists).
+
+| Attribute | Value |
+|-----------|-------|
+| **Weight** | Binary (documented or not), optionally enriched with reference count |
+| **Metadata** | Wikidata reference sources (interviews, biographies, liner notes) |
+| **Direction** | Influenced artist → influencing artist |
+
+Comparing documented influence edges against PMI-weighted DJ transition edges is a genuine research question: do WXYC DJs intuitively program along documented influence lines, or do they find connections that the musicological record doesn't capture? Both outcomes are interesting — agreement validates the graph, divergence reveals the unique curatorial knowledge that freeform radio produces.
+
+#### Additional node attributes from Wikidata
+
+| Attribute | Wikidata property | Semantic value |
+|-----------|------------------|----------------|
+| Country of origin | P495, P27 | Geographic dimension for the graph |
+| Instruments | P1303 | Sonic profile (guitar-based, electronic, brass-heavy) |
+| Associated acts | P527, P361 | Side projects, supergroups, collaborations |
+| Awards | P166 | Critical recognition |
+| Active years | P2031, P2032 | Temporal context independent of WXYC play history |
+
+#### Integration
+
+Wikidata entities link to MusicBrainz via property P434 (MusicBrainz artist ID), and Discogs via P1953 (Discogs artist ID). Matching canonical artists in the semantic index to Wikidata entities can use these cross-references or fall back to name matching. The SPARQL endpoint is free and unlimited; the full dump is also available for bulk processing.
+
+This enrichment is additive — it does not block any phase and can be integrated whenever capacity allows. The influence edges are the highest-value addition; the node attributes are supplementary.
+
+### Future data source: MusicBrainz
+
+[MusicBrainz](https://musicbrainz.org/) is an open music encyclopedia with a community-maintained relational database of artists, recordings, releases, and — critically — over 50 typed relationships between entities. The core data is CC0 (public domain); supplementary data (tags, ratings) is CC BY-NC-SA. A full PostgreSQL dump is published weekly.
+
+#### What it uniquely contributes
+
+Discogs has personnel credits (who played on a record) and label data. MusicBrainz has a richer relationship ontology that captures connections Discogs doesn't model:
+
+| Relationship type | Example | Discogs equivalent |
+|---|---|---|
+| `member of band` | Thom Yorke → Radiohead | Partial (artist credits) |
+| `collaboration` | Burial + Four Tet | Not modeled |
+| `remix` | Four Tet remixed Radiohead | Partial (track credits) |
+| `cover` | Cat Power covered "(I Can't Get No) Satisfaction" | Not modeled |
+| `tribute` | Dub Side of the Moon (tribute to Pink Floyd) | Not modeled |
+| `DJ mix` | DJ Shadow mixed "Endtroducing....." | Not modeled |
+| `composer` / `lyricist` | Distinct from performer credits | Partial |
+| `recording engineer` / `mastering` | More granular roles than Discogs | Overlapping |
+
+These typed relationships produce more specific edges than Discogs' flat credits list. "Artist A remixed Artist B" is a different kind of connection than "Artist A and Artist B share a mastering engineer."
+
+#### New edge type: MusicBrainz Typed Relationship
+
+Edges derived from MusicBrainz's Advanced Relationship system, preserving the relationship type as metadata. Unlike the Discogs "shared personnel" edge (which collapses all credit types), these edges retain semantic specificity.
+
+| Attribute | Value |
+|-----------|-------|
+| **Weight** | Count of relationships between the pair |
+| **Metadata** | Relationship types (member, remix, cover, collaboration, etc.) |
+| **Direction** | Depends on relationship type (remix is directed, collaboration is undirected) |
+
+#### Coverage and Discogs overlap
+
+MusicBrainz and Discogs overlap substantially on basic release metadata and personnel credits. The value of adding MusicBrainz is in the typed relationships that Discogs doesn't model and in coverage gaps — MusicBrainz tends to have better coverage for digital-only releases and recent independent music, while Discogs is stronger for physical releases and older catalog. For WXYC's physical-only library, Discogs is likely the primary source, but MusicBrainz fills gaps for artists who are well-documented in MusicBrainz but sparse in Discogs.
+
+#### Integration
+
+MusicBrainz IDs are the standard cross-reference key in the open music data ecosystem. Wikidata links to MusicBrainz via P434, and Discogs artist IDs can be matched via MusicBrainz's URL relationships. The weekly PostgreSQL dump can be loaded into a local database for bulk processing, following the same pattern as the Discogs cache.
+
+Like Wikidata, this enrichment is additive and can be integrated whenever capacity allows. The typed relationships are the highest-value addition; the metadata overlap with Discogs is secondary.
+
 ## Data Inventory
 
 This section catalogs the raw attributes available for building the graph. It serves as a reference for pipeline implementation — the semantic relationships and product surfaces described above are derived from these sources.
@@ -606,7 +783,7 @@ The Graph API lives in this repo as a lightweight server module alongside the pi
 
 ### Graph API deployment
 
-The Graph API is a lightweight FastAPI service deployed to Railway, following the same pattern as request-o-matic and library-metadata-lookup (`main` branch auto-deploys to staging, `prod` branch to production). The `semantic-index` repo uses `pyproject.toml` with the same tooling as existing Python services: black (100-char line length), ruff, pytest with markers, and aiosqlite for async database access in the API server. The SQLite graph database is bundled as a build artifact or served from a persistent Railway volume.
+The Graph API is a lightweight FastAPI service deployed to AWS (EC2), alongside the existing Backend-Service infrastructure. The `semantic-index` repo uses `pyproject.toml` with the same tooling as existing Python services: black (100-char line length), ruff, pytest with markers, and aiosqlite for async database access in the API server. The SQLite graph database is stored on the EC2 instance's filesystem.
 
 ### Lucene index build and deploy integration
 
@@ -728,10 +905,43 @@ Build the serving infrastructure for the graph: Lucene index for the Java stack,
 
 **Gate:** Is the flowsheet sidebar useful during a real DJ show? Dogfood it. If DJs don't engage with it, the public explorer is not justified.
 
-### Future work (not planned in detail, gated on Phase 3)
+## Alternative: Java-free pipeline
 
-- **Public graph explorer** — D3.js force-directed visualization on wxyc.org. D3.js preferred over Sigma.js for flexibility; Sigma.js remains an option if performance is an issue at scale.
-- **Incremental pipeline updates** — Add new flowsheet entries to the graph without full pipeline re-runs.
-- **DJ taste profiles** — Per-DJ embeddings from play history. Which DJs are most adventurous? Which DJs' tastes overlap?
-- **Temporal analysis** — How the graph evolves year-over-year. Which edges appeared? Disappeared?
-- **`/graph/clusters` and `/graph/bridges` endpoints** — Precomputed community structure and cross-genre bridge artists.
+The proposal as written has two Java dependencies: FuzzyBackfillCLI for Tier 2 canonicalization, and BuildGraphIndexCLI + ArtistGraphSearcher for the Lucene serving projection. Both can be eliminated if the goal is a pure Python + TypeScript stack with no JVM requirement.
+
+#### Replacing Tier 2: FuzzyBackfillCLI → Python
+
+FuzzyBackfillCLI does three things: normalize artist/title strings, find candidates in the release index, and score them with Jaro-Winkler. None of these require Lucene or Java.
+
+**Normalization.** `EntryNormalizer` is deterministic string manipulation: strip rotation bins `(H)/(M)/(L)/(S)`, remove DJ annotations in parentheses, strip format suffixes, fold diacriticals, lowercase. This is straightforward to port — the Java test cases (`EntryNormalizerTest`) serve as the spec. A Python implementation would be ~50 lines of regex.
+
+**Candidate retrieval.** FuzzyBackfillCLI searches the Lucene release index to find candidate matches. The replacement: query PostgreSQL's `library_artist_view` using pg_trgm's `%` operator with the normalized artist + title. pg_trgm's trigram similarity finds the same candidates that Lucene's StandardAnalyzer + QueryParser would — both are doing approximate string matching on tokenized text. The candidate set doesn't need to be identical; it needs to be good enough that the correct match is in the top 20 results, which pg_trgm handles reliably.
+
+**Scoring.** Jaro-Winkler is a pure algorithm with no external dependencies. Python implementations exist in `jellyfish` (C-accelerated) and `rapidfuzz` (C++). The ambiguity guard (reject if top two candidates differ by < 0.02 with different library codes) is a few lines of comparison logic on top.
+
+**Porting cost:** ~200 lines of Python, validated against FuzzyBackfillCLI's existing test cases and TSV output. The pipeline can run both implementations in parallel during validation to confirm parity before removing the Java dependency.
+
+#### Replacing the Lucene serving projection → OpenSearch or PostgreSQL
+
+The proposal uses a Lucene index (`artists-graph-v1`) as a read-optimized projection for the Java stack, built by `BuildGraphIndexCLI` and queried by `ArtistGraphSearcher`. With Backend-Service (Node.js) taking over from tubafrenzy, two alternatives eliminate the Java dependency:
+
+**Option A: OpenSearch.** The Python pipeline exports the SQLite graph to an OpenSearch index via the bulk API (~50 lines of Python). Each document is an artist node with a `neighbors` stored JSON field, same schema as the proposed Lucene documents. Backend-Service queries OpenSearch by artist ID — a single key-value lookup, sub-millisecond. The same OpenSearch instance already serves catalog search (`wxyc_library` index), so no new infrastructure. Index alias swaps (`artists-graph-v1` → `artists-graph-v2`) provide atomic deploys. Requires a 2GB EC2 instance (~$7.50/month more) for the OpenSearch JVM, but the JVM is in OpenSearch, not in application code.
+
+**Option B: PostgreSQL JSONB.** The pipeline exports the graph to a PostgreSQL table with a JSONB `neighbors` column, indexed by artist ID (primary key lookup). No additional process, no JVM. The tradeoff is that PostgreSQL doesn't provide full-text search over the `aliases` and `styles` fields as naturally as OpenSearch, but a `tsvector` column with a GIN index covers that. This option has zero operational overhead — the data lives in the database that's already running.
+
+| | Lucene (proposed) | OpenSearch | PostgreSQL JSONB |
+|---|---|---|---|
+| JVM required | Yes (application code) | Yes (OpenSearch process) | No |
+| Additional process | No (in-process) | Yes | No |
+| Lookup latency | <1ms | <5ms | <5ms |
+| Full-text search on artist fields | Native | Native | tsvector + GIN |
+| Atomic index swap | Symlink swap | Alias swap | Table swap or materialized view refresh |
+| Deploy complexity | JAR build + scp + symlink | Bulk API call | SQL transaction |
+
+#### What changes per phase
+
+**Phase 1:** No change. Tier 2 is already optional ("if the JAR is missing, Tier 2 is skipped entirely"). The pipeline uses Tier 1 and Tier 4 only.
+
+**Phase 2:** Replace FuzzyBackfillCLI subprocess call with the Python Jaro-Winkler implementation. pg_trgm replaces the Lucene release index for candidate retrieval. Add a validation step that compares Python output against FuzzyBackfillCLI's TSV output on the fixture data to confirm parity.
+
+**Phase 3:** Replace BuildGraphIndexCLI and ArtistGraphSearcher with either OpenSearch or PostgreSQL JSONB. The Graph API (FastAPI + SQLite) is unchanged. The flowsheet sidebar in dj-site queries Backend-Service, which queries OpenSearch or PostgreSQL — no Java in the serving path.
