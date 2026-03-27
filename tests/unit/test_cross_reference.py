@@ -175,8 +175,8 @@ class TestReleaseCrossReference:
         extractor = self._make_extractor(codes=codes, release_to_code=release_to_code)
 
         rows = [
-            (1, 200, 300, "See also"),      # valid
-            (2, 999, 301, "Related"),        # unresolvable first endpoint
+            (1, 200, 300, "See also"),  # valid
+            (2, 999, 301, "Related"),  # unresolvable first endpoint
             (3, 200, 301, "Collaboration"),  # valid
         ]
         edges = extractor.extract_release_xrefs(rows)
