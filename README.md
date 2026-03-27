@@ -7,21 +7,22 @@ Builds a semantic artist graph from WXYC DJ transition data. When DJs curate tra
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python run_phase0.py /path/to/wxycmusic.sql
+python run_pipeline.py /path/to/wxycmusic.sql
 ```
 
-This parses the SQL dump, computes PMI for all artist co-occurrences, prints top-20 neighbors for well-known artists, and writes a GEXF graph to `output/`.
+This parses the SQL dump, computes PMI for all artist co-occurrences, extracts cross-reference edges from the catalog, and writes a GEXF graph + SQLite database to `output/`.
 
 ## Options
 
 ```
-python run_phase0.py <dump_path> [--output-dir DIR] [--min-count N]
+python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqlite]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output-dir` | `output/` | Directory for GEXF output |
+| `--output-dir` | `output/` | Directory for output files |
 | `--min-count` | `2` | Minimum co-occurrence count for graph edges |
+| `--no-sqlite` | disabled | Skip SQLite database export |
 
 ## How it works
 
@@ -29,7 +30,8 @@ python run_phase0.py <dump_path> [--output-dir DIR] [--min-count N]
 2. **Resolve** artist names via the library catalog FK chain (LIBRARY_RELEASE → LIBRARY_CODE)
 3. **Extract** consecutive artist pairs within each radio show
 4. **Compute** PMI: `log2(P(a,b) / (P(a) * P(b)))` — high PMI means two artists appear together more than chance predicts
-5. **Export** a GEXF graph loadable in [Gephi](https://gephi.org/)
+5. **Extract** cross-reference edges from catalog tables (LIBRARY_CODE_CROSS_REFERENCE, RELEASE_CROSS_REFERENCE)
+6. **Export** a GEXF graph loadable in [Gephi](https://gephi.org/) and a SQLite database for querying
 
 ## Development
 
@@ -41,4 +43,4 @@ black --check .           # format check
 mypy .                    # type check
 ```
 
-See [CLAUDE.md](CLAUDE.md) for detailed development patterns and column mappings.
+See [CLAUDE.md](CLAUDE.md) for detailed development patterns, column mappings, and SQLite schema.
