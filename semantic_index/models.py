@@ -78,3 +78,12 @@ class PmiEdge(BaseModel):
     target: str
     raw_count: int
     pmi: float
+
+
+class CrossReferenceEdge(BaseModel):
+    """An explicit cross-reference edge from the library catalog."""
+
+    artist_a: str  # canonical name
+    artist_b: str  # canonical name
+    comment: str
+    source: str  # "library_code" or "release"

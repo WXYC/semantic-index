@@ -5,6 +5,7 @@ Uses WXYC example artists from the canonical data in wxyc-shared.
 
 from semantic_index.models import (
     AdjacencyPair,
+    CrossReferenceEdge,
     FlowsheetEntry,
     LibraryCode,
     LibraryRelease,
@@ -73,3 +74,17 @@ def make_adjacency_pair(
     show_id: int = 1,
 ) -> AdjacencyPair:
     return AdjacencyPair(source=source, target=target, show_id=show_id)
+
+
+def make_cross_reference_edge(
+    artist_a: str = "Autechre",
+    artist_b: str = "Stereolab",
+    comment: str = "See also",
+    source: str = "library_code",
+) -> CrossReferenceEdge:
+    return CrossReferenceEdge(
+        artist_a=artist_a,
+        artist_b=artist_b,
+        comment=comment,
+        source=source,
+    )
