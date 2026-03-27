@@ -1,0 +1,64 @@
+[project]
+name = "semantic-index"
+version = "0.1.0"
+description = "WXYC semantic artist graph from DJ transition data"
+requires-python = ">=3.12"
+readme = "README.md"
+authors = [
+    {name = "WXYC Engineering"}
+]
+
+dependencies = [
+    "networkx>=3.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.0.0",
+    "types-networkx>=3.0",
+]
+
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["semantic_index*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4"]
+ignore = ["E501", "B008", "C901"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true
+strict_optional = true
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (needs fixture dump)",
+    "slow: marks tests as slow (runs against production dump)",
+]
+addopts = "-m 'not integration and not slow'"
+console_output_style = "progress"
+testpaths = ["tests"]
+pythonpath = ["."]
