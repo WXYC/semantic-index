@@ -101,20 +101,20 @@ class TestIterTableRows:
 
     def test_skips_non_matching_tables(self):
         path = self._write_dump(
-            "INSERT INTO `OTHER` VALUES (1,'skip');\n" "INSERT INTO `GENRE` VALUES (1,'Rock');\n"
+            "INSERT INTO `OTHER` VALUES (1,'skip');\nINSERT INTO `GENRE` VALUES (1,'Rock');\n"
         )
         rows = list(iter_table_rows(str(path), "GENRE"))
         assert rows == [(1, "Rock")]
 
     def test_multiple_insert_lines_for_same_table(self):
         path = self._write_dump(
-            "INSERT INTO `GENRE` VALUES (1,'Rock');\n" "INSERT INTO `GENRE` VALUES (2,'Jazz');\n"
+            "INSERT INTO `GENRE` VALUES (1,'Rock');\nINSERT INTO `GENRE` VALUES (2,'Jazz');\n"
         )
         rows = list(iter_table_rows(str(path), "GENRE"))
         assert rows == [(1, "Rock"), (2, "Jazz")]
 
     def test_skips_comments_and_blanks(self):
-        path = self._write_dump("-- MySQL dump\n" "\n" "INSERT INTO `GENRE` VALUES (1,'Rock');\n")
+        path = self._write_dump("-- MySQL dump\n\nINSERT INTO `GENRE` VALUES (1,'Rock');\n")
         rows = list(iter_table_rows(str(path), "GENRE"))
         assert rows == [(1, "Rock")]
 
