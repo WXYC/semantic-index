@@ -15,11 +15,11 @@ from semantic_index.adjacency import extract_adjacency_pairs
 from semantic_index.artist_resolver import ArtistResolver
 from semantic_index.graph_export import build_graph, export_gexf, print_top_neighbors
 from semantic_index.models import (
-    ArtistStats,
     FlowsheetEntry,
     LibraryCode,
     LibraryRelease,
 )
+from semantic_index.node_attributes import compute_artist_stats
 from semantic_index.pmi import compute_pmi
 from semantic_index.sql_parser import iter_table_rows, load_table_rows
 
@@ -87,10 +87,23 @@ def run(args: argparse.Namespace) -> None:
     codes = [LibraryCode(id=r[0], genre_id=r[1], presentation_name=r[7]) for r in code_rows]
     log.info("  %d library codes loaded", len(codes))
 
-    # 3. Build resolver
+    # 3. Parse radio shows for DJ mapping
+    log.info("Parsing FLOWSHEET_RADIO_SHOW_PROD table...")
+    show_to_dj: dict[int, int | str] = {}
+    for row in iter_table_rows(dump_path, "FLOWSHEET_RADIO_SHOW_PROD"):
+        show_id = row[0]
+        dj_id = row[3]  # DJ_ID (int or None)
+        dj_name = row[2] or ""  # DJ_NAME (str)
+        if isinstance(dj_id, int) and dj_id > 0:
+            show_to_dj[show_id] = dj_id
+        elif dj_name:
+            show_to_dj[show_id] = dj_name
+    log.info("  %d shows with DJ mapping", len(show_to_dj))
+
+    # 4. Build resolver
     resolver = ArtistResolver(releases=releases, codes=codes)
 
-    # 4. Stream flowsheet entries and resolve
+    # 5. Stream flowsheet entries and resolve
     log.info("Parsing FLOWSHEET_ENTRY_PROD and resolving artists...")
     resolved_entries = []
     total_entries = 0
@@ -109,6 +122,8 @@ def run(args: argparse.Namespace) -> None:
             continue
 
         try:
+            start_time_raw = row[10]
+            request_flag_raw = row[18]
             entry = FlowsheetEntry(
                 id=row[0],
                 artist_name=row[1] or "",
@@ -119,6 +134,8 @@ def run(args: argparse.Namespace) -> None:
                 show_id=row[12] if isinstance(row[12], int) else 0,
                 sequence=row[13] if isinstance(row[13], int) else 0,
                 entry_type_code=entry_type_code,
+                request_flag=request_flag_raw if isinstance(request_flag_raw, int) else 0,
+                start_time=start_time_raw if isinstance(start_time_raw, int) else None,
             )
         except Exception:
             log.debug("Skipping unparseable row ID=%s", row[0], exc_info=True)
@@ -148,23 +165,18 @@ def run(args: argparse.Namespace) -> None:
     edges = compute_pmi(pairs, resolved_entries)
     log.info("  %d unique edges computed", len(edges))
 
-    # 7. Build artist stats
-    artist_play_counts: dict[str, int] = {}
-    artist_genres: dict[str, int | None] = {}
-    for entry in resolved_entries:
-        name = entry.canonical_name
-        artist_play_counts[name] = artist_play_counts.get(name, 0) + 1
-        if name not in artist_genres and entry.entry.library_release_id > 0:
-            artist_genres[name] = resolver.get_genre_id(entry.entry.library_release_id)
+    # 8. Build artist stats
+    code_to_genre = {c.id: c.genre_id for c in codes}
+    genre_for_release: dict[int, int] = {}
+    for r in releases:
+        genre_id = code_to_genre.get(r.library_code_id)
+        if genre_id is not None:
+            genre_for_release[r.id] = genre_id
 
-    artist_stats = {
-        name: ArtistStats(
-            canonical_name=name,
-            total_plays=count,
-            genre=GENRE_NAMES.get(artist_genres.get(name, -1), None),
-        )
-        for name, count in artist_play_counts.items()
-    }
+    log.info("Computing artist stats...")
+    artist_stats = compute_artist_stats(
+        resolved_entries, show_to_dj, GENRE_NAMES, genre_for_release=genre_for_release
+    )
 
     # 8. Print top neighbors for spotlight artists
     print_top_neighbors(edges, SPOTLIGHT_ARTISTS, n=20)

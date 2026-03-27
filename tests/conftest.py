@@ -22,6 +22,8 @@ def make_flowsheet_entry(
     show_id: int = 1,
     sequence: int = 1,
     entry_type_code: int = 1,
+    request_flag: int = 0,
+    start_time: int | None = None,
 ) -> FlowsheetEntry:
     return FlowsheetEntry(
         id=id,
@@ -33,6 +35,8 @@ def make_flowsheet_entry(
         show_id=show_id,
         sequence=sequence,
         entry_type_code=entry_type_code,
+        request_flag=request_flag,
+        start_time=start_time,
     )
 
 
