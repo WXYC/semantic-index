@@ -43,7 +43,7 @@ def fixture_dump():
 class TestFullPipeline:
     def test_pipeline_runs_without_error(self, fixture_dump):
         """The full pipeline completes without exceptions on the fixture."""
-        from run_phase0 import main
+        from run_pipeline import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1"])
@@ -52,7 +52,7 @@ class TestFullPipeline:
         """The output GEXF file is valid XML loadable by NetworkX."""
         import networkx as nx
 
-        from run_phase0 import main
+        from run_pipeline import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1"])
