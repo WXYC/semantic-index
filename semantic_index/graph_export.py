@@ -29,7 +29,7 @@ def build_graph(
     graph: nx.Graph = nx.Graph()
 
     for edge in edges:
-        if edge.raw_count < min_count:
+        if edge.raw_count < min_count or edge.pmi <= 0:
             continue
 
         for name in (edge.source, edge.target):

@@ -66,6 +66,21 @@ class TestBuildGraph:
         assert graph.number_of_nodes() == 0
         assert graph.number_of_edges() == 0
 
+    def test_negative_pmi_edges_excluded(self):
+        """Negative PMI means artists co-occur less than chance — not a useful edge."""
+        edges = [
+            PmiEdge(source="A", target="B", raw_count=5, pmi=3.0),
+            PmiEdge(source="A", target="C", raw_count=2, pmi=-1.5),
+        ]
+        stats = {
+            "A": ArtistStats(canonical_name="A", total_plays=10),
+            "B": ArtistStats(canonical_name="B", total_plays=5),
+            "C": ArtistStats(canonical_name="C", total_plays=5),
+        }
+        graph = build_graph(edges, stats, min_count=1)
+        assert graph.number_of_edges() == 1
+        assert not graph.has_edge("A", "C")
+
 
 class TestExportGexf:
     def test_writes_valid_xml(self):
