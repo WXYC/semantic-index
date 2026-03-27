@@ -1,0 +1,65 @@
+"""Data models for the semantic index pipeline."""
+
+from pydantic import BaseModel
+
+
+class FlowsheetEntry(BaseModel):
+    """A music entry from FLOWSHEET_ENTRY_PROD (type code < 7)."""
+
+    id: int
+    artist_name: str
+    song_title: str
+    release_title: str
+    library_release_id: int
+    label_name: str
+    show_id: int
+    sequence: int
+    entry_type_code: int
+
+
+class LibraryRelease(BaseModel):
+    """A row from LIBRARY_RELEASE — only the fields needed for Tier 1 resolution."""
+
+    id: int
+    library_code_id: int
+
+
+class LibraryCode(BaseModel):
+    """A row from LIBRARY_CODE — canonical artist name and genre."""
+
+    id: int
+    genre_id: int
+    presentation_name: str
+
+
+class ResolvedEntry(BaseModel):
+    """A FlowsheetEntry after artist name resolution."""
+
+    entry: FlowsheetEntry
+    canonical_name: str
+    resolution_method: str  # "catalog" or "raw"
+
+
+class AdjacencyPair(BaseModel):
+    """Two consecutive artists within a radio show."""
+
+    source: str
+    target: str
+    show_id: int
+
+
+class ArtistStats(BaseModel):
+    """Aggregated statistics for a single artist."""
+
+    canonical_name: str
+    total_plays: int
+    genre: str | None = None
+
+
+class PmiEdge(BaseModel):
+    """A weighted edge between two artists."""
+
+    source: str
+    target: str
+    raw_count: int
+    pmi: float
