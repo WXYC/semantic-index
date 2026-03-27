@@ -15,6 +15,8 @@ class FlowsheetEntry(BaseModel):
     show_id: int
     sequence: int
     entry_type_code: int
+    request_flag: int = 0
+    start_time: int | None = None
 
 
 class LibraryRelease(BaseModel):
@@ -48,12 +50,25 @@ class AdjacencyPair(BaseModel):
     show_id: int
 
 
+class RadioShow(BaseModel):
+    """A row from FLOWSHEET_RADIO_SHOW_PROD."""
+
+    id: int
+    dj_id: int | None = None
+    dj_name: str = ""
+
+
 class ArtistStats(BaseModel):
     """Aggregated statistics for a single artist."""
 
     canonical_name: str
     total_plays: int
     genre: str | None = None
+    active_first_year: int | None = None
+    active_last_year: int | None = None
+    dj_count: int = 0
+    request_ratio: float = 0.0
+    show_count: int = 0
 
 
 class PmiEdge(BaseModel):
