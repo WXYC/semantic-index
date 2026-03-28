@@ -1,18 +1,26 @@
-"""Artist name resolution via library catalog.
+"""Artist name resolution via library catalog and Discogs.
 
 Resolution strategies (in order of precedence):
 1. FK chain: LIBRARY_RELEASE_ID → LIBRARY_RELEASE → LIBRARY_CODE → PRESENTATION_NAME
 2. Name match: exact case-insensitive match against LIBRARY_CODE.PRESENTATION_NAME
-3. Fuzzy match: Jaro-Winkler similarity against catalog names (with ambiguity guard)
-4. Raw: lowercased, stripped artist name as-is
+3. Normalized match: strip "The ", "&" → "and", bracket removal, slash/aka alias splitting
+4. Fuzzy match: Jaro-Winkler similarity against catalog names (with ambiguity guard)
+5. Discogs: search via DiscogsClient (optional)
+6. Raw: lowercased, stripped artist name as-is
 """
+
+from __future__ import annotations
 
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from rapidfuzz.distance import JaroWinkler
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
+
+if TYPE_CHECKING:
+    from semantic_index.discogs_client import DiscogsClient
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +75,16 @@ class ArtistResolver:
     Args:
         releases: LIBRARY_RELEASE rows (only id and library_code_id needed).
         codes: LIBRARY_CODE rows (only id, genre_id, and presentation_name needed).
+        discogs_client: Optional DiscogsClient for Tier 3 resolution.
     """
 
     def __init__(
         self,
         releases: list[LibraryRelease],
         codes: list[LibraryCode],
+        discogs_client: DiscogsClient | None = None,
     ) -> None:
+        self._discogs_client = discogs_client
         self._release_to_code: dict[int, int] = {r.id: r.library_code_id for r in releases}
         self._code_to_name: dict[int, str] = {c.id: c.presentation_name for c in codes}
         self._code_to_genre: dict[int, int] = {c.id: c.genre_id for c in codes}
@@ -153,7 +164,19 @@ class ArtistResolver:
                 resolution_method="fuzzy",
             )
 
-        # Strategy 5: Raw fallback
+        # Strategy 5: Discogs resolution (optional)
+        if self._discogs_client is not None:
+            discogs_result = self._discogs_client.search_artist(
+                entry.artist_name.strip(), entry.release_title.strip() or None
+            )
+            if discogs_result is not None:
+                return ResolvedEntry(
+                    entry=entry,
+                    canonical_name=discogs_result.artist_name,
+                    resolution_method="discogs",
+                )
+
+        # Strategy 6: Raw fallback
         return ResolvedEntry(
             entry=entry,
             canonical_name=key,
