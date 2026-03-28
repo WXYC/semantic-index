@@ -27,6 +27,13 @@ class TestSchemaCreation:
         assert "artist" in tables
         assert "dj_transition" in tables
         assert "cross_reference" in tables
+        assert "artist_style" in tables
+        assert "artist_personnel" in tables
+        assert "artist_label" in tables
+        assert "shared_personnel" in tables
+        assert "shared_style" in tables
+        assert "label_family" in tables
+        assert "compilation" in tables
 
     def test_indexes_exist(self):
         conn, _ = _export_and_connect(artist_stats={}, pmi_edges=[], xref_edges=[])

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Pipeline CLI: extract adjacency pairs, cross-references, and PMI from a tubafrenzy SQL dump.
+"""Pipeline CLI: extract adjacency pairs, cross-references, PMI, and Discogs enrichment.
 
 Usage:
     python run_pipeline.py /path/to/wxycmusic.sql [--output-dir output/] [--min-count 2]
+    python run_pipeline.py dump.sql --discogs-cache-dsn postgresql://... --api-base-url https://...
 """
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -14,6 +16,14 @@ from pathlib import Path
 from semantic_index.adjacency import extract_adjacency_pairs
 from semantic_index.artist_resolver import ArtistResolver
 from semantic_index.cross_reference import CrossReferenceExtractor
+from semantic_index.discogs_client import DiscogsClient
+from semantic_index.discogs_edges import (
+    extract_compilation_coappearance,
+    extract_label_family,
+    extract_shared_personnel,
+    extract_shared_styles,
+)
+from semantic_index.discogs_enrichment import DiscogsEnricher
 from semantic_index.graph_export import build_graph, export_gexf, print_top_neighbors
 from semantic_index.models import (
     FlowsheetEntry,
@@ -59,6 +69,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     parser.add_argument("--no-sqlite", action="store_true", help="Skip SQLite database export")
+    parser.add_argument(
+        "--discogs-cache-dsn",
+        default=os.environ.get("DATABASE_URL_DISCOGS"),
+        help="PostgreSQL DSN for discogs-cache (default: DATABASE_URL_DISCOGS env var)",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default="https://library-metadata-lookup-staging.up.railway.app",
+        help="Base URL for library-metadata-lookup API",
+    )
+    parser.add_argument("--skip-enrichment", action="store_true", help="Skip Discogs enrichment")
+    parser.add_argument(
+        "--min-jaccard", type=float, default=0.1, help="Minimum Jaccard for shared style edges"
+    )
+    parser.add_argument(
+        "--max-label-artists",
+        type=int,
+        default=500,
+        help="Exclude labels with more than N artists from label family edges",
+    )
     return parser.parse_args(argv)
 
 
@@ -197,10 +227,44 @@ def run(args: argparse.Namespace) -> None:
 
     xref_edges = lc_xrefs + rel_xrefs
 
-    # 10. Print top neighbors for spotlight artists
+    # 10. Discogs enrichment (optional)
+    enrichments = {}
+    sp_edges = []
+    ss_edges = []
+    lf_edges = []
+    comp_edges = []
+
+    if not args.skip_enrichment and (args.discogs_cache_dsn or args.api_base_url):
+        log.info("Setting up Discogs client...")
+        discogs_client = DiscogsClient(
+            cache_dsn=args.discogs_cache_dsn,
+            api_base_url=args.api_base_url,
+        )
+
+        # Enrich all canonical artists
+        log.info("Enriching artists with Discogs metadata...")
+        enricher = DiscogsEnricher(discogs_client)
+        artist_ids = dict.fromkeys(artist_stats)
+        enrichments = enricher.enrich_batch(artist_ids)
+        log.info("  %d artists enriched", len(enrichments))
+
+        # Extract Discogs-derived edges
+        log.info("Extracting Discogs-derived edges...")
+        sp_edges = extract_shared_personnel(enrichments)
+        log.info("  %d shared personnel edges", len(sp_edges))
+        ss_edges = extract_shared_styles(enrichments, min_jaccard=args.min_jaccard)
+        log.info("  %d shared style edges", len(ss_edges))
+        lf_edges = extract_label_family(enrichments, max_label_artists=args.max_label_artists)
+        log.info("  %d label family edges", len(lf_edges))
+        comp_edges = extract_compilation_coappearance(enrichments)
+        log.info("  %d compilation edges", len(comp_edges))
+    elif not args.skip_enrichment:
+        log.warning("Skipping Discogs enrichment: no cache DSN or API URL available")
+
+    # 11. Print top neighbors for spotlight artists
     print_top_neighbors(edges, SPOTLIGHT_ARTISTS, n=20)
 
-    # 11. Build graph and export GEXF
+    # 12. Build graph and export GEXF
     log.info("Building graph (min_count=%d)...", args.min_count)
     graph = build_graph(edges, artist_stats, min_count=args.min_count)
     log.info("  %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
@@ -209,7 +273,7 @@ def run(args: argparse.Namespace) -> None:
     export_gexf(graph, str(gexf_path))
     log.info("GEXF written to %s", gexf_path)
 
-    # 12. Export SQLite database
+    # 13. Export SQLite database
     sqlite_path = output_dir / "wxyc_artist_graph.db"
     if not args.no_sqlite:
         log.info("Exporting SQLite database...")
@@ -219,6 +283,11 @@ def run(args: argparse.Namespace) -> None:
             pmi_edges=edges,
             xref_edges=xref_edges,
             min_count=args.min_count,
+            enrichments=enrichments,
+            shared_personnel_edges=sp_edges,
+            shared_style_edges=ss_edges,
+            label_family_edges=lf_edges,
+            compilation_edges=comp_edges,
         )
         log.info("SQLite written to %s", sqlite_path)
 
@@ -240,6 +309,12 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Adjacency pairs:         {len(pairs):>12,}")
     print(f"  Unique PMI edges:        {len(edges):>12,}")
     print(f"  Cross-ref edges:         {len(xref_edges):>12,}")
+    if enrichments:
+        print(f"  Enriched artists:        {len(enrichments):>12,}")
+        print(f"  Shared personnel edges:  {len(sp_edges):>12,}")
+        print(f"  Shared style edges:      {len(ss_edges):>12,}")
+        print(f"  Label family edges:      {len(lf_edges):>12,}")
+        print(f"  Compilation edges:       {len(comp_edges):>12,}")
     print(f"  Graph nodes:             {graph.number_of_nodes():>12,}")
     print(f"  Graph edges:             {graph.number_of_edges():>12,}")
     print(f"  GEXF output:             {gexf_path}")

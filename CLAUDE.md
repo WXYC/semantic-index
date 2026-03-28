@@ -4,12 +4,13 @@ Builds a semantic artist graph from WXYC DJ transition data. DJs curate transiti
 
 ## Architecture
 
-A batch pipeline that parses a tubafrenzy MySQL dump, extracts artist adjacency pairs from flowsheet data, computes PMI, and exports a GEXF graph and SQLite database.
+A batch pipeline that parses a tubafrenzy MySQL dump, resolves artist names via catalog and Discogs, extracts adjacency pairs and cross-reference edges, computes PMI, enriches artists with Discogs metadata, computes Discogs-derived edges, and exports a GEXF graph and SQLite database.
 
 ```
-SQL dump → sql_parser → models → artist_resolver → adjacency → pmi → graph_export → GEXF
-                                                  → cross_reference →──────────────→ SQLite
-                                                  → node_attributes →──────────────→
+SQL dump → sql_parser → artist_resolver → adjacency → pmi ──────────────→ graph_export → GEXF
+                       → cross_reference ────────────────────────────────→ sqlite_export → SQLite
+                       → node_attributes ────────────────────────────────→
+         → discogs_client → discogs_enrichment → discogs_edges ─────────→
 ```
 
 ### Modules
@@ -17,14 +18,17 @@ SQL dump → sql_parser → models → artist_resolver → adjacency → pmi →
 | Module | Responsibility |
 |--------|---------------|
 | `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Streaming interface for large files. |
-| `semantic_index/models.py` | Pydantic data models for flowsheet entries, library records, adjacency pairs, PMI edges. |
-| `semantic_index/artist_resolver.py` | Tier 1 artist name resolution via catalog FK chain (LIBRARY_RELEASE → LIBRARY_CODE). |
+| `semantic_index/models.py` | Pydantic data models for all pipeline entities. |
+| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: FK chain, name match, normalized, fuzzy (Jaro-Winkler), Discogs, raw fallback. |
 | `semantic_index/adjacency.py` | Extract consecutive artist pairs within radio shows. |
 | `semantic_index/pmi.py` | Compute Pointwise Mutual Information for artist co-occurrences. |
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
+| `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
+| `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
+| `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
-| `semantic_index/sqlite_export.py` | Build and export SQLite graph database. |
+| `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
