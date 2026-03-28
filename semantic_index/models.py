@@ -174,3 +174,41 @@ class ArtistEnrichment(BaseModel):
     personnel: list[PersonnelCredit] = []
     labels: list[LabelInfo] = []
     compilation_appearances: list[CompilationAppearance] = []
+
+
+# --- Discogs-derived edge models ---
+
+
+class SharedPersonnelEdge(BaseModel):
+    """Edge between two artists who share credited musicians."""
+
+    artist_a: str
+    artist_b: str
+    shared_count: int
+    shared_names: list[str]
+
+
+class SharedStyleEdge(BaseModel):
+    """Edge between two artists with overlapping Discogs style tags."""
+
+    artist_a: str
+    artist_b: str
+    jaccard: float
+    shared_tags: list[str]
+
+
+class LabelFamilyEdge(BaseModel):
+    """Edge between two artists who share a record label."""
+
+    artist_a: str
+    artist_b: str
+    shared_labels: list[str]
+
+
+class CompilationEdge(BaseModel):
+    """Edge between two artists who appear on the same compilation."""
+
+    artist_a: str
+    artist_b: str
+    compilation_count: int
+    compilation_titles: list[str]
