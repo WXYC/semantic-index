@@ -138,3 +138,39 @@ class DiscogsSearchResult(BaseModel):
     artist_id: int | None = None
     release_id: int | None = None
     confidence: float = 0.0
+
+
+# --- Enrichment models ---
+
+
+class PersonnelCredit(BaseModel):
+    """A credited musician across an artist's releases."""
+
+    name: str
+    roles: list[str] = []
+
+
+class LabelInfo(BaseModel):
+    """A label an artist has released on."""
+
+    name: str
+    label_id: int | None = None
+
+
+class CompilationAppearance(BaseModel):
+    """An artist's appearance on a compilation release."""
+
+    release_id: int
+    release_title: str
+    other_artists: list[str] = []
+
+
+class ArtistEnrichment(BaseModel):
+    """Discogs enrichment data for a single canonical artist."""
+
+    canonical_name: str
+    discogs_artist_id: int | None = None
+    styles: list[str] = []
+    personnel: list[PersonnelCredit] = []
+    labels: list[LabelInfo] = []
+    compilation_appearances: list[CompilationAppearance] = []

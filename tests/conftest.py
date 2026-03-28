@@ -5,10 +5,18 @@ Uses WXYC example artists from the canonical data in wxyc-shared.
 
 from semantic_index.models import (
     AdjacencyPair,
+    ArtistEnrichment,
+    CompilationAppearance,
     CrossReferenceEdge,
+    DiscogsCredit,
+    DiscogsLabel,
+    DiscogsRelease,
+    DiscogsTrack,
     FlowsheetEntry,
+    LabelInfo,
     LibraryCode,
     LibraryRelease,
+    PersonnelCredit,
     ResolvedEntry,
 )
 
@@ -87,4 +95,66 @@ def make_cross_reference_edge(
         artist_b=artist_b,
         comment=comment,
         source=source,
+    )
+
+
+def make_discogs_release(
+    release_id: int = 12345,
+    title: str = "Confield",
+    artist_name: str = "Autechre",
+    artist_id: int | None = 42,
+    year: int | None = 2001,
+    styles: list[str] | None = None,
+    artists: list[DiscogsCredit] | None = None,
+    extra_artists: list[DiscogsCredit] | None = None,
+    labels: list[DiscogsLabel] | None = None,
+    tracklist: list[DiscogsTrack] | None = None,
+) -> DiscogsRelease:
+    return DiscogsRelease(
+        release_id=release_id,
+        title=title,
+        artist_name=artist_name,
+        artist_id=artist_id,
+        year=year,
+        styles=styles if styles is not None else ["IDM", "Abstract"],
+        artists=artists
+        if artists is not None
+        else [DiscogsCredit(name=artist_name, artist_id=artist_id)],
+        extra_artists=extra_artists if extra_artists is not None else [],
+        labels=labels
+        if labels is not None
+        else [DiscogsLabel(name="Warp Records", label_id=100, catno="WARPCD85")],
+        tracklist=tracklist
+        if tracklist is not None
+        else [DiscogsTrack(position="1", title="VI Scose Poise")],
+    )
+
+
+def make_artist_enrichment(
+    canonical_name: str = "Autechre",
+    discogs_artist_id: int | None = 42,
+    styles: list[str] | None = None,
+    personnel: list[PersonnelCredit] | None = None,
+    labels: list[LabelInfo] | None = None,
+    compilation_appearances: list[CompilationAppearance] | None = None,
+) -> ArtistEnrichment:
+    return ArtistEnrichment(
+        canonical_name=canonical_name,
+        discogs_artist_id=discogs_artist_id,
+        styles=styles if styles is not None else ["IDM", "Abstract"],
+        personnel=personnel if personnel is not None else [],
+        labels=labels if labels is not None else [LabelInfo(name="Warp Records", label_id=100)],
+        compilation_appearances=compilation_appearances
+        if compilation_appearances is not None
+        else [],
+    )
+
+
+def make_personnel_credit(
+    name: str = "Rob Brown",
+    roles: list[str] | None = None,
+) -> PersonnelCredit:
+    return PersonnelCredit(
+        name=name,
+        roles=roles if roles is not None else ["Written-By"],
     )
