@@ -1,6 +1,9 @@
-"""Tests for Tier 1 artist name resolution."""
+"""Tests for artist name resolution."""
+
+from unittest.mock import MagicMock
 
 from semantic_index.artist_resolver import ArtistResolver
+from semantic_index.models import DiscogsSearchResult
 from tests.conftest import make_flowsheet_entry, make_library_code, make_library_release
 
 
@@ -246,3 +249,82 @@ class TestArtistResolver:
     def test_genre_lookup_returns_none_for_unknown(self):
         resolver = self._make_resolver()
         assert resolver.get_genre_id(999) is None
+
+
+class TestDiscogsResolution:
+    """Tests for Tier 3 Discogs-based resolution."""
+
+    def _make_resolver(self, releases=None, codes=None, discogs_client=None):
+        return ArtistResolver(
+            releases=releases or [], codes=codes or [], discogs_client=discogs_client
+        )
+
+    def test_discogs_resolves_unknown_artist(self):
+        mock_client = MagicMock()
+        mock_client.search_artist.return_value = DiscogsSearchResult(
+            artist_name="Ty Segall", artist_id=12345, confidence=0.95
+        )
+        resolver = self._make_resolver(discogs_client=mock_client)
+
+        entry = make_flowsheet_entry(library_release_id=0, artist_name="Ty Segall")
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "Ty Segall"
+        assert resolved.resolution_method == "discogs"
+
+    def test_discogs_no_match_falls_to_raw(self):
+        mock_client = MagicMock()
+        mock_client.search_artist.return_value = None
+        resolver = self._make_resolver(discogs_client=mock_client)
+
+        entry = make_flowsheet_entry(library_release_id=0, artist_name="ZZZZZ Unknown")
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "raw"
+
+    def test_discogs_skipped_when_client_is_none(self):
+        resolver = self._make_resolver(discogs_client=None)
+
+        entry = make_flowsheet_entry(library_release_id=0, artist_name="Ty Segall")
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "raw"
+
+    def test_catalog_takes_precedence_over_discogs(self):
+        """FK chain should resolve before Discogs is even tried."""
+        mock_client = MagicMock()
+        release = make_library_release(id=100, library_code_id=200)
+        code = make_library_code(id=200, presentation_name="Autechre")
+        resolver = self._make_resolver(releases=[release], codes=[code], discogs_client=mock_client)
+
+        entry = make_flowsheet_entry(library_release_id=100, artist_name="Autechre")
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "catalog"
+        mock_client.search_artist.assert_not_called()
+
+    def test_name_match_takes_precedence_over_discogs(self):
+        mock_client = MagicMock()
+        code = make_library_code(id=200, presentation_name="Stereolab")
+        resolver = self._make_resolver(codes=[code], discogs_client=mock_client)
+
+        entry = make_flowsheet_entry(library_release_id=0, artist_name="Stereolab")
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "name_match"
+        mock_client.search_artist.assert_not_called()
+
+    def test_discogs_passes_release_title(self):
+        """The resolver should pass release_title to help Discogs disambiguate."""
+        mock_client = MagicMock()
+        mock_client.search_artist.return_value = DiscogsSearchResult(
+            artist_name="Omar S", artist_id=99, confidence=0.9
+        )
+        resolver = self._make_resolver(discogs_client=mock_client)
+
+        entry = make_flowsheet_entry(
+            library_release_id=0, artist_name="Omar S", release_title="Just Ask The Lonely"
+        )
+        resolver.resolve(entry)
+
+        mock_client.search_artist.assert_called_once_with("Omar S", "Just Ask The Lonely")
