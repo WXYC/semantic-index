@@ -87,3 +87,54 @@ class CrossReferenceEdge(BaseModel):
     artist_b: str  # canonical name
     comment: str
     source: str  # "library_code" or "release"
+
+
+# --- Discogs models ---
+
+
+class DiscogsCredit(BaseModel):
+    """A personnel credit on a Discogs release."""
+
+    name: str
+    artist_id: int | None = None
+    role: str | None = None
+
+
+class DiscogsLabel(BaseModel):
+    """A label credit on a Discogs release."""
+
+    name: str
+    label_id: int | None = None
+    catno: str | None = None
+
+
+class DiscogsTrack(BaseModel):
+    """A track on a Discogs release (for compilations)."""
+
+    position: str
+    title: str
+    artists: list[str] = []
+
+
+class DiscogsRelease(BaseModel):
+    """Discogs release metadata for enrichment."""
+
+    release_id: int
+    title: str
+    artist_name: str
+    artist_id: int | None = None
+    year: int | None = None
+    styles: list[str] = []
+    artists: list[DiscogsCredit] = []
+    extra_artists: list[DiscogsCredit] = []
+    labels: list[DiscogsLabel] = []
+    tracklist: list[DiscogsTrack] = []
+
+
+class DiscogsSearchResult(BaseModel):
+    """A search result from Discogs."""
+
+    artist_name: str
+    artist_id: int | None = None
+    release_id: int | None = None
+    confidence: float = 0.0
