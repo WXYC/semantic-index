@@ -95,6 +95,34 @@ class DiscogsClient:
         # Try API
         return self._get_release_api(release_id)
 
+    def get_releases_for_artist(self, artist_name: str) -> list[int]:
+        """Get release IDs for an artist from the cache.
+
+        Args:
+            artist_name: The artist name to search for (case-insensitive).
+
+        Returns:
+            List of distinct release IDs where this artist is a primary credit.
+        """
+        conn = self._get_cache_conn()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT release_id
+                FROM release_artist
+                WHERE lower(artist_name) = lower(%s) AND extra = 0
+                """,
+                (artist_name,),
+            ).fetchall()
+            return [row[0] for row in rows]
+        except Exception:
+            logger.warning(
+                "Cache get_releases_for_artist failed for %r", artist_name, exc_info=True
+            )
+            return []
+
     def _search_artist_cache(self, name: str) -> DiscogsSearchResult | None:
         """Search for an artist in the discogs-cache PostgreSQL."""
         conn = self._get_cache_conn()
@@ -185,10 +213,10 @@ class DiscogsClient:
                 (release_id,),
             ).fetchall()
 
-            conn.execute(
-                "SELECT artist_name FROM release_track_artist WHERE release_id = %s",
+            track_artist_rows = conn.execute(
+                "SELECT release_id, artist_name FROM release_track_artist WHERE release_id = %s",
                 (release_id,),
-            ).fetchall()  # TODO: use for compilation track artists in PR 3
+            ).fetchall()
 
             # Build model
             main_artists = [
@@ -201,6 +229,12 @@ class DiscogsClient:
             ]
             labels = [DiscogsLabel(name=r[1], label_id=r[0], catno=r[2]) for r in label_rows]
             tracks = [DiscogsTrack(position=r[0] or "", title=r[1] or "") for r in track_rows]
+
+            # Attach per-track artists for compilation detection
+            track_artists_set = {r[1] for r in track_artist_rows}
+            if track_artists_set:
+                for track in tracks:
+                    track.artists = list(track_artists_set)
 
             artist_name = main_artists[0].name if main_artists else ""
             artist_id = main_artists[0].artist_id if main_artists else None
