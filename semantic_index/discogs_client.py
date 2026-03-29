@@ -98,21 +98,37 @@ class DiscogsClient:
     def get_releases_for_artist(self, artist_name: str) -> list[int]:
         """Get release IDs for an artist from the cache.
 
+        Tries release_artist first (primary credits), then falls back to
+        release_track_artist (per-track credits) if no results found.
+
         Args:
             artist_name: The artist name to search for (case-insensitive).
 
         Returns:
-            List of distinct release IDs where this artist is a primary credit.
+            List of distinct release IDs where this artist appears.
         """
         conn = self._get_cache_conn()
         if conn is None:
             return []
         try:
+            # Try primary artist credits first
             rows = conn.execute(
                 """
                 SELECT DISTINCT release_id
                 FROM release_artist
                 WHERE lower(artist_name) = lower(%s) AND extra = 0
+                """,
+                (artist_name,),
+            ).fetchall()
+            if rows:
+                return [row[0] for row in rows]
+
+            # Fall back to per-track credits
+            rows = conn.execute(
+                """
+                SELECT DISTINCT release_id
+                FROM release_track_artist
+                WHERE lower(artist_name) = lower(%s)
                 """,
                 (artist_name,),
             ).fetchall()
@@ -124,11 +140,15 @@ class DiscogsClient:
             return []
 
     def _search_artist_cache(self, name: str) -> DiscogsSearchResult | None:
-        """Search for an artist in the discogs-cache PostgreSQL."""
+        """Search for an artist in the discogs-cache PostgreSQL.
+
+        Tries release_artist first, then falls back to release_track_artist.
+        """
         conn = self._get_cache_conn()
         if conn is None:
             return None
         try:
+            # Try primary artist credits
             rows = conn.execute(
                 """
                 SELECT DISTINCT ra.artist_id, ra.artist_name
@@ -142,6 +162,22 @@ class DiscogsClient:
                 return DiscogsSearchResult(
                     artist_name=rows[0][1],
                     artist_id=rows[0][0],
+                )
+
+            # Fall back to per-track credits
+            rows = conn.execute(
+                """
+                SELECT DISTINCT rta.artist_name
+                FROM release_track_artist rta
+                WHERE lower(rta.artist_name) = lower(%s)
+                LIMIT 1
+                """,
+                (name,),
+            ).fetchall()
+            if rows:
+                return DiscogsSearchResult(
+                    artist_name=rows[0][0],
+                    artist_id=None,
                 )
             return None
         except Exception:
