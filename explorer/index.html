@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WXYC Semantic Graph Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; background: #0a0a0a; color: #e0e0e0; overflow: hidden; }
+
+  #controls {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    padding: 12px 16px; background: rgba(10,10,10,0.95); border-bottom: 1px solid #333;
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  #controls input[type="text"] {
+    background: #1a1a1a; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px;
+    border-radius: 4px; font-family: inherit; font-size: 13px; width: 260px;
+  }
+  #controls input:focus { outline: none; border-color: #6a9fb5; }
+  #controls select {
+    background: #1a1a1a; border: 1px solid #444; color: #e0e0e0; padding: 6px 8px;
+    border-radius: 4px; font-family: inherit; font-size: 12px;
+  }
+  #controls label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  #status { font-size: 11px; color: #666; margin-left: auto; }
+  .title { font-size: 14px; font-weight: 600; color: #6a9fb5; letter-spacing: 1px; }
+
+  #tooltip {
+    position: fixed; background: rgba(20,20,20,0.95); border: 1px solid #444;
+    padding: 8px 12px; border-radius: 4px; font-size: 11px; pointer-events: none;
+    display: none; z-index: 20; max-width: 300px;
+  }
+  #tooltip .name { font-size: 13px; font-weight: 600; color: #e0e0e0; }
+  #tooltip .meta { color: #888; margin-top: 2px; }
+
+  svg { cursor: grab; }
+  svg:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <span class="title">WXYC</span>
+  <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
+  <div>
+    <label>Edge type</label>
+    <select id="edgeType">
+      <option value="djTransition">DJ Transitions</option>
+      <option value="sharedPersonnel">Shared Personnel</option>
+      <option value="sharedStyle">Shared Style</option>
+      <option value="labelFamily">Label Family</option>
+      <option value="compilation">Compilation</option>
+      <option value="crossReference">Cross-Reference</option>
+    </select>
+  </div>
+  <div>
+    <label>Depth</label>
+    <select id="depth">
+      <option value="1">1 hop</option>
+      <option value="2" selected>2 hops</option>
+    </select>
+  </div>
+  <div>
+    <label>Limit</label>
+    <select id="neighborLimit">
+      <option value="5">5</option>
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+      <option value="50">50</option>
+    </select>
+  </div>
+  <span id="status"></span>
+</div>
+
+<div id="tooltip">
+  <div class="name"></div>
+  <div class="meta"></div>
+</div>
+
+<svg id="graph"></svg>
+
+<script>
+const API_BASE = window.location.hostname === 'localhost' || window.location.protocol === 'file:'
+  ? 'http://localhost:8000'
+  : '';  // Same origin in production
+
+const GENRE_COLORS = {
+  'Electronic': '#4fc3f7',
+  'Rock': '#ef5350',
+  'Jazz': '#ffd54f',
+  'Hiphop': '#ab47bc',
+  'Classical': '#66bb6a',
+  'Africa': '#ff7043',
+  'Reggae': '#26a69a',
+  'Latin': '#ec407a',
+  'Blues': '#5c6bc0',
+  'Asia': '#8d6e63',
+  'OCS': '#78909c',
+  'Spoken': '#bdbdbd',
+  'Comedy': '#fff176',
+  'Soundtracks': '#a1887f',
+};
+const DEFAULT_COLOR = '#555';
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+
+const svg = d3.select('#graph')
+  .attr('width', width)
+  .attr('height', height);
+
+const g = svg.append('g');
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.1, 8])
+  .on('zoom', (e) => g.attr('transform', e.transform));
+svg.call(zoom);
+
+let simulation;
+let nodes = [];
+let links = [];
+let nodeMap = new Map();
+
+const linkGroup = g.append('g').attr('class', 'links');
+const nodeGroup = g.append('g').attr('class', 'nodes');
+const labelGroup = g.append('g').attr('class', 'labels');
+
+const tooltip = document.getElementById('tooltip');
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+async function api(path, params = {}) {
+  const url = new URL(path, API_BASE);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+function getColor(genre) {
+  return GENRE_COLORS[genre] || DEFAULT_COLOR;
+}
+
+function nodeRadius(plays) {
+  return Math.max(3, Math.min(20, Math.sqrt(plays || 1) * 0.8));
+}
+
+function linkWidth(weight) {
+  return Math.max(0.5, Math.min(5, Math.abs(weight) * 0.5));
+}
+
+async function loadNeighborhood(artistId, artistName, depth = 2) {
+  setStatus(`Loading ${artistName}...`);
+
+  const edgeType = document.getElementById('edgeType').value;
+  const limit = parseInt(document.getElementById('neighborLimit').value);
+
+  // Fetch neighbors
+  const data = await api(`/graph/artists/${artistId}/neighbors`, {
+    type: edgeType,
+    limit: limit,
+  });
+
+  if (!data || !data.neighbors) {
+    setStatus(`No neighbors found for ${artistName}`);
+    return;
+  }
+
+  // Add center node if not present
+  if (!nodeMap.has(artistId)) {
+    const center = data.artist || { id: artistId, canonical_name: artistName, total_plays: 0 };
+    center.isCenter = true;
+    nodes.push(center);
+    nodeMap.set(artistId, center);
+  } else {
+    nodeMap.get(artistId).isCenter = true;
+  }
+
+  // Add neighbor nodes and links
+  for (const n of data.neighbors) {
+    const neighbor = n.artist;
+    if (!nodeMap.has(neighbor.id)) {
+      nodes.push(neighbor);
+      nodeMap.set(neighbor.id, neighbor);
+    }
+    links.push({
+      source: artistId,
+      target: neighbor.id,
+      weight: n.weight || 1,
+      edgeType: data.edge_type || edgeType,
+    });
+  }
+
+  // Depth 2: fetch neighbors of neighbors
+  if (depth >= 2) {
+    const secondHopIds = data.neighbors.map(n => n.artist.id);
+    const secondHopLimit = Math.max(3, Math.floor(limit / 2));
+    const promises = secondHopIds.slice(0, 10).map(id =>
+      api(`/graph/artists/${id}/neighbors`, { type: edgeType, limit: secondHopLimit })
+    );
+    const results = await Promise.all(promises);
+    for (const res of results) {
+      if (!res || !res.neighbors) continue;
+      const sourceId = res.artist.id;
+      for (const n of res.neighbors) {
+        if (!nodeMap.has(n.artist.id)) {
+          nodes.push(n.artist);
+          nodeMap.set(n.artist.id, n.artist);
+        }
+        links.push({
+          source: sourceId,
+          target: n.artist.id,
+          weight: n.weight || 1,
+          edgeType: res.edge_type || edgeType,
+        });
+      }
+    }
+  }
+
+  setStatus(`${nodes.length} artists, ${links.length} edges`);
+  render();
+}
+
+function render() {
+  // Deduplicate links
+  const linkSet = new Set();
+  const dedupedLinks = [];
+  for (const l of links) {
+    const key = [Math.min(l.source, l.target), Math.max(l.source, l.target)].join('-');
+    if (!linkSet.has(key)) {
+      linkSet.add(key);
+      dedupedLinks.push(l);
+    }
+  }
+
+  // Stop existing simulation
+  if (simulation) simulation.stop();
+
+  // Create simulation
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(dedupedLinks).id(d => d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide().radius(d => nodeRadius(d.total_plays) + 2));
+
+  // Links
+  const link = linkGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
+  link.exit().remove();
+  const linkEnter = link.enter().append('line')
+    .attr('stroke', '#333')
+    .attr('stroke-opacity', 0.6)
+    .attr('stroke-width', d => linkWidth(d.weight));
+  const linkMerged = linkEnter.merge(link);
+
+  // Nodes
+  const node = nodeGroup.selectAll('circle').data(nodes, d => d.id);
+  node.exit().remove();
+  const nodeEnter = node.enter().append('circle')
+    .attr('r', d => nodeRadius(d.total_plays))
+    .attr('fill', d => getColor(d.genre))
+    .attr('stroke', d => d.isCenter ? '#fff' : 'none')
+    .attr('stroke-width', d => d.isCenter ? 2 : 0)
+    .style('cursor', 'pointer')
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      clearGraph();
+      loadNeighborhood(d.id, d.canonical_name, parseInt(document.getElementById('depth').value));
+    })
+    .on('mouseover', (e, d) => {
+      tooltip.style.display = 'block';
+      tooltip.querySelector('.name').textContent = d.canonical_name;
+      tooltip.querySelector('.meta').textContent =
+        `${d.genre || 'Unknown genre'} · ${d.total_plays} plays`;
+    })
+    .on('mousemove', (e) => {
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+    })
+    .on('mouseout', () => {
+      tooltip.style.display = 'none';
+    })
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+  const nodeMerged = nodeEnter.merge(node);
+
+  // Labels
+  const label = labelGroup.selectAll('text').data(nodes, d => d.id);
+  label.exit().remove();
+  const labelEnter = label.enter().append('text')
+    .text(d => d.canonical_name)
+    .attr('font-size', d => d.isCenter ? 12 : 10)
+    .attr('fill', d => d.isCenter ? '#fff' : '#999')
+    .attr('font-weight', d => d.isCenter ? 600 : 400)
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => -nodeRadius(d.total_plays) - 4)
+    .style('pointer-events', 'none');
+  const labelMerged = labelEnter.merge(label);
+
+  simulation.on('tick', () => {
+    linkMerged
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y);
+    nodeMerged
+      .attr('cx', d => d.x)
+      .attr('cy', d => d.y);
+    labelMerged
+      .attr('x', d => d.x)
+      .attr('y', d => d.y - nodeRadius(d.total_plays) - 4);
+  });
+}
+
+function clearGraph() {
+  nodes = [];
+  links = [];
+  nodeMap.clear();
+  linkGroup.selectAll('*').remove();
+  nodeGroup.selectAll('*').remove();
+  labelGroup.selectAll('*').remove();
+  if (simulation) simulation.stop();
+}
+
+// Search with debounce
+let searchTimeout;
+const searchInput = document.getElementById('search');
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(async () => {
+    const q = searchInput.value.trim();
+    if (q.length < 2) return;
+    const data = await api('/graph/artists/search', { q, limit: 1 });
+    if (data && data.results && data.results.length > 0) {
+      const artist = data.results[0];
+      clearGraph();
+      loadNeighborhood(artist.id, artist.canonical_name, parseInt(document.getElementById('depth').value));
+      searchInput.value = artist.canonical_name;
+    }
+  }, 500);
+});
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    clearTimeout(searchTimeout);
+    searchInput.dispatchEvent(new Event('input'));
+  }
+});
+
+// Re-render when controls change
+document.getElementById('edgeType').addEventListener('change', () => {
+  const centerNode = nodes.find(n => n.isCenter);
+  if (centerNode) {
+    clearGraph();
+    loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
+  }
+});
+document.getElementById('depth').addEventListener('change', () => {
+  const centerNode = nodes.find(n => n.isCenter);
+  if (centerNode) {
+    clearGraph();
+    loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
+  }
+});
+document.getElementById('neighborLimit').addEventListener('change', () => {
+  const centerNode = nodes.find(n => n.isCenter);
+  if (centerNode) {
+    clearGraph();
+    loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
+  }
+});
+
+// Load Autechre by default
+(async () => {
+  const data = await api('/graph/artists/search', { q: 'Autechre', limit: 1 });
+  if (data && data.results && data.results.length > 0) {
+    const artist = data.results[0];
+    searchInput.value = artist.canonical_name;
+    loadNeighborhood(artist.id, artist.canonical_name, 2);
+  } else {
+    setStatus('API not available — start the server with: DB_PATH=output/wxyc_artist_graph.db python -m semantic_index.api');
+  }
+})();
+</script>
+</body>
+</html>
