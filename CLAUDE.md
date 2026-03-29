@@ -31,10 +31,10 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. |
-| `semantic_index/api/app.py` | FastAPI application factory with lifespan-managed aiosqlite connection. |
-| `semantic_index/api/config.py` | Pydantic Settings for DB_PATH and PORT via environment variables. |
-| `semantic_index/api/database.py` | aiosqlite connection helpers for the API layer. |
-| `semantic_index/api/models.py` | API response models: ArtistResponse, NeighborResponse, SearchResult, ExplainResponse. |
+| `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
+| `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, SearchResponse, NeighborsResponse, ExplainResponse). |
+| `semantic_index/api/routes.py` | Graph API query endpoints: search, neighbors by edge type, explain relationships between two artists. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -115,6 +115,29 @@ python run_pipeline.py /path/to/wxycmusic.sql [--output-dir output/] [--min-coun
 Output: `output/wxyc_artist_pmi.gexf` (Gephi graph) + `output/wxyc_artist_graph.db` (SQLite database).
 
 Use `--no-sqlite` to skip the SQLite export.
+
+## Graph API
+
+A read-only FastAPI service that queries the SQLite database produced by the pipeline.
+
+```bash
+uvicorn semantic_index.api.app:create_app --factory --app-dir . -- output/wxyc_artist_graph.db
+```
+
+Or programmatically:
+
+```python
+from semantic_index.api.app import create_app
+app = create_app("output/wxyc_artist_graph.db")
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
+| `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`. |
+| `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 
 ## Data
 

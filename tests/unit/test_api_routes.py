@@ -1,0 +1,352 @@
+"""Tests for Graph API query endpoints: search, neighbors, explain."""
+
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from semantic_index.api.app import create_app
+from semantic_index.models import (
+    ArtistStats,
+    CrossReferenceEdge,
+    PmiEdge,
+    SharedPersonnelEdge,
+    SharedStyleEdge,
+)
+from semantic_index.sqlite_export import export_sqlite
+
+
+def _build_fixture_db() -> str:
+    """Create a fixture SQLite database and return its path."""
+    path = tempfile.mktemp(suffix=".db")
+    stats = {
+        "Autechre": ArtistStats(
+            canonical_name="Autechre",
+            total_plays=50,
+            genre="Electronic",
+            active_first_year=2004,
+            active_last_year=2025,
+            dj_count=15,
+            request_ratio=0.1,
+            show_count=40,
+        ),
+        "Stereolab": ArtistStats(
+            canonical_name="Stereolab",
+            total_plays=30,
+            genre="Rock",
+            active_first_year=2003,
+            active_last_year=2024,
+            dj_count=10,
+            request_ratio=0.05,
+            show_count=25,
+        ),
+        "Cat Power": ArtistStats(
+            canonical_name="Cat Power",
+            total_plays=20,
+            genre="Rock",
+            active_first_year=2005,
+            active_last_year=2023,
+            dj_count=8,
+            request_ratio=0.02,
+            show_count=15,
+        ),
+        "Father John Misty": ArtistStats(
+            canonical_name="Father John Misty",
+            total_plays=15,
+            genre="Rock",
+            active_first_year=2013,
+            active_last_year=2025,
+            dj_count=5,
+            request_ratio=0.0,
+            show_count=10,
+        ),
+    }
+    pmi_edges = [
+        PmiEdge(source="Autechre", target="Stereolab", raw_count=5, pmi=3.0),
+        PmiEdge(source="Autechre", target="Cat Power", raw_count=3, pmi=1.5),
+        PmiEdge(source="Stereolab", target="Cat Power", raw_count=2, pmi=0.8),
+    ]
+    xref_edges = [
+        CrossReferenceEdge(
+            artist_a="Stereolab",
+            artist_b="Cat Power",
+            comment="See also",
+            source="library_code",
+        ),
+    ]
+    shared_personnel = [
+        SharedPersonnelEdge(
+            artist_a="Autechre",
+            artist_b="Stereolab",
+            shared_count=2,
+            shared_names=["Jim O'Rourke", "John McEntire"],
+        ),
+    ]
+    shared_styles = [
+        SharedStyleEdge(
+            artist_a="Autechre",
+            artist_b="Stereolab",
+            jaccard=0.5,
+            shared_tags=["Electronic", "Experimental"],
+        ),
+    ]
+    export_sqlite(
+        path,
+        artist_stats=stats,
+        pmi_edges=pmi_edges,
+        xref_edges=xref_edges,
+        min_count=1,
+        shared_personnel_edges=shared_personnel,
+        shared_style_edges=shared_styles,
+    )
+    return path
+
+
+@pytest.fixture(scope="module")
+def db_path() -> str:
+    return _build_fixture_db()
+
+
+@pytest.fixture(scope="module")
+def artist_ids(db_path: str) -> dict[str, int]:
+    """Return a mapping of canonical_name -> id from the fixture database."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    conn.close()
+    return {r["canonical_name"]: r["id"] for r in rows}
+
+
+@pytest_asyncio.fixture
+async def client(db_path: str) -> AsyncClient:
+    app = create_app(db_path)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+class TestSearch:
+    @pytest.mark.asyncio
+    async def test_search_by_exact_name(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/search", params={"q": "Autechre"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["results"]) == 1
+        assert data["results"][0]["canonical_name"] == "Autechre"
+        assert data["results"][0]["genre"] == "Electronic"
+        assert data["results"][0]["total_plays"] == 50
+
+    @pytest.mark.asyncio
+    async def test_search_case_insensitive(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/search", params={"q": "autechre"})
+        assert resp.status_code == 200
+        assert len(resp.json()["results"]) == 1
+        assert resp.json()["results"][0]["canonical_name"] == "Autechre"
+
+    @pytest.mark.asyncio
+    async def test_search_partial_match(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/search", params={"q": "stereo"})
+        assert resp.status_code == 200
+        assert len(resp.json()["results"]) == 1
+        assert resp.json()["results"][0]["canonical_name"] == "Stereolab"
+
+    @pytest.mark.asyncio
+    async def test_search_no_results(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/search", params={"q": "Nonexistent"})
+        assert resp.status_code == 200
+        assert len(resp.json()["results"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_search_ordered_by_total_plays(self, client: AsyncClient) -> None:
+        """Multiple Rock artists should come back ordered by total_plays."""
+        resp = await client.get("/graph/artists/search", params={"q": "Power"})
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert len(results) == 1
+        assert results[0]["canonical_name"] == "Cat Power"
+
+    @pytest.mark.asyncio
+    async def test_search_limit(self, client: AsyncClient) -> None:
+        # All four artists contain a space or letter — search broadly
+        resp = await client.get("/graph/artists/search", params={"q": "e", "limit": 2})
+        assert resp.status_code == 200
+        assert len(resp.json()["results"]) <= 2
+
+    @pytest.mark.asyncio
+    async def test_search_empty_query_rejected(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/search", params={"q": ""})
+        assert resp.status_code == 422
+
+
+class TestNeighbors:
+    @pytest.mark.asyncio
+    async def test_dj_transition_neighbors(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        aid = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/{aid}/neighbors", params={"type": "djTransition"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["artist"]["canonical_name"] == "Autechre"
+        assert data["edge_type"] == "djTransition"
+        names = [n["artist"]["canonical_name"] for n in data["neighbors"]]
+        assert "Stereolab" in names
+        assert "Cat Power" in names
+        # Ordered by PMI descending — Stereolab (3.0) before Cat Power (1.5)
+        assert names.index("Stereolab") < names.index("Cat Power")
+        # Check detail fields
+        stereo_entry = next(
+            n for n in data["neighbors"] if n["artist"]["canonical_name"] == "Stereolab"
+        )
+        assert stereo_entry["weight"] == 3.0
+        assert stereo_entry["detail"]["raw_count"] == 5
+        assert stereo_entry["detail"]["pmi"] == 3.0
+
+    @pytest.mark.asyncio
+    async def test_shared_personnel_neighbors(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "sharedPersonnel"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["neighbors"]) == 1
+        assert data["neighbors"][0]["artist"]["canonical_name"] == "Stereolab"
+        assert data["neighbors"][0]["detail"]["shared_count"] == 2
+        assert "Jim O'Rourke" in data["neighbors"][0]["detail"]["shared_names"]
+
+    @pytest.mark.asyncio
+    async def test_shared_style_neighbors(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        aid = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/{aid}/neighbors", params={"type": "sharedStyle"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["neighbors"]) == 1
+        assert data["neighbors"][0]["weight"] == 0.5
+        assert "Electronic" in data["neighbors"][0]["detail"]["shared_tags"]
+
+    @pytest.mark.asyncio
+    async def test_cross_reference_neighbors(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        aid = artist_ids["Stereolab"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "crossReference"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        names = [n["artist"]["canonical_name"] for n in data["neighbors"]]
+        assert "Cat Power" in names
+
+    @pytest.mark.asyncio
+    async def test_neighbors_default_type_is_dj_transition(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        aid = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/{aid}/neighbors")
+        assert resp.status_code == 200
+        assert resp.json()["edge_type"] == "djTransition"
+
+    @pytest.mark.asyncio
+    async def test_neighbors_limit(self, client: AsyncClient, artist_ids: dict[str, int]) -> None:
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "djTransition", "limit": 1}
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["neighbors"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_neighbors_unknown_artist_404(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/99999/neighbors")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_neighbors_no_edges(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Father John Misty has no shared personnel edges."""
+        aid = artist_ids["Father John Misty"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "sharedPersonnel"}
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["neighbors"]) == 0
+
+
+class TestExplain:
+    @pytest.mark.asyncio
+    async def test_explain_multiple_edge_types(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        src = artist_ids["Autechre"]
+        tgt = artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{src}/explain/{tgt}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"]["canonical_name"] == "Autechre"
+        assert data["target"]["canonical_name"] == "Stereolab"
+        types = {r["type"] for r in data["relationships"]}
+        assert "djTransition" in types
+        assert "sharedPersonnel" in types
+        assert "sharedStyle" in types
+
+    @pytest.mark.asyncio
+    async def test_explain_dj_transition_detail(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        src = artist_ids["Autechre"]
+        tgt = artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{src}/explain/{tgt}")
+        data = resp.json()
+        dj_rel = next(r for r in data["relationships"] if r["type"] == "djTransition")
+        assert dj_rel["weight"] == 3.0
+        assert dj_rel["detail"]["raw_count"] == 5
+
+    @pytest.mark.asyncio
+    async def test_explain_no_relationship(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Autechre and Father John Misty have no direct edges."""
+        src = artist_ids["Autechre"]
+        tgt = artist_ids["Father John Misty"]
+        resp = await client.get(f"/graph/artists/{src}/explain/{tgt}")
+        assert resp.status_code == 200
+        assert len(resp.json()["relationships"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_explain_unknown_source_404(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        tgt = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/99999/explain/{tgt}")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_explain_unknown_target_404(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        src = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/{src}/explain/99999")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_explain_cross_reference(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        src = artist_ids["Stereolab"]
+        tgt = artist_ids["Cat Power"]
+        resp = await client.get(f"/graph/artists/{src}/explain/{tgt}")
+        data = resp.json()
+        types = {r["type"] for r in data["relationships"]}
+        assert "crossReference" in types
+        xref_rel = next(r for r in data["relationships"] if r["type"] == "crossReference")
+        assert xref_rel["detail"]["comment"] == "See also"

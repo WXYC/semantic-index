@@ -1,44 +1,26 @@
-"""aiosqlite connection management for the Graph API."""
+"""SQLite database connection management for the Graph API."""
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
+import sqlite3
+from contextlib import contextmanager
 
-import aiosqlite
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-logger = logging.getLogger(__name__)
+from fastapi import Request
 
 
-async def connect(db_path: str) -> aiosqlite.Connection:
-    """Open an aiosqlite connection with row factory enabled.
-
-    Args:
-        db_path: Path to the SQLite database file.
-
-    Returns:
-        An open aiosqlite connection.
-    """
-    db = await aiosqlite.connect(db_path)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA foreign_keys=ON")
-    return db
+@contextmanager
+def _open_db(db_path: str):
+    """Open a read-only SQLite connection, ensuring creation and close happen in the same thread."""
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
-async def get_db(db: aiosqlite.Connection) -> AsyncIterator[aiosqlite.Connection]:
-    """FastAPI dependency that yields the shared database connection.
-
-    The connection is managed by the app lifespan — this dependency simply
-    yields it for use in route handlers.
-
-    Args:
-        db: The shared aiosqlite connection from app state.
-
-    Yields:
-        The shared aiosqlite connection.
-    """
-    yield db
+def get_db(request: Request):
+    """Yield a read-only SQLite connection scoped to a single request."""
+    with _open_db(request.app.state.db_path) as conn:
+        yield conn
