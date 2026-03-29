@@ -11,6 +11,8 @@ SQL dump → sql_parser → artist_resolver → adjacency → pmi ────�
                        → cross_reference ────────────────────────────────→ sqlite_export → SQLite
                        → node_attributes ────────────────────────────────→
          → discogs_client → discogs_enrichment → discogs_edges ─────────→
+
+SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
 
 ### Modules
@@ -29,6 +31,10 @@ SQL dump → sql_parser → artist_resolver → adjacency → pmi ────�
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. |
+| `semantic_index/api/app.py` | FastAPI application factory with lifespan-managed aiosqlite connection. |
+| `semantic_index/api/config.py` | Pydantic Settings for DB_PATH and PORT via environment variables. |
+| `semantic_index/api/database.py` | aiosqlite connection helpers for the API layer. |
+| `semantic_index/api/models.py` | API response models: ArtistResponse, NeighborResponse, SearchResult, ExplainResponse. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
