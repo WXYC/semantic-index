@@ -35,23 +35,42 @@ python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqli
 
 ## Graph API
 
-The Graph API serves the SQLite database over HTTP using FastAPI and aiosqlite.
+A read-only FastAPI service that queries the SQLite database produced by the pipeline.
+
+### Running locally
 
 ```bash
 pip install -e ".[api]"
-DB_PATH=output/wxyc_artist_graph.db uvicorn semantic_index.api.app:create_app --factory --port 8000
+DB_PATH=output/wxyc_artist_graph.db python -m semantic_index.api
 ```
+
+### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_PATH` | `output/wxyc_artist_graph.db` | Path to the SQLite database |
+| `DB_PATH` | `output/wxyc_artist_graph.db` | Path to the SQLite graph database |
+| `HOST` | `0.0.0.0` | Host to bind the server to |
 | `PORT` | `8000` | Server port |
 
-Endpoints:
+### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check — returns 200 with artist count, or 503 if DB unavailable |
+| GET | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive artist name search, ordered by total_plays descending |
+| GET | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference` |
+| GET | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details |
+
+### Deployment (Railway)
+
+The API is deployed to Railway. Configuration lives in `railway.toml`:
+
+- **Builder**: nixpacks (auto-detects Python from `pyproject.toml`)
+- **Start command**: `python -m semantic_index.api`
+- **Health check**: `GET /health` with 300s timeout
+- **Restart policy**: on failure, max 10 retries
+
+Railway sets the `PORT` environment variable automatically. Set `DB_PATH` to point to the SQLite database file (e.g. via a Railway volume mount or persistent storage).
 
 ## Development
 
