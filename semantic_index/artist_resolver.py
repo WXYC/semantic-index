@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from rapidfuzz.distance import JaroWinkler
@@ -27,6 +28,14 @@ logger = logging.getLogger(__name__)
 # Minimum Jaro-Winkler similarity to accept a fuzzy match (0-1 scale).
 # Set high to avoid false positives like "Autechre" → "Auteurs" (0.868).
 FUZZY_MIN_SCORE = 0.90
+
+# Relaxed threshold for names with sufficient play count.
+# Names played 10+ times are almost certainly real artists, so a lower
+# threshold is safe. Catches variants like "Fela Kuti" → "Fela Anikulapo Kuti" (0.837).
+FUZZY_MIN_SCORE_RELAXED = 0.82
+
+# Minimum play count to qualify for the relaxed fuzzy threshold.
+FUZZY_RELAXED_MIN_PLAYS = 10
 
 # If the top two candidates differ by less than this, reject as ambiguous
 FUZZY_AMBIGUITY_THRESHOLD = 0.02
@@ -183,8 +192,12 @@ class ArtistResolver:
             resolution_method="raw",
         )
 
-    def _fuzzy_match(self, query: str) -> str | None:
+    def _fuzzy_match(self, query: str, min_score: float = FUZZY_MIN_SCORE) -> str | None:
         """Find the best fuzzy match for a query string.
+
+        Args:
+            query: Lowercased artist name to match.
+            min_score: Minimum Jaro-Winkler similarity to accept (default: FUZZY_MIN_SCORE).
 
         Returns the canonical name if a match exceeds the minimum score
         and passes the ambiguity guard. Returns None otherwise.
@@ -195,7 +208,7 @@ class ArtistResolver:
         scored: list[tuple[float, str]] = []
         for candidate_key, canonical_name in self._fuzzy_candidates:
             score = JaroWinkler.similarity(query, candidate_key)
-            if score >= FUZZY_MIN_SCORE:
+            if score >= min_score:
                 scored.append((score, canonical_name))
 
         if not scored:
@@ -211,6 +224,63 @@ class ArtistResolver:
                 return None
 
         return best_name
+
+    def re_resolve_with_play_counts(
+        self,
+        resolved: list[ResolvedEntry],
+        min_plays: int = FUZZY_RELAXED_MIN_PLAYS,
+        relaxed_threshold: float = FUZZY_MIN_SCORE_RELAXED,
+    ) -> list[ResolvedEntry]:
+        """Re-resolve raw entries whose name has enough plays using a relaxed fuzzy threshold.
+
+        Names that appear frequently in the flowsheet are almost certainly real artists,
+        so a lower Jaro-Winkler threshold is safe for them.
+
+        Args:
+            resolved: Entries from the first resolution pass.
+            min_plays: Minimum raw-entry count to qualify for relaxed matching.
+            relaxed_threshold: Jaro-Winkler threshold for qualifying names.
+
+        Returns:
+            A new list with qualifying raw entries re-resolved as ``"fuzzy_relaxed"``.
+        """
+        raw_counts: Counter[str] = Counter()
+        for r in resolved:
+            if r.resolution_method == "raw":
+                raw_counts[r.canonical_name] += 1
+
+        # Pre-compute fuzzy matches for qualifying names (once per unique name)
+        relaxed_matches: dict[str, str | None] = {}
+        for name, count in raw_counts.items():
+            if count >= min_plays:
+                relaxed_matches[name] = self._fuzzy_match(name, min_score=relaxed_threshold)
+
+        matched = sum(1 for m in relaxed_matches.values() if m is not None)
+        entries_resolved = sum(
+            count for name, count in raw_counts.items() if relaxed_matches.get(name) is not None
+        )
+        logger.info(
+            "Fuzzy relaxed: %d/%d eligible names matched, resolving %d entries",
+            matched,
+            len(relaxed_matches),
+            entries_resolved,
+        )
+
+        result: list[ResolvedEntry] = []
+        for r in resolved:
+            if r.resolution_method == "raw" and r.canonical_name in relaxed_matches:
+                match = relaxed_matches[r.canonical_name]
+                if match is not None:
+                    result.append(
+                        ResolvedEntry(
+                            entry=r.entry,
+                            canonical_name=match,
+                            resolution_method="fuzzy_relaxed",
+                        )
+                    )
+                    continue
+            result.append(r)
+        return result
 
     def get_genre_id(self, library_release_id: int) -> int | None:
         """Look up the genre ID for a library release, or None if not found."""
