@@ -188,12 +188,16 @@ def run(args: argparse.Namespace) -> None:
         (catalog_resolved / music_entries * 100) if music_entries else 0,
     )
 
-    # 5. Extract adjacency pairs
+    # 5b. Re-resolve raw entries with sufficient play count using relaxed fuzzy threshold
+    log.info("Re-resolving raw entries with play-count-weighted fuzzy matching...")
+    resolved_entries = resolver.re_resolve_with_play_counts(resolved_entries)
+
+    # 6. Extract adjacency pairs
     log.info("Extracting adjacency pairs...")
     pairs = extract_adjacency_pairs(resolved_entries)
     log.info("  %d adjacency pairs extracted", len(pairs))
 
-    # 6. Compute PMI
+    # 7. Compute PMI
     log.info("Computing PMI...")
     edges = compute_pmi(pairs, resolved_entries)
     log.info("  %d unique edges computed", len(edges))

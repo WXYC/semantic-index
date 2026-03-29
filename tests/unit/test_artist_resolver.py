@@ -2,8 +2,15 @@
 
 from unittest.mock import MagicMock
 
-from semantic_index.artist_resolver import ArtistResolver
-from semantic_index.models import DiscogsSearchResult
+import pytest
+
+from semantic_index.artist_resolver import (
+    FUZZY_MIN_SCORE,
+    FUZZY_MIN_SCORE_RELAXED,
+    FUZZY_RELAXED_MIN_PLAYS,
+    ArtistResolver,
+)
+from semantic_index.models import DiscogsSearchResult, ResolvedEntry
 from tests.conftest import make_flowsheet_entry, make_library_code, make_library_release
 
 
@@ -328,3 +335,169 @@ class TestDiscogsResolution:
         resolver.resolve(entry)
 
         mock_client.search_artist.assert_called_once_with("Omar S", "Just Ask The Lonely")
+
+
+class TestPlayCountWeightedFuzzy:
+    """Tests for play-count-weighted fuzzy matching (re_resolve_with_play_counts).
+
+    Uses "Fela Kuti" → "Fela Anikulapo Kuti" (JW score ~0.837) as the
+    canonical test case: too low for the standard 0.90 threshold, but above
+    the relaxed 0.82 threshold used for names with sufficient play count.
+    """
+
+    def _make_resolver(self, codes=None):
+        return ArtistResolver(releases=[], codes=codes or [])
+
+    def _make_raw_entries(self, artist_name: str, count: int) -> list[ResolvedEntry]:
+        """Create a list of raw-resolved entries for a given artist name."""
+        return [
+            ResolvedEntry(
+                entry=make_flowsheet_entry(id=i, library_release_id=0, artist_name=artist_name),
+                canonical_name=artist_name.strip().lower(),
+                resolution_method="raw",
+            )
+            for i in range(count)
+        ]
+
+    def test_re_resolve_matches_high_play_count_name(self):
+        """Names with 10+ plays should match at the relaxed threshold (0.82)."""
+        # "fela kuti" vs "Fela Anikulapo Kuti" has JW ~0.837 — above 0.82 but below 0.90
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Fela Kuti", count=15)
+        result = resolver.re_resolve_with_play_counts(raw_entries)
+
+        assert all(r.canonical_name == "Fela Anikulapo Kuti" for r in result)
+        assert all(r.resolution_method == "fuzzy_relaxed" for r in result)
+
+    def test_re_resolve_skips_low_play_count_name(self):
+        """Names with fewer than min_plays should stay raw."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Fela Kuti", count=3)
+        result = resolver.re_resolve_with_play_counts(raw_entries)
+
+        assert all(r.resolution_method == "raw" for r in result)
+        assert all(r.canonical_name == "fela kuti" for r in result)
+
+    def test_re_resolve_preserves_non_raw_entries(self):
+        """Entries resolved via catalog, name_match, or fuzzy are not touched."""
+        code = make_library_code(id=200, presentation_name="Stereolab")
+        resolver = self._make_resolver(codes=[code])
+
+        catalog_entry = ResolvedEntry(
+            entry=make_flowsheet_entry(id=1, artist_name="Stereolab"),
+            canonical_name="Stereolab",
+            resolution_method="catalog",
+        )
+        fuzzy_entry = ResolvedEntry(
+            entry=make_flowsheet_entry(id=2, artist_name="Stereolabb"),
+            canonical_name="Stereolab",
+            resolution_method="fuzzy",
+        )
+        resolved = [catalog_entry, fuzzy_entry]
+        result = resolver.re_resolve_with_play_counts(resolved)
+
+        assert result[0].resolution_method == "catalog"
+        assert result[1].resolution_method == "fuzzy"
+
+    def test_re_resolve_with_custom_min_plays(self):
+        """The min_plays parameter controls the play count threshold."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        # 5 entries — below default (10) but above custom threshold (3)
+        raw_entries = self._make_raw_entries("Fela Kuti", count=5)
+
+        # Default threshold: should NOT match
+        result_default = resolver.re_resolve_with_play_counts(raw_entries)
+        assert all(r.resolution_method == "raw" for r in result_default)
+
+        # Custom threshold of 3: should match
+        result_custom = resolver.re_resolve_with_play_counts(raw_entries, min_plays=3)
+        assert all(r.resolution_method == "fuzzy_relaxed" for r in result_custom)
+
+    def test_re_resolve_still_rejects_scores_below_relaxed_threshold(self):
+        """Names with JW score below the relaxed threshold stay raw even with high play count."""
+        # "buck meek" vs "Beck" has JW ~0.694 — well below 0.82
+        code = make_library_code(id=200, presentation_name="Beck")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Buck Meek", count=50)
+        result = resolver.re_resolve_with_play_counts(raw_entries)
+
+        assert all(r.resolution_method == "raw" for r in result)
+
+    def test_re_resolve_consistent_across_entries_with_same_name(self):
+        """All entries with the same raw name get the same resolution."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Fela Kuti", count=12)
+        result = resolver.re_resolve_with_play_counts(raw_entries)
+
+        canonical_names = {r.canonical_name for r in result}
+        methods = {r.resolution_method for r in result}
+        assert len(canonical_names) == 1
+        assert len(methods) == 1
+
+    def test_re_resolve_mixed_raw_and_resolved(self):
+        """Only raw entries are candidates for re-resolution."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        catalog_entry = ResolvedEntry(
+            entry=make_flowsheet_entry(id=100, artist_name="Autechre"),
+            canonical_name="Autechre",
+            resolution_method="catalog",
+        )
+        raw_entries = self._make_raw_entries("Fela Kuti", count=10)
+        resolved = [catalog_entry] + raw_entries
+
+        result = resolver.re_resolve_with_play_counts(resolved)
+
+        assert result[0].resolution_method == "catalog"
+        assert result[0].canonical_name == "Autechre"
+        assert all(r.resolution_method == "fuzzy_relaxed" for r in result[1:])
+
+    def test_re_resolve_returns_new_list(self):
+        """re_resolve_with_play_counts should not mutate the input list."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Fela Kuti", count=15)
+        original_methods = [r.resolution_method for r in raw_entries]
+
+        result = resolver.re_resolve_with_play_counts(raw_entries)
+
+        # Input list still has raw methods
+        assert [r.resolution_method for r in raw_entries] == original_methods
+        # Result is a different list
+        assert result is not raw_entries
+
+    @pytest.mark.parametrize(
+        "relaxed_threshold,expected_method",
+        [
+            (0.82, "fuzzy_relaxed"),  # 0.837 > 0.82 → match
+            (0.85, "raw"),  # 0.837 < 0.85 → no match
+        ],
+    )
+    def test_re_resolve_with_custom_relaxed_threshold(self, relaxed_threshold, expected_method):
+        """The relaxed_threshold parameter controls the minimum score."""
+        code = make_library_code(id=200, presentation_name="Fela Anikulapo Kuti")
+        resolver = self._make_resolver(codes=[code])
+
+        raw_entries = self._make_raw_entries("Fela Kuti", count=15)
+        result = resolver.re_resolve_with_play_counts(
+            raw_entries, relaxed_threshold=relaxed_threshold
+        )
+
+        assert all(r.resolution_method == expected_method for r in result)
+
+    def test_constants_have_expected_values(self):
+        """Verify the module constants match the values from the issue analysis."""
+        assert FUZZY_MIN_SCORE == 0.90
+        assert FUZZY_MIN_SCORE_RELAXED == 0.82
+        assert FUZZY_RELAXED_MIN_PLAYS == 10
