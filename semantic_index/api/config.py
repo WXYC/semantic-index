@@ -10,8 +10,10 @@ class Settings(BaseSettings):
 
     Attributes:
         db_path: Path to the SQLite graph database produced by the pipeline.
+        host: Host to bind the uvicorn server to.
         port: Port for the uvicorn server.
     """
 
     db_path: str = "output/wxyc_artist_graph.db"
+    host: str = "0.0.0.0"
     port: int = 8000
