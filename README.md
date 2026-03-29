@@ -33,6 +33,26 @@ python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqli
 5. **Extract** cross-reference edges from catalog tables (LIBRARY_CODE_CROSS_REFERENCE, RELEASE_CROSS_REFERENCE)
 6. **Export** a GEXF graph loadable in [Gephi](https://gephi.org/) and a SQLite database for querying
 
+## Graph API
+
+The Graph API serves the SQLite database over HTTP using FastAPI and aiosqlite.
+
+```bash
+pip install -e ".[api]"
+DB_PATH=output/wxyc_artist_graph.db uvicorn semantic_index.api.app:create_app --factory --port 8000
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PATH` | `output/wxyc_artist_graph.db` | Path to the SQLite database |
+| `PORT` | `8000` | Server port |
+
+Endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check — returns 200 with artist count, or 503 if DB unavailable |
+
 ## Development
 
 ```bash
