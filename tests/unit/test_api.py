@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from semantic_index.api.models import ArtistResponse, NeighborResponse, SearchResult
+from semantic_index.api.schemas import ArtistSummary, NeighborEntry
 from semantic_index.models import ArtistStats, PmiEdge
 from semantic_index.sqlite_export import export_sqlite
 
@@ -79,52 +79,59 @@ def client_missing_db(tmp_path: Path) -> TestClient:
 
 
 class TestHealthEndpoint:
-    """Health endpoint tests — placeholder until /health is added."""
+    def test_health_returns_200_with_artist_count(self, client: TestClient):
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["artist_count"] == 3
+
+    def test_health_returns_503_when_db_missing(self, client_missing_db: TestClient):
+        response = client_missing_db.get("/health")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "unhealthy"
 
 
-class TestApiModels:
-    def test_artist_response_fields(self):
-        artist = ArtistResponse(
+class TestRootRoute:
+    def test_root_returns_explorer_html(self, client: TestClient):
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert "WXYC" in response.text
+
+
+class TestApiSchemas:
+    def test_artist_summary_fields(self):
+        artist = ArtistSummary(
             id=1,
             canonical_name="Autechre",
             genre="Electronic",
             total_plays=50,
-            active_first_year=2004,
-            active_last_year=2025,
-            dj_count=15,
-            request_ratio=0.1,
-            show_count=40,
         )
         assert artist.canonical_name == "Autechre"
         assert artist.genre == "Electronic"
         assert artist.total_plays == 50
 
-    def test_artist_response_optional_fields(self):
-        artist = ArtistResponse(
+    def test_artist_summary_optional_genre(self):
+        artist = ArtistSummary(
             id=1,
             canonical_name="Unknown",
+            genre=None,
             total_plays=0,
         )
         assert artist.genre is None
-        assert artist.active_first_year is None
-        assert artist.active_last_year is None
 
-    def test_neighbor_response_fields(self):
-        neighbor = NeighborResponse(
-            artist=ArtistResponse(id=1, canonical_name="Stereolab", total_plays=30),
-            raw_count=5,
-            pmi=3.2,
+    def test_neighbor_entry_fields(self):
+        neighbor = NeighborEntry(
+            artist=ArtistSummary(
+                id=1, canonical_name="Stereolab", genre="Rock", total_plays=30
+            ),
+            weight=3.2,
+            detail={"raw_count": 5, "pmi": 3.2},
         )
         assert neighbor.artist.canonical_name == "Stereolab"
-        assert neighbor.pmi == 3.2
-
-    def test_search_result_fields(self):
-        result = SearchResult(
-            id=1,
-            canonical_name="Autechre",
-            genre="Electronic",
-        )
-        assert result.canonical_name == "Autechre"
+        assert neighbor.weight == 3.2
 
 
 class TestAppCreation:

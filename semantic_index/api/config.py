@@ -14,6 +14,6 @@ class Settings(BaseSettings):
         port: Port for the uvicorn server.
     """
 
-    db_path: str = "output/wxyc_artist_graph.db"
+    db_path: str = "data/wxyc_artist_graph.db"
     host: str = "0.0.0.0"
     port: int = 8000
