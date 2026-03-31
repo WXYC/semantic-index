@@ -118,27 +118,42 @@ Use `--no-sqlite` to skip the SQLite export.
 
 ## Graph API
 
-A read-only FastAPI service that queries the SQLite database produced by the pipeline.
+A read-only FastAPI service that queries the SQLite database produced by the pipeline. Serves the D3.js graph explorer at the root URL and the JSON API at `/graph/*`.
 
 ```bash
-uvicorn semantic_index.api.app:create_app --factory --app-dir . -- output/wxyc_artist_graph.db
+python -m semantic_index.api
 ```
 
 Or programmatically:
 
 ```python
 from semantic_index.api.app import create_app
-app = create_app("output/wxyc_artist_graph.db")
+app = create_app("data/wxyc_artist_graph.db")
 ```
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/` | D3.js graph explorer (interactive visualization). |
+| `GET` | `/health` | Health check — returns artist count or 503 if database is unreachable. |
 | `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
 | `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 
+### Deployment
+
+Deployed on Railway via Dockerfile. The `data/wxyc_artist_graph.db` file is the committed, deployment-ready copy of the pipeline output. After re-running the pipeline, copy the new database from `output/` to `data/` and commit:
+
+```bash
+cp output/wxyc_artist_graph.db data/wxyc_artist_graph.db
+```
+
+Configuration via environment variables:
+- `DB_PATH` — path to SQLite database (default: `data/wxyc_artist_graph.db`)
+- `HOST` — bind address (default: `0.0.0.0`)
+- `PORT` — port (default: `8000`, set automatically by Railway)
+
 ## Data
 
-The pipeline parses tubafrenzy MySQL dump files directly (no database required). Production dumps are not committed to git — pass the path as a CLI argument. The fixture dump at `tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql` has minimal data suitable for structural testing only.
+The pipeline parses tubafrenzy MySQL dump files directly (no database required). Production dumps are not committed to git — pass the path as a CLI argument. The fixture dump at `tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql` has minimal data suitable for structural testing only. The `data/` directory contains a committed copy of the latest pipeline output for deployment.
