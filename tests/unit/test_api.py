@@ -124,9 +124,7 @@ class TestApiSchemas:
 
     def test_neighbor_entry_fields(self):
         neighbor = NeighborEntry(
-            artist=ArtistSummary(
-                id=1, canonical_name="Stereolab", genre="Rock", total_plays=30
-            ),
+            artist=ArtistSummary(id=1, canonical_name="Stereolab", genre="Rock", total_plays=30),
             weight=3.2,
             detail={"raw_count": 5, "pmi": 3.2},
         )
