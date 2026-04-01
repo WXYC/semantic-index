@@ -11,7 +11,7 @@ from collections.abc import Iterator
 logger = logging.getLogger(__name__)
 
 try:
-    import sql_parser_rs as _rust  # type: ignore[import-untyped]
+    import sql_parser_rs as _rust  # type: ignore[import-untyped,import-not-found]
 
     _HAS_RUST = True
 except ImportError:
