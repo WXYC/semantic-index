@@ -84,8 +84,8 @@ CREATE TABLE IF NOT EXISTS label_hierarchy (
 
 CREATE TABLE IF NOT EXISTS artist_style (
     artist_id INTEGER NOT NULL REFERENCES artist(id),
-    style TEXT NOT NULL,
-    PRIMARY KEY (artist_id, style)
+    style_tag TEXT NOT NULL,
+    PRIMARY KEY (artist_id, style_tag)
 );
 
 -- Reconciliation audit trail
@@ -503,7 +503,7 @@ class EntityStore:
         if not styles:
             return
         self._conn.executemany(
-            "INSERT OR IGNORE INTO artist_style (artist_id, style) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO artist_style (artist_id, style_tag) VALUES (?, ?)",
             [(artist_id, style) for style in styles],
         )
         self._conn.commit()
@@ -518,7 +518,7 @@ class EntityStore:
             Sorted list of style strings.
         """
         rows = self._conn.execute(
-            "SELECT style FROM artist_style WHERE artist_id = ? ORDER BY style",
+            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag",
             (artist_id,),
         ).fetchall()
         return [row[0] for row in rows]
