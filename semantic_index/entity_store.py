@@ -4,6 +4,9 @@ Manages the entity store tables within a SQLite database: entity (Wikidata QID,
 display name, type), artist migration (adds external ID columns to existing artist
 tables), and Phase 2 placeholder tables (release, label, label_hierarchy).
 
+Provides CRUD operations for entities, artist upsert with COALESCE semantics
+(never overwrites populated fields with NULL), and bulk stat updates.
+
 The ``initialize()`` method is fully idempotent — safe on a fresh database,
 an old-schema database, or an already-migrated database.
 """
@@ -13,6 +16,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 from types import TracebackType
+
+from semantic_index.models import ArtistStats, Entity
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +162,248 @@ class EntityStore:
                    SET created_at = COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                        updated_at = COALESCE(updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"""
             )
+
+    # ------------------------------------------------------------------
+    # Entity CRUD
+    # ------------------------------------------------------------------
+
+    def get_or_create_entity(
+        self,
+        name: str,
+        entity_type: str,
+        wikidata_qid: str | None = None,
+    ) -> Entity:
+        """Return an existing entity by name+type, or create a new one.
+
+        If the entity already exists, its wikidata_qid is not overwritten.
+
+        Args:
+            name: Display name of the entity.
+            entity_type: One of 'artist', 'label', etc.
+            wikidata_qid: Optional Wikidata QID to set on creation.
+
+        Returns:
+            The existing or newly created Entity.
+        """
+        row = self._conn.execute(
+            "SELECT id, wikidata_qid, name, entity_type FROM entity WHERE name = ? AND entity_type = ?",
+            (name, entity_type),
+        ).fetchone()
+        if row is not None:
+            return Entity(id=row[0], wikidata_qid=row[1], name=row[2], entity_type=row[3])
+
+        cur = self._conn.execute(
+            "INSERT INTO entity (name, entity_type, wikidata_qid) VALUES (?, ?, ?)",
+            (name, entity_type, wikidata_qid),
+        )
+        self._conn.commit()
+        return Entity(
+            id=cur.lastrowid,  # type: ignore[arg-type]
+            name=name,
+            entity_type=entity_type,
+            wikidata_qid=wikidata_qid,
+        )
+
+    def update_entity_qid(self, entity_id: int, wikidata_qid: str) -> None:
+        """Set the Wikidata QID for an entity.
+
+        Args:
+            entity_id: The entity's primary key.
+            wikidata_qid: The Wikidata QID to assign.
+
+        Raises:
+            ValueError: If no entity with the given id exists.
+        """
+        cur = self._conn.execute(
+            "UPDATE entity SET wikidata_qid = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            (wikidata_qid, entity_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"No entity with id {entity_id}")
+        self._conn.commit()
+
+    def get_entity_by_qid(self, wikidata_qid: str) -> Entity | None:
+        """Look up an entity by Wikidata QID.
+
+        Args:
+            wikidata_qid: The Wikidata QID to search for.
+
+        Returns:
+            The matching Entity, or None if not found.
+        """
+        row = self._conn.execute(
+            "SELECT id, wikidata_qid, name, entity_type FROM entity WHERE wikidata_qid = ?",
+            (wikidata_qid,),
+        ).fetchone()
+        if row is None:
+            return None
+        return Entity(id=row[0], wikidata_qid=row[1], name=row[2], entity_type=row[3])
+
+    def merge_entities(self, keep_id: int, merge_id: int) -> None:
+        """Merge two entities: re-parent artists from merge_id to keep_id, then delete merge_id.
+
+        Args:
+            keep_id: The entity ID to keep.
+            merge_id: The entity ID to merge into keep_id and delete.
+
+        Raises:
+            ValueError: If keep_id == merge_id, or if either entity doesn't exist.
+        """
+        if keep_id == merge_id:
+            raise ValueError("Cannot merge an entity into itself")
+
+        for eid, label in [(keep_id, "keep"), (merge_id, "merge")]:
+            row = self._conn.execute("SELECT id FROM entity WHERE id = ?", (eid,)).fetchone()
+            if row is None:
+                raise ValueError(f"No entity with id {eid} ({label})")
+
+        self._conn.execute(
+            "UPDATE artist SET entity_id = ? WHERE entity_id = ?", (keep_id, merge_id)
+        )
+        self._conn.execute("DELETE FROM entity WHERE id = ?", (merge_id,))
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Artist Upsert
+    # ------------------------------------------------------------------
+
+    def upsert_artist(
+        self,
+        canonical_name: str,
+        *,
+        genre: str | None = None,
+        discogs_artist_id: int | None = None,
+        entity_id: int | None = None,
+        musicbrainz_artist_id: str | None = None,
+        wxyc_library_code_id: int | None = None,
+    ) -> int:
+        """Insert or update an artist row using COALESCE semantics.
+
+        On conflict (canonical_name), only updates fields where the new value
+        is not NULL — existing populated fields are never overwritten with NULL.
+
+        Args:
+            canonical_name: The artist's canonical name (unique key).
+            genre: Genre string.
+            discogs_artist_id: Discogs artist ID.
+            entity_id: FK to the entity table.
+            musicbrainz_artist_id: MusicBrainz artist UUID.
+            wxyc_library_code_id: WXYC library code ID.
+
+        Returns:
+            The artist row's integer primary key.
+        """
+        cur = self._conn.execute(
+            """INSERT INTO artist (canonical_name, genre, discogs_artist_id, entity_id,
+                                   musicbrainz_artist_id, wxyc_library_code_id,
+                                   updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(canonical_name) DO UPDATE SET
+                   genre = COALESCE(excluded.genre, artist.genre),
+                   discogs_artist_id = COALESCE(excluded.discogs_artist_id, artist.discogs_artist_id),
+                   entity_id = COALESCE(excluded.entity_id, artist.entity_id),
+                   musicbrainz_artist_id = COALESCE(excluded.musicbrainz_artist_id, artist.musicbrainz_artist_id),
+                   wxyc_library_code_id = COALESCE(excluded.wxyc_library_code_id, artist.wxyc_library_code_id),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               RETURNING id""",
+            (
+                canonical_name,
+                genre,
+                discogs_artist_id,
+                entity_id,
+                musicbrainz_artist_id,
+                wxyc_library_code_id,
+            ),
+        )
+        row = cur.fetchone()
+        self._conn.commit()
+        assert row is not None  # RETURNING always yields a row
+        return int(row[0])
+
+    def get_artist_by_name(self, canonical_name: str) -> dict[str, object] | None:
+        """Look up an artist row by canonical name.
+
+        Args:
+            canonical_name: The artist's canonical name.
+
+        Returns:
+            A dict of column name -> value, or None if not found.
+        """
+        self._conn.row_factory = sqlite3.Row
+        row = self._conn.execute(
+            "SELECT * FROM artist WHERE canonical_name = ?", (canonical_name,)
+        ).fetchone()
+        self._conn.row_factory = None
+        if row is None:
+            return None
+        return dict(row)
+
+    def bulk_upsert_artists(self, names: list[str]) -> dict[str, int]:
+        """Insert or retrieve artist rows for a list of canonical names.
+
+        This is the main pipeline entry point for ensuring artist rows exist.
+        Deduplicates the input list.
+
+        Args:
+            names: List of canonical artist names.
+
+        Returns:
+            Dict mapping canonical_name -> artist row id.
+        """
+        unique_names = list(dict.fromkeys(names))
+        result: dict[str, int] = {}
+        for name in unique_names:
+            result[name] = self.upsert_artist(name)
+        return result
+
+    # ------------------------------------------------------------------
+    # Artist Stats
+    # ------------------------------------------------------------------
+
+    def update_artist_stats(self, canonical_name: str, stats: ArtistStats) -> None:
+        """Update stats columns for a single artist.
+
+        Args:
+            canonical_name: The artist's canonical name.
+            stats: The ArtistStats to apply.
+
+        Raises:
+            ValueError: If no artist with the given name exists.
+        """
+        cur = self._conn.execute(
+            """UPDATE artist SET
+                   total_plays = ?,
+                   genre = COALESCE(?, genre),
+                   active_first_year = ?,
+                   active_last_year = ?,
+                   dj_count = ?,
+                   request_ratio = ?,
+                   show_count = ?,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE canonical_name = ?""",
+            (
+                stats.total_plays,
+                stats.genre,
+                stats.active_first_year,
+                stats.active_last_year,
+                stats.dj_count,
+                stats.request_ratio,
+                stats.show_count,
+                canonical_name,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"No artist with canonical_name '{canonical_name}'")
+        self._conn.commit()
+
+    def bulk_update_stats(self, artist_stats: dict[str, ArtistStats]) -> None:
+        """Update stats for multiple artists in a single transaction.
+
+        Args:
+            artist_stats: Dict mapping canonical_name -> ArtistStats.
+        """
+        for name, stats in artist_stats.items():
+            self.update_artist_stats(name, stats)
 
     def close(self) -> None:
         """Close the database connection."""
