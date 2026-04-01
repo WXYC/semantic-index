@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from types import TracebackType
 
-from semantic_index.models import ArtistStats, Entity
+from semantic_index.models import ArtistStats, Entity, ReconciliationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +355,81 @@ class EntityStore:
         for name in unique_names:
             result[name] = self.upsert_artist(name)
         return result
+
+    # ------------------------------------------------------------------
+    # Reconciliation Log
+    # ------------------------------------------------------------------
+
+    def log_reconciliation(
+        self,
+        artist_id: int,
+        source: str,
+        external_id: str,
+        confidence: float | None,
+        method: str,
+    ) -> None:
+        """Record a reconciliation event for an artist.
+
+        Args:
+            artist_id: The artist row's primary key.
+            source: External knowledge base ('discogs', 'musicbrainz', 'wikidata').
+            external_id: Identifier in the external source.
+            confidence: Match confidence score, or None if not applicable.
+            method: Matching method ('exact', 'fuzzy', 'api_search', 'cache_lookup').
+
+        Raises:
+            ValueError: If no artist with the given id exists.
+        """
+        row = self._conn.execute("SELECT id FROM artist WHERE id = ?", (artist_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"No artist with id {artist_id}")
+        self._conn.execute(
+            """INSERT INTO reconciliation_log (artist_id, source, external_id, confidence, method)
+               VALUES (?, ?, ?, ?, ?)""",
+            (artist_id, source, external_id, confidence, method),
+        )
+        self._conn.commit()
+
+    def get_reconciliation_history(self, artist_id: int) -> list[ReconciliationEvent]:
+        """Return all reconciliation events for an artist, ordered by insertion.
+
+        Args:
+            artist_id: The artist row's primary key.
+
+        Returns:
+            List of ReconciliationEvent instances, oldest first.
+        """
+        rows = self._conn.execute(
+            """SELECT source, external_id, confidence, method
+               FROM reconciliation_log
+               WHERE artist_id = ?
+               ORDER BY id""",
+            (artist_id,),
+        ).fetchall()
+        return [
+            ReconciliationEvent(
+                source=row[0],
+                external_id=row[1],
+                confidence=row[2],
+                method=row[3],
+            )
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Name-to-ID Mapping
+    # ------------------------------------------------------------------
+
+    def get_name_to_id_mapping(self) -> dict[str, int]:
+        """Return a mapping of canonical_name to artist row id.
+
+        This replaces the inline dict-building pattern in sqlite_export.py.
+
+        Returns:
+            Dict mapping canonical_name -> artist row id.
+        """
+        rows = self._conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+        return {row[1]: row[0] for row in rows}
 
     # ------------------------------------------------------------------
     # Artist Stats
