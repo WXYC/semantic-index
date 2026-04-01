@@ -24,6 +24,7 @@ from semantic_index.discogs_edges import (
     extract_shared_styles,
 )
 from semantic_index.discogs_enrichment import DiscogsEnricher
+from semantic_index.entity_store import EntityStore
 from semantic_index.graph_export import build_graph, export_gexf, print_top_neighbors
 from semantic_index.models import (
     FlowsheetEntry,
@@ -32,6 +33,7 @@ from semantic_index.models import (
 )
 from semantic_index.node_attributes import compute_artist_stats
 from semantic_index.pmi import compute_pmi
+from semantic_index.reconciliation import ArtistReconciler
 from semantic_index.sql_parser import iter_table_rows, load_table_rows
 from semantic_index.sqlite_export import export_sqlite
 
@@ -88,6 +90,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=500,
         help="Exclude labels with more than N artists from label family edges",
+    )
+    parser.add_argument(
+        "--entity-store-path",
+        default=None,
+        help="Path to an entity store SQLite database. Enables entity store mode: "
+        "artists are managed by the entity store rather than created fresh.",
+    )
+    parser.add_argument(
+        "--skip-reconciliation",
+        action="store_true",
+        help="Skip Discogs reconciliation step (requires --entity-store-path)",
+    )
+    parser.add_argument(
+        "--compute-discogs-edges",
+        action="store_true",
+        help="Compute Discogs-derived edges (shared personnel, styles, labels, compilations). "
+        "Off by default.",
     )
     return parser.parse_args(argv)
 
@@ -192,6 +211,38 @@ def run(args: argparse.Namespace) -> None:
     log.info("Re-resolving raw entries with play-count-weighted fuzzy matching...")
     resolved_entries = resolver.re_resolve_with_play_counts(resolved_entries)
 
+    # 5c. Entity store setup (optional)
+    entity_store: EntityStore | None = None
+    if args.entity_store_path:
+        store_path = args.entity_store_path
+        log.info("Opening entity store: %s", store_path)
+        entity_store = EntityStore(store_path)
+        entity_store.initialize()
+
+        # Bulk upsert all resolved artist names
+        all_canonical = list(dict.fromkeys(e.canonical_name for e in resolved_entries))
+        log.info("Bulk upserting %d artists into entity store...", len(all_canonical))
+        entity_store.bulk_upsert_artists(all_canonical)
+
+        # 5d. Reconcile via Discogs (unless skipped or no cache DSN)
+        if not args.skip_reconciliation and args.discogs_cache_dsn:
+            log.info("Running Discogs reconciliation...")
+            reconcile_client = DiscogsClient(
+                cache_dsn=args.discogs_cache_dsn,
+                api_base_url=None,
+            )
+            reconciler = ArtistReconciler(entity_store, reconcile_client)
+            report = reconciler.reconcile_batch()
+            log.info(
+                "Reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                report.attempted,
+                report.succeeded,
+                report.no_match,
+                report.errored,
+            )
+        elif not args.skip_reconciliation:
+            log.warning("Skipping reconciliation: no discogs-cache DSN available")
+
     # 6. Extract adjacency pairs
     log.info("Extracting adjacency pairs...")
     pairs = extract_adjacency_pairs(resolved_entries)
@@ -252,16 +303,17 @@ def run(args: argparse.Namespace) -> None:
         enrichments = enricher.enrich_batch(artist_ids)
         log.info("  %d artists enriched", len(enrichments))
 
-        # Extract Discogs-derived edges
-        log.info("Extracting Discogs-derived edges...")
-        sp_edges = extract_shared_personnel(enrichments)
-        log.info("  %d shared personnel edges", len(sp_edges))
-        ss_edges = extract_shared_styles(enrichments, min_jaccard=args.min_jaccard)
-        log.info("  %d shared style edges", len(ss_edges))
-        lf_edges = extract_label_family(enrichments, max_label_artists=args.max_label_artists)
-        log.info("  %d label family edges", len(lf_edges))
-        comp_edges = extract_compilation_coappearance(enrichments)
-        log.info("  %d compilation edges", len(comp_edges))
+        # Extract Discogs-derived edges (only when explicitly requested)
+        if args.compute_discogs_edges:
+            log.info("Extracting Discogs-derived edges...")
+            sp_edges = extract_shared_personnel(enrichments)
+            log.info("  %d shared personnel edges", len(sp_edges))
+            ss_edges = extract_shared_styles(enrichments, min_jaccard=args.min_jaccard)
+            log.info("  %d shared style edges", len(ss_edges))
+            lf_edges = extract_label_family(enrichments, max_label_artists=args.max_label_artists)
+            log.info("  %d label family edges", len(lf_edges))
+            comp_edges = extract_compilation_coappearance(enrichments)
+            log.info("  %d compilation edges", len(comp_edges))
     elif not args.skip_enrichment:
         log.warning("Skipping Discogs enrichment: no cache DSN or API URL available")
 
@@ -278,7 +330,9 @@ def run(args: argparse.Namespace) -> None:
     log.info("GEXF written to %s", gexf_path)
 
     # 13. Export SQLite database
-    sqlite_path = output_dir / "wxyc_artist_graph.db"
+    sqlite_path = (
+        Path(args.entity_store_path) if entity_store else output_dir / "wxyc_artist_graph.db"
+    )
     if not args.no_sqlite:
         log.info("Exporting SQLite database...")
         export_sqlite(
@@ -292,8 +346,12 @@ def run(args: argparse.Namespace) -> None:
             shared_style_edges=ss_edges,
             label_family_edges=lf_edges,
             compilation_edges=comp_edges,
+            entity_store=entity_store,
         )
         log.info("SQLite written to %s", sqlite_path)
+
+    if entity_store is not None:
+        entity_store.close()
 
     elapsed = time.time() - t0
     log.info("Done in %.1f seconds.", elapsed)
@@ -315,10 +373,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Cross-ref edges:         {len(xref_edges):>12,}")
     if enrichments:
         print(f"  Enriched artists:        {len(enrichments):>12,}")
-        print(f"  Shared personnel edges:  {len(sp_edges):>12,}")
-        print(f"  Shared style edges:      {len(ss_edges):>12,}")
-        print(f"  Label family edges:      {len(lf_edges):>12,}")
-        print(f"  Compilation edges:       {len(comp_edges):>12,}")
+        if args.compute_discogs_edges:
+            print(f"  Shared personnel edges:  {len(sp_edges):>12,}")
+            print(f"  Shared style edges:      {len(ss_edges):>12,}")
+            print(f"  Label family edges:      {len(lf_edges):>12,}")
+            print(f"  Compilation edges:       {len(comp_edges):>12,}")
     print(f"  Graph nodes:             {graph.number_of_nodes():>12,}")
     print(f"  Graph edges:             {graph.number_of_edges():>12,}")
     print(f"  GEXF output:             {gexf_path}")
