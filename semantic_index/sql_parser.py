@@ -1,11 +1,22 @@
 """Parse MySQL dump files into Python tuples.
 
-The parser is extracted from tubafrenzy/scripts/analysis/cross_genre_transitions.py
-and extended with a streaming interface for large dump files (400MB+).
+Uses a Rust extension (sql_parser_rs) for ~1000x faster parsing when available,
+with a pure-Python fallback for environments where the Rust extension isn't built.
 """
 
+import logging
 import re
 from collections.abc import Iterator
+
+logger = logging.getLogger(__name__)
+
+try:
+    import sql_parser_rs as _rust  # type: ignore[import-untyped]
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+    logger.info("Rust SQL parser not available, using pure-Python fallback")
 
 
 def parse_sql_values(line: str) -> list[tuple]:
@@ -95,16 +106,24 @@ def _parse_value(val_str: str):
 def iter_table_rows(path: str, table_name: str) -> Iterator[tuple]:
     """Yield parsed rows for a specific table from a MySQL dump file.
 
-    Reads one line at a time to handle large dump files (400MB+) where each
-    INSERT statement can be ~1MB.
+    Uses the Rust extension when available (~1000x faster). Falls back to
+    pure-Python line-by-line parsing.
     """
-    pattern = re.compile(r"INSERT INTO `" + re.escape(table_name) + r"`")
-    with open(path, encoding="latin-1") as f:
-        for line in f:
-            if pattern.search(line):
-                yield from parse_sql_values(line)
+    if _HAS_RUST:
+        yield from _rust.iter_table_rows(path, table_name)
+    else:
+        pattern = re.compile(r"INSERT INTO `" + re.escape(table_name) + r"`")
+        with open(path, encoding="latin-1") as f:
+            for line in f:
+                if pattern.search(line):
+                    yield from parse_sql_values(line)
 
 
 def load_table_rows(path: str, table_name: str) -> list[tuple]:
-    """Load all rows for a table into a list. Use for small tables only."""
+    """Load all rows for a table into a list.
+
+    Uses the Rust extension when available (~1000x faster).
+    """
+    if _HAS_RUST:
+        return _rust.load_table_rows(path, table_name)  # type: ignore[no-any-return]
     return list(iter_table_rows(path, table_name))
