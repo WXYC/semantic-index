@@ -212,3 +212,35 @@ class CompilationEdge(BaseModel):
     artist_b: str
     compilation_count: int
     compilation_titles: list[str]
+
+
+# --- Entity store models ---
+
+
+class Entity(BaseModel):
+    """A real-world person, group, or organization in the entity store."""
+
+    id: int
+    wikidata_qid: str | None = None
+    name: str
+    entity_type: str = "artist"
+
+
+class ReconciliationEvent(BaseModel):
+    """A single reconciliation lookup result from an external knowledge base."""
+
+    source: str  # 'discogs', 'musicbrainz', 'wikidata'
+    external_id: str
+    confidence: float | None = None
+    method: str  # 'exact', 'fuzzy', 'api_search', 'cache_lookup'
+
+
+class ReconciliationReport(BaseModel):
+    """Summary of a reconciliation batch run."""
+
+    total: int  # Total artists in the input set
+    attempted: int  # Artists where reconciliation was attempted (status was 'unreconciled')
+    succeeded: int  # Attempts that found at least one external match
+    no_match: int  # Attempts where the lookup returned no result
+    errored: int  # Attempts that failed due to an exception
+    skipped: int  # Artists already in 'partial' or 'reconciled' status
