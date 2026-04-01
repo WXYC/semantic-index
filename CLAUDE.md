@@ -27,6 +27,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
+| `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema migration, CRUD, artist upsert, reconciliation log, artist styles. |
+| `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
@@ -78,6 +80,33 @@ CREATE TABLE cross_reference (
     comment TEXT,
     source TEXT NOT NULL,
     PRIMARY KEY (artist_a_id, artist_b_id, source)
+);
+
+-- Entity store tables (created by EntityStore.initialize())
+
+CREATE TABLE entity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wikidata_qid TEXT UNIQUE,
+    name TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT 'artist',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE artist_style (
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    style TEXT NOT NULL,
+    PRIMARY KEY (artist_id, style)
+);
+
+CREATE TABLE reconciliation_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    confidence REAL,
+    method TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 ```
 
