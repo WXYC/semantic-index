@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
+    ArtistDetail,
     ArtistSummary,
+    EntityArtists,
     ExplainResponse,
     NeighborEntry,
     NeighborsResponse,
@@ -66,6 +68,19 @@ def search_artists(
     return SearchResponse(results=[_artist_summary(r) for r in rows])
 
 
+@router.get("/artists/{artist_id}", response_model=ArtistDetail)
+def get_artist_detail(
+    artist_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+) -> ArtistDetail:
+    """Return full artist detail including external IDs from the entity table.
+
+    Gracefully handles databases without entity store columns by falling back
+    to NULL values for entity fields.
+    """
+    return _get_artist_detail(db, artist_id)
+
+
 @router.get("/artists/{artist_id}/neighbors", response_model=NeighborsResponse)
 def get_neighbors(
     artist_id: int,
@@ -95,6 +110,95 @@ def explain_relationship(
         relationships.extend(rels)
 
     return ExplainResponse(source=source, target=target, relationships=relationships)
+
+
+@router.get("/entities/{entity_id}/artists", response_model=EntityArtists)
+def get_entity_artists(
+    entity_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+) -> EntityArtists:
+    """Return all artists sharing an entity (alias group)."""
+    entity_row = db.execute(
+        "SELECT id, name, wikidata_qid FROM entity WHERE id = ?",
+        (entity_id,),
+    ).fetchone()
+    if entity_row is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    artist_rows = db.execute(
+        "SELECT id, canonical_name, genre, total_plays FROM artist WHERE entity_id = ?",
+        (entity_id,),
+    ).fetchall()
+
+    return EntityArtists(
+        entity_id=entity_row["id"],
+        entity_name=entity_row["name"],
+        wikidata_qid=entity_row["wikidata_qid"],
+        artists=[_artist_summary(r) for r in artist_rows],
+    )
+
+
+def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
+    """Fetch full artist detail, joining entity table when available.
+
+    Falls back gracefully when entity store columns don't exist in the database
+    (old schema without entity_id, discogs_artist_id, etc.).
+    """
+    try:
+        row = db.execute(
+            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            "  a.active_first_year, a.active_last_year, a.dj_count, "
+            "  a.request_ratio, a.show_count, "
+            "  a.entity_id, a.discogs_artist_id, a.musicbrainz_artist_id, "
+            "  a.reconciliation_status, "
+            "  e.wikidata_qid "
+            "FROM artist a "
+            "LEFT JOIN entity e ON a.entity_id = e.id "
+            "WHERE a.id = ?",
+            (artist_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Old schema: entity columns or entity table don't exist
+        row = db.execute(
+            "SELECT id, canonical_name, genre, total_plays, "
+            "  active_first_year, active_last_year, dj_count, "
+            "  request_ratio, show_count "
+            "FROM artist WHERE id = ?",
+            (artist_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Artist not found") from None
+        return ArtistDetail(
+            id=row["id"],
+            canonical_name=row["canonical_name"],
+            genre=row["genre"],
+            total_plays=row["total_plays"],
+            active_first_year=row["active_first_year"],
+            active_last_year=row["active_last_year"],
+            dj_count=row["dj_count"],
+            request_ratio=row["request_ratio"],
+            show_count=row["show_count"],
+        )
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artist not found")
+
+    return ArtistDetail(
+        id=row["id"],
+        canonical_name=row["canonical_name"],
+        genre=row["genre"],
+        total_plays=row["total_plays"],
+        active_first_year=row["active_first_year"],
+        active_last_year=row["active_last_year"],
+        dj_count=row["dj_count"],
+        request_ratio=row["request_ratio"],
+        show_count=row["show_count"],
+        entity_id=row["entity_id"],
+        discogs_artist_id=row["discogs_artist_id"],
+        musicbrainz_artist_id=row["musicbrainz_artist_id"],
+        wikidata_qid=row["wikidata_qid"],
+        reconciliation_status=row["reconciliation_status"],
+    )
 
 
 def _query_neighbors(
