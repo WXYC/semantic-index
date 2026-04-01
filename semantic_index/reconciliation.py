@@ -114,6 +114,20 @@ class ArtistReconciler:
             skipped=skipped,
         )
 
+    @staticmethod
+    def _query_with_fallback(
+        conn: object, primary_sql: str, fallback_sql: str, params: tuple
+    ) -> list:
+        """Try a query against a materialized summary table, fall back to join."""
+        execute = getattr(conn, "execute")
+        try:
+            result = execute(primary_sql, params).fetchall()
+            if result:
+                return result  # type: ignore[no-any-return]
+            return execute(fallback_sql, params).fetchall()  # type: ignore[no-any-return]
+        except Exception:
+            return execute(fallback_sql, params).fetchall()  # type: ignore[no-any-return]
+
     def _reconcile_discogs_bulk(self, names: list[str]) -> dict[str, tuple[int, list[str]]]:
         """Batch Discogs lookup via the ``release_artist`` table.
 
@@ -137,13 +151,16 @@ class ArtistReconciler:
         lower_to_canonical: dict[str, str] = {n.lower(): n for n in names}
         lower_names = list(lower_to_canonical.keys())
 
-        # 1. Match artist names against release_artist
-        rows = conn.execute(
+        # 1. Match artist names against Discogs
+        # Try materialized summary table first, fall back to release_artist join
+        rows = self._query_with_fallback(
+            conn,
+            "SELECT artist_name, discogs_artist_id FROM artist_discogs_id WHERE artist_name = ANY(%s)",
             "SELECT DISTINCT lower(ra.artist_name), ra.artist_id "
             "FROM release_artist ra "
             "WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
             (lower_names,),
-        ).fetchall()
+        )
 
         matches: dict[str, int] = {}
         for lower_name, artist_id in rows:
@@ -156,13 +173,15 @@ class ArtistReconciler:
 
         # 2. Fetch styles for matched artists
         matched_lower = [n.lower() for n in matches]
-        style_rows = conn.execute(
+        style_rows = self._query_with_fallback(
+            conn,
+            "SELECT artist_name, style FROM artist_style_summary WHERE artist_name = ANY(%s)",
             "SELECT DISTINCT lower(ra.artist_name), rs.style "
             "FROM release_style rs "
             "JOIN release_artist ra ON rs.release_id = ra.release_id "
             "WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
             (matched_lower,),
-        ).fetchall()
+        )
 
         artist_styles: dict[str, list[str]] = {}
         for lower_name, style in style_rows:

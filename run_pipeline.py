@@ -9,6 +9,7 @@ Usage:
 import argparse
 import logging
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -92,6 +93,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Exclude labels with more than N artists from label family edges",
     )
     parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Cache resolved entries to skip SQL parsing on reruns. "
+        "Uses dump file size+mtime as cache key.",
+    )
+    parser.add_argument(
         "--entity-store-path",
         default=None,
         help="Path to an entity store SQLite database. Enables entity store mode: "
@@ -122,94 +129,138 @@ def run(args: argparse.Namespace) -> None:
 
     t0 = time.time()
 
-    # 1. Parse genre table
-    log.info("Parsing GENRE table...")
-    for row in iter_table_rows(dump_path, "GENRE"):
-        GENRE_NAMES[row[0]] = row[1]
-    log.info("  %d genres loaded", len(GENRE_NAMES))
+    # Check for cached resolved entries
+    _cache_path = None
+    if args.cache_dir:
+        cache_dir = Path(args.cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        dump_stat = Path(dump_path).stat()
+        _cache_key = f"{dump_stat.st_size}_{int(dump_stat.st_mtime)}"
+        _cache_path = cache_dir / f"resolved_{_cache_key}.pkl"
 
-    # 2. Parse library tables
-    log.info("Parsing LIBRARY_RELEASE table...")
-    release_rows = load_table_rows(dump_path, "LIBRARY_RELEASE")
-    releases = [LibraryRelease(id=r[0], library_code_id=r[8]) for r in release_rows]
-    log.info("  %d releases loaded", len(releases))
+    _used_cache = False
+    if _cache_path and _cache_path.exists():
+        log.info("Loading cached resolved entries from %s", _cache_path)
+        with open(_cache_path, "rb") as _f:
+            _cache = pickle.load(_f)  # noqa: S301
+        resolved_entries = _cache["resolved_entries"]
+        GENRE_NAMES.update(_cache["genre_names"])
+        codes = _cache["codes"]
+        releases = _cache["releases"]
+        show_to_dj = _cache["show_to_dj"]
+        total_entries = _cache["total_entries"]
+        music_entries = _cache["music_entries"]
+        catalog_resolved = _cache["catalog_resolved"]
+        log.info("  Loaded %d resolved entries from cache", len(resolved_entries))
+        _used_cache = True
 
-    log.info("Parsing LIBRARY_CODE table...")
-    code_rows = load_table_rows(dump_path, "LIBRARY_CODE")
-    codes = [LibraryCode(id=r[0], genre_id=r[1], presentation_name=r[7]) for r in code_rows]
-    log.info("  %d library codes loaded", len(codes))
+    if not _used_cache:
+        # 1. Parse genre table
+        log.info("Parsing GENRE table...")
+        for row in iter_table_rows(dump_path, "GENRE"):
+            GENRE_NAMES[row[0]] = row[1]
+        log.info("  %d genres loaded", len(GENRE_NAMES))
 
-    # 3. Parse radio shows for DJ mapping
-    log.info("Parsing FLOWSHEET_RADIO_SHOW_PROD table...")
-    show_to_dj: dict[int, int | str] = {}
-    for row in iter_table_rows(dump_path, "FLOWSHEET_RADIO_SHOW_PROD"):
-        show_id = row[0]
-        dj_id = row[3]  # DJ_ID (int or None)
-        dj_name = row[2] or ""  # DJ_NAME (str)
-        if isinstance(dj_id, int) and dj_id > 0:
-            show_to_dj[show_id] = dj_id
-        elif dj_name:
-            show_to_dj[show_id] = dj_name
-    log.info("  %d shows with DJ mapping", len(show_to_dj))
+        # 2. Parse library tables
+        log.info("Parsing LIBRARY_RELEASE table...")
+        release_rows = load_table_rows(dump_path, "LIBRARY_RELEASE")
+        releases = [LibraryRelease(id=r[0], library_code_id=r[8]) for r in release_rows]
+        log.info("  %d releases loaded", len(releases))
 
-    # 4. Build resolver
-    resolver = ArtistResolver(releases=releases, codes=codes)
+        log.info("Parsing LIBRARY_CODE table...")
+        code_rows = load_table_rows(dump_path, "LIBRARY_CODE")
+        codes = [LibraryCode(id=r[0], genre_id=r[1], presentation_name=r[7]) for r in code_rows]
+        log.info("  %d library codes loaded", len(codes))
 
-    # 5. Stream flowsheet entries and resolve
-    log.info("Parsing FLOWSHEET_ENTRY_PROD and resolving artists...")
-    resolved_entries = []
-    total_entries = 0
-    music_entries = 0
-    catalog_resolved = 0
+        # 3. Parse radio shows for DJ mapping
+        log.info("Parsing FLOWSHEET_RADIO_SHOW_PROD table...")
+        show_to_dj: dict[int, int | str] = {}
+        for row in iter_table_rows(dump_path, "FLOWSHEET_RADIO_SHOW_PROD"):
+            show_id = row[0]
+            dj_id = row[3]  # DJ_ID (int or None)
+            dj_name = row[2] or ""  # DJ_NAME (str)
+            if isinstance(dj_id, int) and dj_id > 0:
+                show_to_dj[show_id] = dj_id
+            elif dj_name:
+                show_to_dj[show_id] = dj_name
+        log.info("  %d shows with DJ mapping", len(show_to_dj))
 
-    for row in iter_table_rows(dump_path, "FLOWSHEET_ENTRY_PROD"):
-        total_entries += 1
-        entry_type_code = row[15]
+        # 4. Build resolver
+        resolver = ArtistResolver(releases=releases, codes=codes)
 
-        if total_entries % 100_000 == 0:
-            log.info("  ... %d entries processed", total_entries)
+        # 5. Stream flowsheet entries and resolve
+        log.info("Parsing FLOWSHEET_ENTRY_PROD and resolving artists...")
+        resolved_entries = []
+        total_entries = 0
+        music_entries = 0
+        catalog_resolved = 0
 
-        # Filter to music entries only (type code < 7)
-        if not isinstance(entry_type_code, int) or entry_type_code >= 7:
-            continue
+        for row in iter_table_rows(dump_path, "FLOWSHEET_ENTRY_PROD"):
+            total_entries += 1
+            entry_type_code = row[15]
 
-        try:
-            start_time_raw = row[10]
-            request_flag_raw = row[18]
-            entry = FlowsheetEntry(
-                id=row[0],
-                artist_name=row[1] or "",
-                song_title=row[3] or "",
-                release_title=row[4] or "",
-                library_release_id=row[6] if isinstance(row[6], int) else 0,
-                label_name=row[8] or "",
-                show_id=row[12] if isinstance(row[12], int) else 0,
-                sequence=row[13] if isinstance(row[13], int) else 0,
-                entry_type_code=entry_type_code,
-                request_flag=request_flag_raw if isinstance(request_flag_raw, int) else 0,
-                start_time=start_time_raw if isinstance(start_time_raw, int) else None,
-            )
-        except Exception:
-            log.debug("Skipping unparseable row ID=%s", row[0], exc_info=True)
-            continue
+            if total_entries % 100_000 == 0:
+                log.info("  ... %d entries processed", total_entries)
 
-        music_entries += 1
-        resolved = resolver.resolve(entry)
-        if resolved.resolution_method == "catalog":
-            catalog_resolved += 1
-        resolved_entries.append(resolved)
+            # Filter to music entries only (type code < 7)
+            if not isinstance(entry_type_code, int) or entry_type_code >= 7:
+                continue
 
-    log.info(
-        "  %d total entries, %d music entries, %d catalog-resolved (%.1f%%)",
-        total_entries,
-        music_entries,
-        catalog_resolved,
-        (catalog_resolved / music_entries * 100) if music_entries else 0,
-    )
+            try:
+                start_time_raw = row[10]
+                request_flag_raw = row[18]
+                entry = FlowsheetEntry(
+                    id=row[0],
+                    artist_name=row[1] or "",
+                    song_title=row[3] or "",
+                    release_title=row[4] or "",
+                    library_release_id=row[6] if isinstance(row[6], int) else 0,
+                    label_name=row[8] or "",
+                    show_id=row[12] if isinstance(row[12], int) else 0,
+                    sequence=row[13] if isinstance(row[13], int) else 0,
+                    entry_type_code=entry_type_code,
+                    request_flag=request_flag_raw if isinstance(request_flag_raw, int) else 0,
+                    start_time=start_time_raw if isinstance(start_time_raw, int) else None,
+                )
+            except Exception:
+                log.debug("Skipping unparseable row ID=%s", row[0], exc_info=True)
+                continue
 
-    # 5b. Re-resolve raw entries with sufficient play count using relaxed fuzzy threshold
-    log.info("Re-resolving raw entries with play-count-weighted fuzzy matching...")
-    resolved_entries = resolver.re_resolve_with_play_counts(resolved_entries)
+            music_entries += 1
+            resolved = resolver.resolve(entry)
+            if resolved.resolution_method == "catalog":
+                catalog_resolved += 1
+            resolved_entries.append(resolved)
+
+        log.info(
+            "  %d total entries, %d music entries, %d catalog-resolved (%.1f%%)",
+            total_entries,
+            music_entries,
+            catalog_resolved,
+            (catalog_resolved / music_entries * 100) if music_entries else 0,
+        )
+
+        # 5b. Re-resolve raw entries with sufficient play count using relaxed fuzzy threshold
+        log.info("Re-resolving raw entries with play-count-weighted fuzzy matching...")
+        resolved_entries = resolver.re_resolve_with_play_counts(resolved_entries)
+
+        # Save to cache for future runs
+        if _cache_path:
+            log.info("Saving resolved entries to cache: %s", _cache_path)
+            with open(_cache_path, "wb") as _f:
+                pickle.dump(
+                    {
+                        "resolved_entries": resolved_entries,
+                        "genre_names": dict(GENRE_NAMES),
+                        "codes": codes,
+                        "releases": releases,
+                        "show_to_dj": show_to_dj,
+                        "total_entries": total_entries,
+                        "music_entries": music_entries,
+                        "catalog_resolved": catalog_resolved,
+                    },
+                    _f,
+                )
 
     # 5c. Entity store setup (optional)
     entity_store: EntityStore | None = None
