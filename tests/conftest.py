@@ -12,6 +12,7 @@ from semantic_index.models import (
     DiscogsLabel,
     DiscogsRelease,
     DiscogsTrack,
+    Entity,
     FlowsheetEntry,
     LabelInfo,
     LibraryCode,
@@ -158,3 +159,15 @@ def make_personnel_credit(
         name=name,
         roles=roles if roles is not None else ["Written-By"],
     )
+
+
+def make_entity(
+    name: str = "Autechre",
+    entity_type: str = "artist",
+    wikidata_qid: str | None = None,
+) -> Entity:
+    """Create an Entity instance for testing.
+
+    Uses a fixed id=1 since the real id is assigned by SQLite AUTOINCREMENT.
+    """
+    return Entity(id=1, name=name, entity_type=entity_type, wikidata_qid=wikidata_qid)
