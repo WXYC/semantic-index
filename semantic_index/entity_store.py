@@ -103,6 +103,27 @@ CREATE TABLE IF NOT EXISTS reconciliation_log (
 CREATE INDEX IF NOT EXISTS idx_reconciliation_artist ON reconciliation_log(artist_id);
 """
 
+_ARTIST_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS artist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_name TEXT NOT NULL UNIQUE,
+    genre TEXT,
+    total_plays INTEGER NOT NULL DEFAULT 0,
+    active_first_year INTEGER,
+    active_last_year INTEGER,
+    dj_count INTEGER NOT NULL DEFAULT 0,
+    request_ratio REAL NOT NULL DEFAULT 0.0,
+    show_count INTEGER NOT NULL DEFAULT 0,
+    discogs_artist_id INTEGER,
+    entity_id INTEGER REFERENCES entity(id),
+    musicbrainz_artist_id TEXT,
+    wxyc_library_code_id INTEGER,
+    reconciliation_status TEXT NOT NULL DEFAULT 'unreconciled',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 _ARTIST_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_artist_entity ON artist(entity_id);
 CREATE INDEX IF NOT EXISTS idx_artist_discogs ON artist(discogs_artist_id) WHERE discogs_artist_id IS NOT NULL;
@@ -146,13 +167,15 @@ class EntityStore:
         return row is not None
 
     def _migrate_artist_table(self) -> None:
-        """Conditionally add new columns to an existing artist table.
+        """Create the artist table if missing, or add new columns to an existing one.
 
-        Uses PRAGMA table_info to detect which columns already exist and
-        only adds the missing ones. No-op if the table doesn't exist or
-        all columns are already present.
+        On a fresh database, creates the full artist table with all entity
+        store columns. On an old-schema database, uses PRAGMA table_info to
+        detect which columns already exist and only adds the missing ones.
         """
         if not self._has_table("artist"):
+            self._conn.executescript(_ARTIST_TABLE_SCHEMA)
+            logger.info("Created artist table with full entity store schema")
             return
 
         existing = {r[1] for r in self._conn.execute("PRAGMA table_info(artist)")}

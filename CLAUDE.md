@@ -27,12 +27,12 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
-| `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema migration, CRUD, artist upsert, reconciliation log, artist styles. |
+| `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles. Creates the artist table from scratch on a fresh database or migrates an existing one. |
 | `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
-| `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. |
+| `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
 | `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, SearchResponse, NeighborsResponse, ExplainResponse). |
@@ -144,6 +144,18 @@ python run_pipeline.py /path/to/wxycmusic.sql [--output-dir output/] [--min-coun
 Output: `output/wxyc_artist_pmi.gexf` (Gephi graph) + `output/wxyc_artist_graph.db` (SQLite database).
 
 Use `--no-sqlite` to skip the SQLite export.
+
+### Entity store mode
+
+Pass `--entity-store-path` to enable the entity store pipeline: artists are managed by the entity store (with persistent reconciliation state) rather than created fresh on each run. The entity store database becomes the SQLite output.
+
+```bash
+python run_pipeline.py dump.sql --entity-store-path output/wxyc_artist_graph.db --discogs-cache-dsn postgresql://...
+```
+
+- `--entity-store-path PATH` — Path to entity store SQLite database. Creates it if needed.
+- `--skip-reconciliation` — Skip Discogs reconciliation step.
+- `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
 
 ## Graph API
 
