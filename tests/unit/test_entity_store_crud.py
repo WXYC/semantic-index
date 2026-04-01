@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from semantic_index.entity_store import EntityStore
-from semantic_index.models import ArtistStats
+from semantic_index.models import ArtistStats, ReconciliationEvent
 
 # The old artist schema — matches sqlite_export._SCHEMA artist table
 _OLD_ARTIST_SCHEMA = """
@@ -316,3 +316,168 @@ class TestBulkUpdateStats:
             "SELECT discogs_artist_id FROM artist WHERE canonical_name = 'Autechre'"
         ).fetchone()
         assert row[0] == 42
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Reconciliation Log
+# ---------------------------------------------------------------------------
+
+
+class TestLogReconciliation:
+    def test_logs_event(self, store: EntityStore):
+        artist_id = store.upsert_artist("Autechre")
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="discogs",
+            external_id="42",
+            confidence=0.95,
+            method="exact",
+        )
+        row = store._conn.execute(
+            "SELECT artist_id, source, external_id, confidence, method FROM reconciliation_log"
+        ).fetchone()
+        assert row[0] == artist_id
+        assert row[1] == "discogs"
+        assert row[2] == "42"
+        assert row[3] == pytest.approx(0.95)
+        assert row[4] == "exact"
+
+    def test_logs_without_confidence(self, store: EntityStore):
+        artist_id = store.upsert_artist("Stereolab")
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="wikidata",
+            external_id="Q483477",
+            confidence=None,
+            method="api_search",
+        )
+        row = store._conn.execute(
+            "SELECT confidence FROM reconciliation_log WHERE artist_id = ?",
+            (artist_id,),
+        ).fetchone()
+        assert row[0] is None
+
+    def test_nonexistent_artist_raises(self, store: EntityStore):
+        with pytest.raises(ValueError, match="No artist with id"):
+            store.log_reconciliation(
+                artist_id=9999,
+                source="discogs",
+                external_id="42",
+                confidence=0.9,
+                method="exact",
+            )
+
+    def test_multiple_events_for_same_artist(self, store: EntityStore):
+        artist_id = store.upsert_artist("Cat Power")
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="discogs",
+            external_id="123",
+            confidence=0.8,
+            method="fuzzy",
+        )
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="wikidata",
+            external_id="Q271362",
+            confidence=0.95,
+            method="exact",
+        )
+        count = store._conn.execute(
+            "SELECT COUNT(*) FROM reconciliation_log WHERE artist_id = ?",
+            (artist_id,),
+        ).fetchone()[0]
+        assert count == 2
+
+
+class TestGetReconciliationHistory:
+    def test_returns_events(self, store: EntityStore):
+        artist_id = store.upsert_artist("Autechre")
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="discogs",
+            external_id="42",
+            confidence=0.95,
+            method="exact",
+        )
+        history = store.get_reconciliation_history(artist_id)
+        assert len(history) == 1
+        event = history[0]
+        assert isinstance(event, ReconciliationEvent)
+        assert event.source == "discogs"
+        assert event.external_id == "42"
+        assert event.confidence == pytest.approx(0.95)
+        assert event.method == "exact"
+
+    def test_empty_history(self, store: EntityStore):
+        artist_id = store.upsert_artist("Jessica Pratt")
+        history = store.get_reconciliation_history(artist_id)
+        assert history == []
+
+    def test_multiple_events_ordered(self, store: EntityStore):
+        """Events should be returned in insertion order (by id)."""
+        artist_id = store.upsert_artist("Father John Misty")
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="discogs",
+            external_id="999",
+            confidence=0.7,
+            method="fuzzy",
+        )
+        store.log_reconciliation(
+            artist_id=artist_id,
+            source="wikidata",
+            external_id="Q1234",
+            confidence=0.99,
+            method="exact",
+        )
+        history = store.get_reconciliation_history(artist_id)
+        assert len(history) == 2
+        assert history[0].source == "discogs"
+        assert history[1].source == "wikidata"
+
+    def test_does_not_include_other_artists(self, store: EntityStore):
+        id_a = store.upsert_artist("Autechre")
+        id_b = store.upsert_artist("Stereolab")
+        store.log_reconciliation(
+            artist_id=id_a,
+            source="discogs",
+            external_id="42",
+            confidence=0.9,
+            method="exact",
+        )
+        store.log_reconciliation(
+            artist_id=id_b,
+            source="discogs",
+            external_id="99",
+            confidence=0.8,
+            method="fuzzy",
+        )
+        history = store.get_reconciliation_history(id_a)
+        assert len(history) == 1
+        assert history[0].external_id == "42"
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Name-to-ID Mapping
+# ---------------------------------------------------------------------------
+
+
+class TestGetNameToIdMapping:
+    def test_returns_mapping(self, store: EntityStore):
+        id_map = store.bulk_upsert_artists(["Autechre", "Stereolab", "Cat Power"])
+        mapping = store.get_name_to_id_mapping()
+        assert mapping == id_map
+
+    def test_empty_table(self, store: EntityStore):
+        mapping = store.get_name_to_id_mapping()
+        assert mapping == {}
+
+    def test_matches_individual_upserts(self, store: EntityStore):
+        """Mapping should be consistent with individual upsert return values."""
+        a_id = store.upsert_artist("Sessa", genre="Latin")
+        b_id = store.upsert_artist("Buck Meek", genre="Rock")
+        mapping = store.get_name_to_id_mapping()
+        assert mapping["Sessa"] == a_id
+        assert mapping["Buck Meek"] == b_id
+        assert len(mapping) == 2
