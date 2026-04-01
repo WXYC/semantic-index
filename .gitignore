@@ -22,4 +22,14 @@ output/
 htmlcov/
 
 .DS_Store
+*.gexf
+
 rust/sql-parser/target/
+
+orchestrator/logs/
+orchestrator/metadata/
+orchestrator/node_modules/
+orchestrator/statuses/
+orchestrator/package-lock.json
+
+coverage.json
