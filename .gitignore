@@ -22,3 +22,4 @@ output/
 htmlcov/
 
 .DS_Store
+rust/sql-parser/target/
