@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS label_hierarchy (
     PRIMARY KEY (parent_label_id, child_label_id)
 );
 
+-- Per-artist style tags from Discogs (persisted during reconciliation)
+
+CREATE TABLE IF NOT EXISTS artist_style (
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    style TEXT NOT NULL,
+    PRIMARY KEY (artist_id, style)
+);
+
 -- Reconciliation audit trail
 
 CREATE TABLE IF NOT EXISTS reconciliation_log (
@@ -415,6 +423,82 @@ class EntityStore:
             )
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Reconciliation Queries
+    # ------------------------------------------------------------------
+
+    def get_unreconciled_artists(self, limit: int | None = None) -> list[tuple[int, str]]:
+        """Return (id, canonical_name) pairs for artists with status 'unreconciled'.
+
+        Args:
+            limit: Maximum number of artists to return. None for all.
+
+        Returns:
+            List of (artist_id, canonical_name) tuples.
+        """
+        sql = "SELECT id, canonical_name FROM artist WHERE reconciliation_status = 'unreconciled'"
+        if limit is not None:
+            sql += f" LIMIT {limit}"
+        rows = self._conn.execute(sql).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def update_reconciliation_status(self, artist_id: int, status: str) -> None:
+        """Update the reconciliation status for an artist.
+
+        Args:
+            artist_id: The artist row's primary key.
+            status: New status ('reconciled', 'no_match', 'partial', etc.).
+
+        Raises:
+            ValueError: If no artist with the given id exists.
+        """
+        cur = self._conn.execute(
+            """UPDATE artist SET reconciliation_status = ?,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE id = ?""",
+            (status, artist_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"No artist with id {artist_id}")
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Artist Styles
+    # ------------------------------------------------------------------
+
+    def persist_artist_styles(self, artist_id: int, styles: list[str]) -> None:
+        """Persist Discogs style tags for an artist (idempotent).
+
+        Uses INSERT OR IGNORE so overlapping styles from repeat calls
+        do not raise errors or create duplicates.
+
+        Args:
+            artist_id: The artist row's primary key.
+            styles: List of Discogs style strings.
+        """
+        if not styles:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO artist_style (artist_id, style) VALUES (?, ?)",
+            [(artist_id, style) for style in styles],
+        )
+        self._conn.commit()
+
+    def get_artist_styles(self, artist_id: int) -> list[str]:
+        """Return all style tags for an artist, sorted alphabetically.
+
+        Args:
+            artist_id: The artist row's primary key.
+
+        Returns:
+            Sorted list of style strings.
+        """
+        rows = self._conn.execute(
+            "SELECT style FROM artist_style WHERE artist_id = ? ORDER BY style",
+            (artist_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
 
     # ------------------------------------------------------------------
     # Name-to-ID Mapping
