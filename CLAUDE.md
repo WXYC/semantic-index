@@ -35,8 +35,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, SearchResponse, NeighborsResponse, ExplainResponse). |
-| `semantic_index/api/routes.py` | Graph API query endpoints: search, neighbors by edge type, explain relationships between two artists. |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse). |
+| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type, explain relationships, entity artist groups. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -179,8 +179,10 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/` | D3.js graph explorer (interactive visualization). |
 | `GET` | `/health` | Health check — returns artist count or 503 if database is unreachable. |
 | `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
+| `GET` | `/graph/artists/{id}` | Full artist detail including external IDs (Discogs, MusicBrainz, Wikidata QID) joined from the entity table. Gracefully degrades on old-schema databases. |
 | `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
+| `GET` | `/graph/entities/{id}/artists` | All artists sharing an entity (alias group). Returns entity metadata and a list of artist summaries. |
 
 ### Deployment
 
