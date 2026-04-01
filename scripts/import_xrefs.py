@@ -14,17 +14,22 @@ import sqlite3
 import sys
 
 from semantic_index.cross_reference import CrossReferenceExtractor
-from semantic_index.models import LibraryCode, LibraryRelease
 from semantic_index.sql_parser import load_table_rows
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+)
 log = logging.getLogger(__name__)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Import cross-reference edges into SQLite graph.")
-    parser.add_argument("xref_dump", help="Path to the xrefs SQL dump (from dump-db-for-index-build.sh xrefs)")
-    parser.add_argument("main_dump", help="Path to the main SQL dump (for LIBRARY_CODE and LIBRARY_RELEASE)")
+    parser.add_argument(
+        "xref_dump", help="Path to the xrefs SQL dump (from dump-db-for-index-build.sh xrefs)"
+    )
+    parser.add_argument(
+        "main_dump", help="Path to the main SQL dump (for LIBRARY_CODE and LIBRARY_RELEASE)"
+    )
     parser.add_argument("sqlite_db", help="Path to the existing SQLite graph database")
     args = parser.parse_args()
 

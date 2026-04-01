@@ -139,6 +139,57 @@ class DiscogsClient:
             )
             return []
 
+    def get_enrichment_for_artist(self, artist_name: str, release_ids: list[int]) -> dict:
+        """Fetch all enrichment data for an artist's releases in bulk.
+
+        Instead of N per-release queries, this runs 4 bulk queries across all
+        release IDs at once. Returns a dict with keys: styles, extra_artists,
+        labels, track_artists.
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not release_ids:
+            return {"styles": [], "extra_artists": [], "labels": [], "track_artists": []}
+
+        try:
+            ids_tuple = tuple(release_ids)
+            placeholder = ",".join(["%s"] * len(ids_tuple))
+
+            # Styles (from release_style table)
+            style_rows = conn.execute(
+                f"SELECT DISTINCT style FROM release_style WHERE release_id IN ({placeholder})",  # noqa: S608
+                ids_tuple,
+            ).fetchall()
+
+            # Extra artists (personnel credits)
+            extra_rows = conn.execute(
+                f"SELECT DISTINCT artist_name, role FROM release_artist WHERE release_id IN ({placeholder}) AND extra = 1",  # noqa: S608
+                ids_tuple,
+            ).fetchall()
+
+            # Labels
+            label_rows = conn.execute(
+                f"SELECT DISTINCT label_id, label_name FROM release_label WHERE release_id IN ({placeholder})",  # noqa: S608
+                ids_tuple,
+            ).fetchall()
+
+            # Track artists (for compilation detection)
+            track_artist_rows = conn.execute(
+                f"SELECT release_id, artist_name FROM release_track_artist WHERE release_id IN ({placeholder})",  # noqa: S608
+                ids_tuple,
+            ).fetchall()
+
+            return {
+                "styles": [r[0] for r in style_rows],
+                "extra_artists": [(r[0], r[1]) for r in extra_rows],
+                "labels": [(r[0], r[1]) for r in label_rows],
+                "track_artists": [(r[0], r[1]) for r in track_artist_rows],
+            }
+        except Exception:
+            logger.warning(
+                "Cache get_enrichment_for_artist failed for %r", artist_name, exc_info=True
+            )
+            return {"styles": [], "extra_artists": [], "labels": [], "track_artists": []}
+
     def _search_artist_cache(self, name: str) -> DiscogsSearchResult | None:
         """Search for an artist in the discogs-cache PostgreSQL.
 

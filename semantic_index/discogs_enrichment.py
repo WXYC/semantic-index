@@ -1,17 +1,17 @@
 """Discogs enrichment module for artist metadata aggregation.
 
 Enriches canonical artists with Discogs metadata: styles, personnel credits,
-labels, and compilation appearances. Uses the DiscogsClient to fetch release
-data and aggregates across all releases per artist.
+labels, and compilation appearances. Uses bulk queries against the Discogs cache
+to minimize database round-trips.
 """
 
 import logging
+from collections import defaultdict
 
 from semantic_index.discogs_client import DiscogsClient
 from semantic_index.models import (
     ArtistEnrichment,
     CompilationAppearance,
-    DiscogsRelease,
     LabelInfo,
     PersonnelCredit,
 )
@@ -19,6 +19,9 @@ from semantic_index.models import (
 logger = logging.getLogger(__name__)
 
 _PROGRESS_INTERVAL = 500
+
+# Maximum release IDs per bulk query to avoid excessive IN-clause sizes
+_BATCH_SIZE = 5000
 
 
 class DiscogsEnricher:
@@ -32,16 +35,15 @@ class DiscogsEnricher:
     ) -> ArtistEnrichment | None:
         """Fetch and aggregate Discogs metadata for a canonical artist.
 
-        1. Search for artist in Discogs (by name or ID)
-        2. Get all releases for that artist
-        3. Aggregate: styles (union), personnel (extra_artists with roles), labels, compilations
+        Uses bulk queries: gets all release IDs first, then fetches styles,
+        personnel, labels, and compilation data in 4 queries total.
 
         Args:
             canonical_name: The canonical artist name to enrich.
-            discogs_artist_id: Known Discogs artist ID, if available. Skips search when provided.
+            discogs_artist_id: Known Discogs artist ID, if available.
 
         Returns:
-            ArtistEnrichment with aggregated metadata, or None if artist not found in Discogs.
+            ArtistEnrichment with aggregated metadata, or None if artist not found.
         """
         # Step 1: Resolve Discogs identity
         if discogs_artist_id is None:
@@ -52,20 +54,52 @@ class DiscogsEnricher:
 
         # Step 2: Get all release IDs for this artist
         release_ids = self._client.get_releases_for_artist(canonical_name)
+        if not release_ids:
+            return ArtistEnrichment(
+                canonical_name=canonical_name,
+                discogs_artist_id=discogs_artist_id,
+            )
 
-        # Step 3: Fetch each release and aggregate
+        # Step 3: Fetch all enrichment data in bulk (4 queries, not N*5)
         all_styles: set[str] = set()
-        personnel_map: dict[str, set[str]] = {}  # name -> set of roles
-        labels_seen: dict[str, LabelInfo] = {}  # name -> LabelInfo
+        personnel_map: dict[str, set[str]] = {}
+        labels_seen: dict[str, LabelInfo] = {}
         compilations: list[CompilationAppearance] = []
 
-        for release_id in release_ids:
-            release = self._client.get_release(release_id)
-            if release is None:
-                continue
-            self._aggregate_release(
-                release, canonical_name, all_styles, personnel_map, labels_seen, compilations
-            )
+        # Process in batches to avoid huge IN clauses
+        for batch_start in range(0, len(release_ids), _BATCH_SIZE):
+            batch_ids = release_ids[batch_start : batch_start + _BATCH_SIZE]
+            data = self._client.get_enrichment_for_artist(canonical_name, batch_ids)
+
+            # Styles
+            all_styles.update(data["styles"])
+
+            # Personnel (extra artists with roles)
+            for name, role in data["extra_artists"]:
+                if name not in personnel_map:
+                    personnel_map[name] = set()
+                if role:
+                    personnel_map[name].add(role)
+
+            # Labels
+            for label_id, label_name in data["labels"]:
+                if label_name not in labels_seen:
+                    labels_seen[label_name] = LabelInfo(name=label_name, label_id=label_id)
+
+            # Compilation detection: group track artists by release
+            tracks_by_release: dict[int, list[str]] = defaultdict(list)
+            for rid, artist in data["track_artists"]:
+                if artist != canonical_name:
+                    tracks_by_release[rid].append(artist)
+            for rid, artists in tracks_by_release.items():
+                if artists:
+                    compilations.append(
+                        CompilationAppearance(
+                            release_id=rid,
+                            release_title="",  # Title not fetched in bulk
+                            other_artists=sorted(set(artists)),
+                        )
+                    )
 
         return ArtistEnrichment(
             canonical_name=canonical_name,
@@ -83,10 +117,10 @@ class DiscogsEnricher:
         """Enrich a batch of artists.
 
         Args:
-            artists: Mapping of canonical_name to discogs_artist_id (or None if unknown).
+            artists: Mapping of canonical_name to discogs_artist_id (or None).
 
         Returns:
-            Dict of canonical_name to ArtistEnrichment (only for successfully enriched artists).
+            Dict of canonical_name to ArtistEnrichment (only for successful enrichments).
         """
         results: dict[str, ArtistEnrichment] = {}
         total = len(artists)
@@ -103,44 +137,3 @@ class DiscogsEnricher:
             "Enrichment complete: %d / %d artists enriched successfully", len(results), total
         )
         return results
-
-    @staticmethod
-    def _aggregate_release(
-        release: DiscogsRelease,
-        canonical_name: str,
-        all_styles: set[str],
-        personnel_map: dict[str, set[str]],
-        labels_seen: dict[str, LabelInfo],
-        compilations: list[CompilationAppearance],
-    ) -> None:
-        """Aggregate data from a single release into the running accumulators."""
-        # Styles
-        all_styles.update(release.styles)
-
-        # Personnel from extra_artists
-        for credit in release.extra_artists:
-            if credit.name not in personnel_map:
-                personnel_map[credit.name] = set()
-            if credit.role is not None:
-                personnel_map[credit.name].add(credit.role)
-
-        # Labels
-        for label in release.labels:
-            if label.name not in labels_seen:
-                labels_seen[label.name] = LabelInfo(name=label.name, label_id=label.label_id)
-
-        # Compilation detection: tracks with per-track artist credits
-        has_track_artists = any(len(track.artists) > 0 for track in release.tracklist)
-        if has_track_artists:
-            other_artists: list[str] = []
-            for track in release.tracklist:
-                for artist in track.artists:
-                    if artist != canonical_name and artist not in other_artists:
-                        other_artists.append(artist)
-            compilations.append(
-                CompilationAppearance(
-                    release_id=release.release_id,
-                    release_title=release.title,
-                    other_artists=other_artists,
-                )
-            )

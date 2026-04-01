@@ -235,10 +235,7 @@ class ArtistResolver:
         if len(results) >= 2:
             _, second_score, _ = results[1]
             second_name = self._fuzzy_choices[results[1][0]]
-            if (
-                best_score - second_score < FUZZY_AMBIGUITY_THRESHOLD
-                and best_name != second_name
-            ):
+            if best_score - second_score < FUZZY_AMBIGUITY_THRESHOLD and best_name != second_name:
                 self._fuzzy_cache[cache_key] = None
                 return None
 
