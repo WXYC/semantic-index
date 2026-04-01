@@ -139,6 +139,115 @@ class DiscogsClient:
             )
             return []
 
+    def get_bulk_enrichment(self, artist_names: list[str]) -> dict:
+        """Fetch enrichment data for ALL artists in a few large queries.
+
+        Instead of per-artist queries, this runs massive JOINs that return
+        data for all artists at once, grouped by artist name.
+
+        Returns a dict keyed by artist_name, each containing:
+            styles, extra_artists, labels, track_artists
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not artist_names:
+            return {}
+
+        try:
+            result: dict[str, dict] = {}
+            lower_names = list({n.lower() for n in artist_names})
+            batch_size = 1000
+
+            for batch_start in range(0, len(lower_names), batch_size):
+                batch = lower_names[batch_start : batch_start + batch_size]
+                batch_num = batch_start // batch_size + 1
+                total_batches = (len(lower_names) + batch_size - 1) // batch_size
+
+                # 1. Get release_id → artist_name mappings for this batch
+                rows = conn.execute(
+                    "SELECT ra.artist_name, ra.release_id FROM release_artist ra WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
+                    (batch,),
+                ).fetchall()
+
+                artist_releases: dict[str, list[int]] = {}
+                for artist_name, release_id in rows:
+                    artist_releases.setdefault(artist_name, []).append(release_id)
+
+                all_release_ids = list({rid for rids in artist_releases.values() for rid in rids})
+                if not all_release_ids:
+                    logger.info(
+                        "  Batch %d/%d: %d names, 0 matched", batch_num, total_batches, len(batch)
+                    )
+                    continue
+
+                # 2-5. Fetch enrichment data for all releases in this batch
+                style_rows = conn.execute(
+                    "SELECT release_id, style FROM release_style WHERE release_id = ANY(%s)",
+                    (all_release_ids,),
+                ).fetchall()
+                release_styles: dict[int, list[str]] = {}
+                for rid, style in style_rows:
+                    release_styles.setdefault(rid, []).append(style)
+
+                extra_rows = conn.execute(
+                    "SELECT release_id, artist_name, role FROM release_artist WHERE extra = 1 AND release_id = ANY(%s)",
+                    (all_release_ids,),
+                ).fetchall()
+                release_extras: dict[int, list[tuple[str, str | None]]] = {}
+                for rid, name, role in extra_rows:
+                    release_extras.setdefault(rid, []).append((name, role))
+
+                label_rows = conn.execute(
+                    "SELECT release_id, label_id, label_name FROM release_label WHERE release_id = ANY(%s)",
+                    (all_release_ids,),
+                ).fetchall()
+                release_labels: dict[int, list[tuple[int | None, str]]] = {}
+                for rid, label_id, label_name in label_rows:
+                    release_labels.setdefault(rid, []).append((label_id, label_name))
+
+                track_artist_rows = conn.execute(
+                    "SELECT release_id, artist_name FROM release_track_artist WHERE release_id = ANY(%s)",
+                    (all_release_ids,),
+                ).fetchall()
+                release_track_artists: dict[int, list[str]] = {}
+                for rid, name in track_artist_rows:
+                    release_track_artists.setdefault(rid, []).append(name)
+
+                # 6. Group by artist
+                for artist_name, rids in artist_releases.items():
+                    styles: set[str] = set()
+                    extras: list[tuple[str, str | None]] = []
+                    labels: list[tuple[int | None, str]] = []
+                    track_artists: list[tuple[int, str]] = []
+                    for rid in rids:
+                        styles.update(release_styles.get(rid, []))
+                        extras.extend(release_extras.get(rid, []))
+                        labels.extend(release_labels.get(rid, []))
+                        for ta_name in release_track_artists.get(rid, []):
+                            track_artists.append((rid, ta_name))
+                    result[artist_name] = {
+                        "styles": list(styles),
+                        "extra_artists": extras,
+                        "labels": labels,
+                        "track_artists": track_artists,
+                    }
+
+                logger.info(
+                    "  Batch %d/%d: %d names → %d artists, %d releases, %d styles, %d credits",
+                    batch_num,
+                    total_batches,
+                    len(batch),
+                    len(artist_releases),
+                    len(all_release_ids),
+                    len(style_rows),
+                    len(extra_rows),
+                )
+
+            logger.info("Bulk enrichment complete: %d artists enriched", len(result))
+            return result
+        except Exception:
+            logger.warning("Bulk enrichment failed", exc_info=True)
+            return {}
+
     def get_enrichment_for_artist(self, artist_name: str, release_ids: list[int]) -> dict:
         """Fetch all enrichment data for an artist's releases in bulk.
 
