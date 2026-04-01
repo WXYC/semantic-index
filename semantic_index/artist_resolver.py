@@ -16,6 +16,7 @@ import re
 from collections import Counter
 from typing import TYPE_CHECKING
 
+from rapidfuzz import process as rfprocess
 from rapidfuzz.distance import JaroWinkler
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
@@ -120,10 +121,11 @@ class ArtistResolver:
                 else:
                     self._normalized_index[norm] = c.presentation_name
 
-        # Fuzzy match candidates: list of (lowered_name, canonical_name)
-        self._fuzzy_candidates: list[tuple[str, str]] = [
-            (key, name) for key, name in self._name_index.items()
-        ]
+        # Fuzzy match: mapping from lowered candidate name to canonical name
+        self._fuzzy_choices: dict[str, str] = dict(self._name_index)
+
+        # Cache: lowered query → (canonical_name | None) per threshold
+        self._fuzzy_cache: dict[tuple[str, float], str | None] = {}
 
     def resolve(self, entry: FlowsheetEntry) -> ResolvedEntry:
         """Resolve an entry's artist name to a canonical catalog name.
@@ -195,6 +197,9 @@ class ArtistResolver:
     def _fuzzy_match(self, query: str, min_score: float = FUZZY_MIN_SCORE) -> str | None:
         """Find the best fuzzy match for a query string.
 
+        Uses rapidfuzz.process.extract (C-accelerated batch scoring) and caches
+        results so repeated queries for the same name are instant.
+
         Args:
             query: Lowercased artist name to match.
             min_score: Minimum Jaro-Winkler similarity to accept (default: FUZZY_MIN_SCORE).
@@ -202,27 +207,42 @@ class ArtistResolver:
         Returns the canonical name if a match exceeds the minimum score
         and passes the ambiguity guard. Returns None otherwise.
         """
-        if not self._fuzzy_candidates or not query:
+        if not self._fuzzy_choices or not query:
             return None
 
-        scored: list[tuple[float, str]] = []
-        for candidate_key, canonical_name in self._fuzzy_candidates:
-            score = JaroWinkler.similarity(query, candidate_key)
-            if score >= min_score:
-                scored.append((score, canonical_name))
+        # Check cache
+        cache_key = (query, min_score)
+        if cache_key in self._fuzzy_cache:
+            return self._fuzzy_cache[cache_key]
 
-        if not scored:
+        # Use rapidfuzz batch API — scores all candidates in C, returns top N
+        results = rfprocess.extract(
+            query,
+            self._fuzzy_choices.keys(),
+            scorer=JaroWinkler.similarity,
+            score_cutoff=min_score,
+            limit=2,
+        )
+
+        if not results:
+            self._fuzzy_cache[cache_key] = None
             return None
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best_name = scored[0]
+        best_key, best_score, _ = results[0]
+        best_name = self._fuzzy_choices[best_key]
 
         # Ambiguity guard: if top two candidates are too close, reject
-        if len(scored) >= 2:
-            second_score, second_name = scored[1]
-            if best_score - second_score < FUZZY_AMBIGUITY_THRESHOLD and best_name != second_name:
+        if len(results) >= 2:
+            _, second_score, _ = results[1]
+            second_name = self._fuzzy_choices[results[1][0]]
+            if (
+                best_score - second_score < FUZZY_AMBIGUITY_THRESHOLD
+                and best_name != second_name
+            ):
+                self._fuzzy_cache[cache_key] = None
                 return None
 
+        self._fuzzy_cache[cache_key] = best_name
         return best_name
 
     def re_resolve_with_play_counts(
