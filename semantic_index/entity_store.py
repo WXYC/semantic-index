@@ -539,6 +539,28 @@ class EntityStore:
         return [row[0] for row in rows]
 
     # ------------------------------------------------------------------
+    # Wikidata Reconciliation Queries
+    # ------------------------------------------------------------------
+
+    def get_artists_needing_wikidata(self) -> list[tuple[int, str, int]]:
+        """Return artists with a Discogs ID that lack a Wikidata QID.
+
+        An artist "needs Wikidata" when it has ``discogs_artist_id IS NOT NULL``
+        and either has no linked entity or its entity has no ``wikidata_qid``.
+
+        Returns:
+            List of ``(artist_id, canonical_name, discogs_artist_id)`` tuples.
+        """
+        rows = self._conn.execute(
+            """SELECT a.id, a.canonical_name, a.discogs_artist_id
+               FROM artist a
+               LEFT JOIN entity e ON a.entity_id = e.id
+               WHERE a.discogs_artist_id IS NOT NULL
+               AND (a.entity_id IS NULL OR e.wikidata_qid IS NULL)"""
+        ).fetchall()
+        return [(row[0], row[1], row[2]) for row in rows]
+
+    # ------------------------------------------------------------------
     # Name-to-ID Mapping
     # ------------------------------------------------------------------
 

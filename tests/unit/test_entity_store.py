@@ -327,6 +327,85 @@ class TestAlreadyMigrated:
         store.close()
 
 
+class TestGetArtistsNeedingWikidata:
+    """Tests for get_artists_needing_wikidata() query method."""
+
+    def test_returns_artists_with_discogs_id_and_no_entity(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        store.upsert_artist("Autechre", discogs_artist_id=2774)
+        store.upsert_artist("Stereolab", discogs_artist_id=10272)
+
+        result = store.get_artists_needing_wikidata()
+        names = {name for _, name, _ in result}
+        assert names == {"Autechre", "Stereolab"}
+        store.close()
+
+    def test_returns_artists_with_entity_missing_qid(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        entity = store.get_or_create_entity("Autechre", "artist")
+        store.upsert_artist("Autechre", discogs_artist_id=2774, entity_id=entity.id)
+
+        result = store.get_artists_needing_wikidata()
+        assert len(result) == 1
+        assert result[0][1] == "Autechre"
+        assert result[0][2] == 2774
+        store.close()
+
+    def test_excludes_artists_with_entity_that_has_qid(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+        store.upsert_artist("Autechre", discogs_artist_id=2774, entity_id=entity.id)
+
+        result = store.get_artists_needing_wikidata()
+        assert result == []
+        store.close()
+
+    def test_excludes_artists_without_discogs_id(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        store.upsert_artist("Unknown Band")
+
+        result = store.get_artists_needing_wikidata()
+        assert result == []
+        store.close()
+
+    def test_returns_discogs_artist_id_in_tuple(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        aid = store.upsert_artist("Cat Power", discogs_artist_id=88)
+
+        result = store.get_artists_needing_wikidata()
+        assert len(result) == 1
+        assert result[0] == (aid, "Cat Power", 88)
+        store.close()
+
+    def test_mixed_artists(self, tmp_path):
+        """Only artists needing Wikidata are returned."""
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        # Has discogs ID, no entity -> needs wikidata
+        store.upsert_artist("Autechre", discogs_artist_id=2774)
+        # Has discogs ID, entity with QID -> already done
+        entity = store.get_or_create_entity("Stereolab", "artist", wikidata_qid="Q650826")
+        store.upsert_artist("Stereolab", discogs_artist_id=10272, entity_id=entity.id)
+        # No discogs ID -> not eligible
+        store.upsert_artist("Unknown Band")
+
+        result = store.get_artists_needing_wikidata()
+        names = {name for _, name, _ in result}
+        assert names == {"Autechre"}
+        store.close()
+
+
 class TestContextManager:
     """EntityStore supports the context manager protocol."""
 
