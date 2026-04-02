@@ -420,8 +420,6 @@ def run(args: argparse.Namespace) -> None:
 
     # 10b. Label hierarchy from Wikidata (optional, requires entity store + enrichments)
     if args.populate_label_hierarchy and entity_store is not None and enrichments:
-        from semantic_index.wikidata_client import WikidataClient
-
         log.info("Populating label hierarchy from Wikidata P749/P355...")
         wikidata_client = WikidataClient()
         lh_report = populate_label_hierarchy(entity_store, enrichments, wikidata_client)

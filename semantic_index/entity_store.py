@@ -597,6 +597,25 @@ class EntityStore:
         rows = self._conn.execute(sql).fetchall()
         return [(row[0], row[1]) for row in rows]
 
+    def get_artists_needing_wikidata(self) -> list[tuple[int, str, int]]:
+        """Return artists that have a Discogs ID but no Wikidata QID yet.
+
+        An artist "needs Wikidata" when it has a ``discogs_artist_id`` AND
+        either has no linked entity or its linked entity has a NULL
+        ``wikidata_qid``.
+
+        Returns:
+            List of (artist_id, canonical_name, discogs_artist_id) tuples.
+        """
+        rows = self._conn.execute(
+            """SELECT a.id, a.canonical_name, a.discogs_artist_id
+               FROM artist a
+               LEFT JOIN entity e ON a.entity_id = e.id
+               WHERE a.discogs_artist_id IS NOT NULL
+                 AND (a.entity_id IS NULL OR e.wikidata_qid IS NULL)"""
+        ).fetchall()
+        return [(row[0], row[1], row[2]) for row in rows]
+
     def update_reconciliation_status(self, artist_id: int, status: str) -> None:
         """Update the reconciliation status for an artist.
 
