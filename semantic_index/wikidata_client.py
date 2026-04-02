@@ -130,21 +130,33 @@ class WikidataClient:
             httpx.HTTPStatusError: On non-2xx response.
             Exception: On network or parse errors.
         """
-        self._rate_limit()
-        client = httpx.Client(
-            timeout=60,
-            headers={
-                "User-Agent": self._user_agent,
-                "Accept": "application/sparql-results+json",
-            },
-        )
-        try:
-            resp = client.get(self._sparql_endpoint, params={"query": query})
-            resp.raise_for_status()
-            bindings: list[dict] = resp.json()["results"]["bindings"]
-            return bindings
-        finally:
-            client.close()
+        max_retries = 3
+        for attempt in range(max_retries):
+            self._rate_limit()
+            client = httpx.Client(
+                timeout=60,
+                headers={
+                    "User-Agent": self._user_agent,
+                    "Accept": "application/sparql-results+json",
+                },
+            )
+            try:
+                resp = client.get(self._sparql_endpoint, params={"query": query})
+                if resp.status_code == 403 or resp.status_code == 429:
+                    backoff = 2 ** (attempt + 1)
+                    logger.warning(
+                        "Wikidata rate limited (HTTP %d), backing off %ds (attempt %d/%d)",
+                        resp.status_code, backoff, attempt + 1, max_retries,
+                    )
+                    time.sleep(backoff)
+                    continue
+                resp.raise_for_status()
+                bindings: list[dict] = resp.json()["results"]["bindings"]
+                return bindings
+            finally:
+                client.close()
+        logger.warning("Wikidata SPARQL query failed after %d retries", max_retries)
+        return []
 
     def _validate_qids(self, qids: list[str]) -> list[str]:
         """Validate and filter QIDs, logging warnings for invalid ones.
@@ -447,6 +459,48 @@ class WikidataClient:
             return []
 
         return [c for c in candidates if c.qid in musician_qids]
+
+    def search_musicians_batch(
+        self, names: list[str], limit: int = 5
+    ) -> dict[str, WikidataEntity]:
+        """Search for multiple artist names, batching the musician filter.
+
+        Collects all candidates from individual name searches first, then
+        runs a single SPARQL filter query for all candidates. This reduces
+        SPARQL calls from N (one per name) to 1.
+
+        Args:
+            names: List of artist names to search.
+            limit: Max candidates per name search.
+
+        Returns:
+            Dict mapping input name to best matching WikidataEntity (musicians only).
+        """
+        # Step 1: Collect all candidates from name searches (HTTP API, not SPARQL)
+        name_candidates: dict[str, list[WikidataEntity]] = {}
+        all_candidate_qids: set[str] = set()
+
+        for name in names:
+            candidates = self.search_by_name(name, limit=limit)
+            if candidates:
+                name_candidates[name] = candidates
+                all_candidate_qids.update(c.qid for c in candidates)
+
+        if not all_candidate_qids:
+            return {}
+
+        # Step 2: Single SPARQL filter for ALL candidates
+        musician_qids = self._filter_musicians(list(all_candidate_qids))
+
+        # Step 3: Map back to names (first musician match per name)
+        results: dict[str, WikidataEntity] = {}
+        for name, candidates in name_candidates.items():
+            for c in candidates:
+                if c.qid in musician_qids:
+                    results[name] = c
+                    break
+
+        return results
 
     def _filter_musicians(self, qids: list[str]) -> set[str]:
         """Filter QIDs to those that are musicians or musical groups.
