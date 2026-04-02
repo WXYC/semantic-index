@@ -119,7 +119,7 @@ class ArtistReconciler:
         conn: object, primary_sql: str, fallback_sql: str, params: tuple
     ) -> list:
         """Try a query against a materialized summary table, fall back to join."""
-        execute = getattr(conn, "execute")
+        execute = conn.execute  # type: ignore[attr-defined]
         try:
             result = execute(primary_sql, params).fetchall()
             if result:
