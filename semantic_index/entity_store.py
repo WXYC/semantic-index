@@ -539,26 +539,121 @@ class EntityStore:
         return [row[0] for row in rows]
 
     # ------------------------------------------------------------------
-    # Wikidata Reconciliation Queries
+    # Label CRUD
     # ------------------------------------------------------------------
 
-    def get_artists_needing_wikidata(self) -> list[tuple[int, str, int]]:
-        """Return artists with a Discogs ID that lack a Wikidata QID.
+    def get_or_create_label(
+        self,
+        name: str,
+        *,
+        discogs_label_id: int | None = None,
+        wikidata_qid: str | None = None,
+    ) -> int:
+        """Return an existing label by name, or create a new one.
 
-        An artist "needs Wikidata" when it has ``discogs_artist_id IS NOT NULL``
-        and either has no linked entity or its entity has no ``wikidata_qid``.
+        On conflict (name), existing discogs_label_id is not overwritten.
+        If a wikidata_qid is provided, an entity row is also created/linked.
+
+        Args:
+            name: Label name (unique key).
+            discogs_label_id: Optional Discogs label ID.
+            wikidata_qid: Optional Wikidata QID. Creates an entity if provided.
 
         Returns:
-            List of ``(artist_id, canonical_name, discogs_artist_id)`` tuples.
+            The label row's integer primary key.
+        """
+        row = self._conn.execute("SELECT id FROM label WHERE name = ?", (name,)).fetchone()
+        if row is not None:
+            return int(row[0])
+
+        entity_id = None
+        if wikidata_qid:
+            entity = self.get_or_create_entity(name, "label", wikidata_qid=wikidata_qid)
+            entity_id = entity.id
+
+        cur = self._conn.execute(
+            "INSERT INTO label (name, discogs_label_id, entity_id) VALUES (?, ?, ?)",
+            (name, discogs_label_id, entity_id),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    def update_label_qid(self, label_id: int, wikidata_qid: str) -> None:
+        """Set the Wikidata QID for a label by creating/linking an entity.
+
+        Args:
+            label_id: The label's primary key.
+            wikidata_qid: The Wikidata QID to assign.
+
+        Raises:
+            ValueError: If no label with the given id exists.
+        """
+        row = self._conn.execute(
+            "SELECT id, name, entity_id FROM label WHERE id = ?", (label_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No label with id {label_id}")
+
+        label_name = row[1]
+        existing_entity_id = row[2]
+
+        if existing_entity_id is not None:
+            # Update the existing entity's QID
+            self._conn.execute(
+                "UPDATE entity SET wikidata_qid = COALESCE(wikidata_qid, ?), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (wikidata_qid, existing_entity_id),
+            )
+        else:
+            entity = self.get_or_create_entity(label_name, "label", wikidata_qid=wikidata_qid)
+            self._conn.execute(
+                "UPDATE label SET entity_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (entity.id, label_id),
+            )
+        self._conn.commit()
+
+    def insert_label_hierarchy(
+        self, parent_label_id: int, child_label_id: int, source: str = "wikidata"
+    ) -> None:
+        """Insert a parent-child label relationship (idempotent).
+
+        Args:
+            parent_label_id: The parent label's primary key.
+            child_label_id: The child label's primary key.
+            source: Source of the relationship (default: 'wikidata').
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO label_hierarchy (parent_label_id, child_label_id, source) VALUES (?, ?, ?)",
+            (parent_label_id, child_label_id, source),
+        )
+        self._conn.commit()
+
+    def get_labels_with_discogs_id(self) -> list[tuple[int, str, int]]:
+        """Return all labels that have a Discogs label ID.
+
+        Returns:
+            List of (label_id, name, discogs_label_id) tuples.
         """
         rows = self._conn.execute(
-            """SELECT a.id, a.canonical_name, a.discogs_artist_id
-               FROM artist a
-               LEFT JOIN entity e ON a.entity_id = e.id
-               WHERE a.discogs_artist_id IS NOT NULL
-               AND (a.entity_id IS NULL OR e.wikidata_qid IS NULL)"""
+            "SELECT id, name, discogs_label_id FROM label WHERE discogs_label_id IS NOT NULL"
         ).fetchall()
         return [(row[0], row[1], row[2]) for row in rows]
+
+    def get_label_by_name(self, name: str) -> dict[str, object] | None:
+        """Look up a label row by name.
+
+        Args:
+            name: The label name.
+
+        Returns:
+            A dict of column name -> value, or None if not found.
+        """
+        self._conn.row_factory = sqlite3.Row
+        row = self._conn.execute("SELECT * FROM label WHERE name = ?", (name,)).fetchone()
+        self._conn.row_factory = None
+        if row is None:
+            return None
+        return dict(row)
 
     # ------------------------------------------------------------------
     # Name-to-ID Mapping

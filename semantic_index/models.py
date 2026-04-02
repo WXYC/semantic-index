@@ -280,3 +280,11 @@ class WikidataLabelHierarchy(BaseModel):
     parent_name: str
     child_qid: str
     child_name: str
+
+
+class LabelHierarchyReport(BaseModel):
+    """Summary of a label hierarchy population run."""
+
+    labels_created: int  # Unique labels inserted into the label table
+    labels_matched: int  # Labels matched to Wikidata QIDs
+    hierarchy_edges: int  # Parent-child relationships inserted

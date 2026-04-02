@@ -189,6 +189,58 @@ class WikidataClient:
 
         return result
 
+    def lookup_labels_by_discogs_ids(
+        self, discogs_label_ids: list[int]
+    ) -> dict[int, WikidataEntity]:
+        """Look up Wikidata entities by Discogs label ID (P1902).
+
+        Batches the lookup into chunks of ``batch_size`` to avoid SPARQL
+        query timeouts on large input sets.
+
+        Args:
+            discogs_label_ids: Discogs label IDs to look up.
+
+        Returns:
+            Dict mapping discogs_label_id -> WikidataEntity for each found match.
+        """
+        if not discogs_label_ids:
+            return {}
+
+        result: dict[int, WikidataEntity] = {}
+        for batch_start in range(0, len(discogs_label_ids), self._batch_size):
+            batch = discogs_label_ids[batch_start : batch_start + self._batch_size]
+            values = " ".join(f'"{lid}"' for lid in batch)
+            query = (
+                "SELECT ?item ?itemLabel ?discogsLabelId WHERE {\n"
+                f"  VALUES ?discogsLabelId {{ {values} }}\n"
+                "  ?item wdt:P1902 ?discogsLabelId .\n"
+                '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }\n'
+                "}"
+            )
+            try:
+                bindings = self._sparql_query(query)
+                for b in bindings:
+                    qid = _extract_qid(_binding_value(b, "item") or "")
+                    name = _binding_value(b, "itemLabel") or qid
+                    label_id_str = _binding_value(b, "discogsLabelId")
+                    if label_id_str is not None:
+                        try:
+                            lid = int(label_id_str)
+                        except (ValueError, TypeError):
+                            continue
+                        result[lid] = WikidataEntity(
+                            qid=qid,
+                            name=name,
+                        )
+            except Exception:
+                logger.warning(
+                    "SPARQL lookup_labels_by_discogs_ids failed for batch starting at %d",
+                    batch_start,
+                    exc_info=True,
+                )
+
+        return result
+
     def get_influences(self, qids: list[str]) -> list[WikidataInfluence]:
         """Get influence relationships (P737) for given Wikidata entities.
 
