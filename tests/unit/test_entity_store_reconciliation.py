@@ -84,6 +84,56 @@ class TestGetUnreconciledArtists:
 
 
 # ---------------------------------------------------------------------------
+# get_no_match_artists
+# ---------------------------------------------------------------------------
+
+
+class TestGetNoMatchArtists:
+    def test_returns_no_match(self, store: EntityStore):
+        aid_a = store.upsert_artist("Autechre")
+        aid_b = store.upsert_artist("Stereolab")
+        store.update_reconciliation_status(aid_a, "no_match")
+        store.update_reconciliation_status(aid_b, "no_match")
+        no_match = store.get_no_match_artists()
+        assert len(no_match) == 2
+        names = {name for _, name in no_match}
+        assert names == {"Autechre", "Stereolab"}
+
+    def test_skips_reconciled(self, store: EntityStore):
+        aid = store.upsert_artist("Autechre")
+        store.update_reconciliation_status(aid, "reconciled")
+        aid_b = store.upsert_artist("Stereolab")
+        store.update_reconciliation_status(aid_b, "no_match")
+        no_match = store.get_no_match_artists()
+        assert len(no_match) == 1
+        assert no_match[0][1] == "Stereolab"
+
+    def test_skips_unreconciled(self, store: EntityStore):
+        store.upsert_artist("Autechre")  # default 'unreconciled'
+        aid_b = store.upsert_artist("Cat Power")
+        store.update_reconciliation_status(aid_b, "no_match")
+        no_match = store.get_no_match_artists()
+        assert len(no_match) == 1
+        assert no_match[0][1] == "Cat Power"
+
+    def test_respects_limit(self, store: EntityStore):
+        for name in ["Autechre", "Stereolab", "Cat Power", "Buck Meek"]:
+            aid = store.upsert_artist(name)
+            store.update_reconciliation_status(aid, "no_match")
+        no_match = store.get_no_match_artists(limit=2)
+        assert len(no_match) == 2
+
+    def test_empty_table(self, store: EntityStore):
+        assert store.get_no_match_artists() == []
+
+    def test_returns_id_and_name_tuples(self, store: EntityStore):
+        expected_id = store.upsert_artist("Father John Misty")
+        store.update_reconciliation_status(expected_id, "no_match")
+        no_match = store.get_no_match_artists()
+        assert no_match[0] == (expected_id, "Father John Misty")
+
+
+# ---------------------------------------------------------------------------
 # update_reconciliation_status
 # ---------------------------------------------------------------------------
 

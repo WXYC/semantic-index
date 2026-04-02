@@ -466,6 +466,21 @@ class EntityStore:
         rows = self._conn.execute(sql).fetchall()
         return [(row[0], row[1]) for row in rows]
 
+    def get_no_match_artists(self, limit: int | None = None) -> list[tuple[int, str]]:
+        """Return (id, canonical_name) pairs for artists with status 'no_match'.
+
+        Args:
+            limit: Maximum number of artists to return. None for all.
+
+        Returns:
+            List of (artist_id, canonical_name) tuples.
+        """
+        sql = "SELECT id, canonical_name FROM artist WHERE reconciliation_status = 'no_match'"
+        if limit is not None:
+            sql += f" LIMIT {limit}"
+        rows = self._conn.execute(sql).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
     def update_reconciliation_status(self, artist_id: int, status: str) -> None:
         """Update the reconciliation status for an artist.
 
