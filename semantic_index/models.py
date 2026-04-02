@@ -244,3 +244,39 @@ class ReconciliationReport(BaseModel):
     no_match: int  # Attempts where the lookup returned no result
     errored: int  # Attempts that failed due to an exception
     skipped: int  # Artists already in 'partial' or 'reconciled' status
+
+
+# --- Wikidata models ---
+
+
+class WikidataEntity(BaseModel):
+    """A Wikidata entity with optional Discogs artist ID.
+
+    Returned by SPARQL lookups (P1953 Discogs ID) and name search
+    (wbsearchentities API).
+    """
+
+    qid: str  # e.g. "Q2774"
+    name: str  # rdfs:label
+    description: str | None = None
+    discogs_artist_id: int | None = None  # P1953
+
+
+class WikidataInfluence(BaseModel):
+    """An influence relationship (P737) between two Wikidata entities.
+
+    Represents "source is influenced by target".
+    """
+
+    source_qid: str
+    target_qid: str
+    target_name: str
+
+
+class WikidataLabelHierarchy(BaseModel):
+    """A parent-child label relationship (P749 parent org / P355 subsidiary)."""
+
+    parent_qid: str
+    parent_name: str
+    child_qid: str
+    child_name: str
