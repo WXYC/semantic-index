@@ -32,6 +32,7 @@ class EdgeType(StrEnum):
     LABEL_FAMILY = "labelFamily"
     COMPILATION = "compilation"
     CROSS_REFERENCE = "crossReference"
+    WIKIDATA_INFLUENCE = "wikidataInfluence"
 
 
 def _artist_summary(row: sqlite3.Row) -> ArtistSummary:
@@ -239,6 +240,8 @@ def _query_neighbors(
             )
         case EdgeType.CROSS_REFERENCE:
             return _neighbors_cross_reference(db, artist_id, limit)
+        case EdgeType.WIKIDATA_INFLUENCE:
+            return _neighbors_wikidata_influence(db, artist_id, limit)
 
 
 def _neighbors_dj_transition(
@@ -380,6 +383,8 @@ def _query_explain(
             )
         case EdgeType.CROSS_REFERENCE:
             return _explain_cross_reference(db, source_id, target_id)
+        case EdgeType.WIKIDATA_INFLUENCE:
+            return _explain_wikidata_influence(db, source_id, target_id)
 
 
 def _explain_dj_transition(
@@ -445,4 +450,53 @@ def _explain_cross_reference(
             detail={"comment": r["comment"], "source": r["source"]},
         )
         for r in rows
+    ]
+
+
+def _neighbors_wikidata_influence(
+    db: sqlite3.Connection, artist_id: int, limit: int
+) -> list[NeighborEntry]:
+    """Query Wikidata influence neighbors in both directions."""
+    rows = db.execute(
+        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+        "  wi.source_qid, wi.target_qid "
+        "FROM wikidata_influence wi "
+        "JOIN artist a ON a.id = wi.target_id "
+        "WHERE wi.source_id = ? "
+        "UNION ALL "
+        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+        "  wi.source_qid, wi.target_qid "
+        "FROM wikidata_influence wi "
+        "JOIN artist a ON a.id = wi.source_id "
+        "WHERE wi.target_id = ? "
+        "LIMIT ?",
+        (artist_id, artist_id, limit),
+    ).fetchall()
+    return [
+        NeighborEntry(
+            artist=_artist_summary(r),
+            weight=1.0,
+            detail={"source_qid": r["source_qid"], "target_qid": r["target_qid"]},
+        )
+        for r in rows
+    ]
+
+
+def _explain_wikidata_influence(
+    db: sqlite3.Connection, source_id: int, target_id: int
+) -> list[Relationship]:
+    """Query Wikidata influence edge between two specific artists."""
+    row = db.execute(
+        "SELECT source_qid, target_qid FROM wikidata_influence "
+        "WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+        (source_id, target_id, target_id, source_id),
+    ).fetchone()
+    if row is None:
+        return []
+    return [
+        Relationship(
+            type="wikidataInfluence",
+            weight=1.0,
+            detail={"source_qid": row["source_qid"], "target_qid": row["target_qid"]},
+        )
     ]

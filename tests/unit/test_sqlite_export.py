@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge
+from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge, WikidataInfluenceEdge
 from semantic_index.sqlite_export import export_sqlite
 
 
@@ -34,6 +34,7 @@ class TestSchemaCreation:
         assert "shared_style" in tables
         assert "label_family" in tables
         assert "compilation" in tables
+        assert "wikidata_influence" in tables
 
     def test_indexes_exist(self):
         conn, _ = _export_and_connect(artist_stats={}, pmi_edges=[], xref_edges=[])
@@ -45,6 +46,8 @@ class TestSchemaCreation:
         assert "idx_transition_target" in indexes
         assert "idx_xref_a" in indexes
         assert "idx_xref_b" in indexes
+        assert "idx_wikidata_influence_source" in indexes
+        assert "idx_wikidata_influence_target" in indexes
 
 
 class TestArtistInsertion:
@@ -198,6 +201,97 @@ class TestCrossReferenceInsertion:
         conn, _ = _export_and_connect(artist_stats=stats, pmi_edges=[], xref_edges=xrefs)
         count = conn.execute("SELECT COUNT(*) FROM cross_reference").fetchone()[0]
         assert count == 2
+
+
+class TestWikidataInfluenceInsertion:
+    def test_influence_edges_inserted(self):
+        stats = {
+            "Autechre": ArtistStats(canonical_name="Autechre", total_plays=50),
+            "Stereolab": ArtistStats(canonical_name="Stereolab", total_plays=30),
+        }
+        influence_edges = [
+            WikidataInfluenceEdge(
+                source_artist="Autechre",
+                target_artist="Stereolab",
+                source_qid="Q2774",
+                target_qid="Q650826",
+            ),
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            wikidata_influence_edges=influence_edges,
+        )
+        row = conn.execute("SELECT * FROM wikidata_influence").fetchone()
+        assert row is not None
+        assert row["source_qid"] == "Q2774"
+        assert row["target_qid"] == "Q650826"
+
+    def test_influence_edges_reference_correct_artists(self):
+        stats = {
+            "Autechre": ArtistStats(canonical_name="Autechre", total_plays=50),
+            "Stereolab": ArtistStats(canonical_name="Stereolab", total_plays=30),
+            "Cat Power": ArtistStats(canonical_name="Cat Power", total_plays=20),
+        }
+        influence_edges = [
+            WikidataInfluenceEdge(
+                source_artist="Autechre",
+                target_artist="Stereolab",
+                source_qid="Q2774",
+                target_qid="Q650826",
+            ),
+            WikidataInfluenceEdge(
+                source_artist="Autechre",
+                target_artist="Cat Power",
+                source_qid="Q2774",
+                target_qid="Q218981",
+            ),
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            wikidata_influence_edges=influence_edges,
+        )
+        rows = conn.execute(
+            "SELECT a_src.canonical_name AS source_name, a_tgt.canonical_name AS target_name "
+            "FROM wikidata_influence wi "
+            "JOIN artist a_src ON wi.source_id = a_src.id "
+            "JOIN artist a_tgt ON wi.target_id = a_tgt.id "
+            "ORDER BY target_name"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["source_name"] == "Autechre"
+        assert rows[0]["target_name"] == "Cat Power"
+        assert rows[1]["target_name"] == "Stereolab"
+
+    def test_influence_edges_empty_by_default(self):
+        stats = {"Autechre": ArtistStats(canonical_name="Autechre", total_plays=50)}
+        conn, _ = _export_and_connect(artist_stats=stats, pmi_edges=[], xref_edges=[])
+        count = conn.execute("SELECT COUNT(*) FROM wikidata_influence").fetchone()[0]
+        assert count == 0
+
+    def test_influence_edge_unknown_artist_skipped(self):
+        stats = {
+            "Autechre": ArtistStats(canonical_name="Autechre", total_plays=50),
+        }
+        influence_edges = [
+            WikidataInfluenceEdge(
+                source_artist="Autechre",
+                target_artist="Unknown",
+                source_qid="Q2774",
+                target_qid="Q999",
+            ),
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            wikidata_influence_edges=influence_edges,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM wikidata_influence").fetchone()[0]
+        assert count == 0
 
 
 class TestRoundtrip:

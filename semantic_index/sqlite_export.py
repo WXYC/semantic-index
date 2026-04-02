@@ -16,7 +16,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING
 
-from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge
+from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge, WikidataInfluenceEdge
 
 if TYPE_CHECKING:
     from semantic_index.entity_store import EntityStore
@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS compilation (
     PRIMARY KEY (artist_a_id, artist_b_id)
 );
 
+CREATE TABLE IF NOT EXISTS wikidata_influence (
+    source_id INTEGER NOT NULL REFERENCES artist(id),
+    target_id INTEGER NOT NULL REFERENCES artist(id),
+    source_qid TEXT NOT NULL,
+    target_qid TEXT NOT NULL,
+    PRIMARY KEY (source_id, target_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_transition_source ON dj_transition(source_id, pmi DESC);
 CREATE INDEX IF NOT EXISTS idx_transition_target ON dj_transition(target_id, pmi DESC);
 CREATE INDEX IF NOT EXISTS idx_xref_a ON cross_reference(artist_a_id);
@@ -122,6 +130,8 @@ CREATE INDEX IF NOT EXISTS idx_label_family_a ON label_family(artist_a_id);
 CREATE INDEX IF NOT EXISTS idx_label_family_b ON label_family(artist_b_id);
 CREATE INDEX IF NOT EXISTS idx_compilation_a ON compilation(artist_a_id);
 CREATE INDEX IF NOT EXISTS idx_compilation_b ON compilation(artist_b_id);
+CREATE INDEX IF NOT EXISTS idx_wikidata_influence_source ON wikidata_influence(source_id);
+CREATE INDEX IF NOT EXISTS idx_wikidata_influence_target ON wikidata_influence(target_id);
 """
 
 # Edge and enrichment tables only — used when entity_store manages the artist table.
@@ -188,6 +198,14 @@ CREATE TABLE IF NOT EXISTS compilation (
     PRIMARY KEY (artist_a_id, artist_b_id)
 );
 
+CREATE TABLE IF NOT EXISTS wikidata_influence (
+    source_id INTEGER NOT NULL REFERENCES artist(id),
+    target_id INTEGER NOT NULL REFERENCES artist(id),
+    source_qid TEXT NOT NULL,
+    target_qid TEXT NOT NULL,
+    PRIMARY KEY (source_id, target_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_transition_source ON dj_transition(source_id, pmi DESC);
 CREATE INDEX IF NOT EXISTS idx_transition_target ON dj_transition(target_id, pmi DESC);
 CREATE INDEX IF NOT EXISTS idx_xref_a ON cross_reference(artist_a_id);
@@ -200,6 +218,8 @@ CREATE INDEX IF NOT EXISTS idx_label_family_a ON label_family(artist_a_id);
 CREATE INDEX IF NOT EXISTS idx_label_family_b ON label_family(artist_b_id);
 CREATE INDEX IF NOT EXISTS idx_compilation_a ON compilation(artist_a_id);
 CREATE INDEX IF NOT EXISTS idx_compilation_b ON compilation(artist_b_id);
+CREATE INDEX IF NOT EXISTS idx_wikidata_influence_source ON wikidata_influence(source_id);
+CREATE INDEX IF NOT EXISTS idx_wikidata_influence_target ON wikidata_influence(target_id);
 """
 
 
@@ -215,6 +235,7 @@ def export_sqlite(
     label_family_edges: list[LabelFamilyEdge] | None = None,
     compilation_edges: list[CompilationEdge] | None = None,
     entity_store: EntityStore | None = None,
+    wikidata_influence_edges: list[WikidataInfluenceEdge] | None = None,
 ) -> None:
     """Export the artist graph to a SQLite database.
 
@@ -232,6 +253,7 @@ def export_sqlite(
         entity_store: Optional entity store. When provided, the artist table
             is assumed to already exist and be populated. Stats are updated
             via the store, and ID mapping comes from the store.
+        wikidata_influence_edges: Optional directed influence edges from Wikidata P737.
     """
     enrichments = enrichments or {}
 
@@ -248,6 +270,7 @@ def export_sqlite(
             shared_style_edges or [],
             label_family_edges or [],
             compilation_edges or [],
+            wikidata_influence_edges or [],
         )
     else:
         _export_standalone(
@@ -261,6 +284,7 @@ def export_sqlite(
             shared_style_edges or [],
             label_family_edges or [],
             compilation_edges or [],
+            wikidata_influence_edges or [],
         )
 
 
@@ -275,6 +299,7 @@ def _export_standalone(
     shared_style_edges: list[SharedStyleEdge],
     label_family_edges: list[LabelFamilyEdge],
     compilation_edges: list[CompilationEdge],
+    wikidata_influence_edges: list[WikidataInfluenceEdge] | None = None,
 ) -> None:
     """Original export path: create all tables from scratch."""
     conn = sqlite3.connect(path)
@@ -339,6 +364,7 @@ def _export_standalone(
         label_family_edges,
         compilation_edges,
     )
+    _insert_wikidata_influence_edges(conn, name_to_id, wikidata_influence_edges or [])
 
     conn.commit()
     _log_counts(conn)
@@ -357,6 +383,7 @@ def _export_with_entity_store(
     shared_style_edges: list[SharedStyleEdge],
     label_family_edges: list[LabelFamilyEdge],
     compilation_edges: list[CompilationEdge],
+    wikidata_influence_edges: list[WikidataInfluenceEdge] | None = None,
 ) -> None:
     """Export path when an entity store manages the artist table."""
     conn = entity_store._conn
@@ -397,6 +424,7 @@ def _export_with_entity_store(
         label_family_edges,
         compilation_edges,
     )
+    _insert_wikidata_influence_edges(conn, name_to_id, wikidata_influence_edges or [])
 
     conn.commit()
     _log_counts(conn)
@@ -593,6 +621,26 @@ def _insert_discogs_edges(
         )
 
 
+def _insert_wikidata_influence_edges(
+    conn: sqlite3.Connection,
+    name_to_id: dict[str, int],
+    edges: list[WikidataInfluenceEdge],
+) -> None:
+    """Insert Wikidata influence (P737) directed edges."""
+    rows = []
+    for edge in edges:
+        source_id = name_to_id.get(edge.source_artist)
+        target_id = name_to_id.get(edge.target_artist)
+        if source_id is not None and target_id is not None:
+            rows.append((source_id, target_id, edge.source_qid, edge.target_qid))
+
+    if rows:
+        conn.executemany(
+            "INSERT OR IGNORE INTO wikidata_influence (source_id, target_id, source_qid, target_qid) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+
+
 def _log_counts(conn: sqlite3.Connection) -> None:
     """Log summary counts for all tables."""
     artist_count = conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
@@ -605,7 +653,13 @@ def _log_counts(conn: sqlite3.Connection) -> None:
         xref_count,
     )
 
-    for table in ("shared_personnel", "shared_style", "label_family", "compilation"):
+    for table in (
+        "shared_personnel",
+        "shared_style",
+        "label_family",
+        "compilation",
+        "wikidata_influence",
+    ):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
         if count > 0:
             logger.info("  %s: %d edges", table, count)

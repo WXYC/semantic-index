@@ -17,6 +17,7 @@ from semantic_index.models import (
     PmiEdge,
     SharedPersonnelEdge,
     SharedStyleEdge,
+    WikidataInfluenceEdge,
 )
 from semantic_index.sqlite_export import export_sqlite
 
@@ -95,6 +96,20 @@ def _build_fixture_db() -> str:
             shared_tags=["Electronic", "Experimental"],
         ),
     ]
+    influence_edges = [
+        WikidataInfluenceEdge(
+            source_artist="Autechre",
+            target_artist="Stereolab",
+            source_qid="Q2774",
+            target_qid="Q650826",
+        ),
+        WikidataInfluenceEdge(
+            source_artist="Cat Power",
+            target_artist="Stereolab",
+            source_qid="Q218981",
+            target_qid="Q650826",
+        ),
+    ]
     export_sqlite(
         path,
         artist_stats=stats,
@@ -103,6 +118,7 @@ def _build_fixture_db() -> str:
         min_count=1,
         shared_personnel_edges=shared_personnel,
         shared_style_edges=shared_styles,
+        wikidata_influence_edges=influence_edges,
     )
     return path
 
@@ -283,6 +299,66 @@ class TestNeighbors:
         assert len(resp.json()["neighbors"]) == 0
 
 
+class TestWikidataInfluenceNeighbors:
+    @pytest.mark.asyncio
+    async def test_influence_neighbors_outbound(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Autechre is influenced by Stereolab — Stereolab appears as neighbor."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "wikidataInfluence"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["edge_type"] == "wikidataInfluence"
+        names = [n["artist"]["canonical_name"] for n in data["neighbors"]]
+        assert "Stereolab" in names
+
+    @pytest.mark.asyncio
+    async def test_influence_neighbors_inbound(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Stereolab is a target of influence edges — Autechre and Cat Power appear."""
+        aid = artist_ids["Stereolab"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "wikidataInfluence"}
+        )
+        assert resp.status_code == 200
+        names = [n["artist"]["canonical_name"] for n in resp.json()["neighbors"]]
+        assert "Autechre" in names
+        assert "Cat Power" in names
+
+    @pytest.mark.asyncio
+    async def test_influence_neighbors_empty(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Father John Misty has no influence edges."""
+        aid = artist_ids["Father John Misty"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "wikidataInfluence"}
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["neighbors"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_influence_neighbors_detail_has_qids(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Influence neighbor detail includes source and target QIDs."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "wikidataInfluence"}
+        )
+        data = resp.json()
+        stereo_entry = next(
+            n for n in data["neighbors"] if n["artist"]["canonical_name"] == "Stereolab"
+        )
+        assert stereo_entry["detail"]["source_qid"] == "Q2774"
+        assert stereo_entry["detail"]["target_qid"] == "Q650826"
+        assert stereo_entry["weight"] == 1.0
+
+
 class TestExplain:
     @pytest.mark.asyncio
     async def test_explain_multiple_edge_types(
@@ -351,6 +427,22 @@ class TestExplain:
         assert "crossReference" in types
         xref_rel = next(r for r in data["relationships"] if r["type"] == "crossReference")
         assert xref_rel["detail"]["comment"] == "See also"
+
+    @pytest.mark.asyncio
+    async def test_explain_wikidata_influence(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Autechre is influenced by Stereolab — explain should include wikidataInfluence."""
+        src = artist_ids["Autechre"]
+        tgt = artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{src}/explain/{tgt}")
+        data = resp.json()
+        types = {r["type"] for r in data["relationships"]}
+        assert "wikidataInfluence" in types
+        inf_rel = next(r for r in data["relationships"] if r["type"] == "wikidataInfluence")
+        assert inf_rel["detail"]["source_qid"] == "Q2774"
+        assert inf_rel["detail"]["target_qid"] == "Q650826"
+        assert inf_rel["weight"] == 1.0
 
 
 def _build_entity_store_fixture_db() -> str:
