@@ -1,21 +1,28 @@
-"""Reconciliation module: bulk Discogs matching for unreconciled artists.
+"""Reconciliation module: bulk Discogs and Wikidata matching for artists.
 
 Queries the entity store for artists with ``reconciliation_status='unreconciled'``,
 matches them against the discogs-cache PostgreSQL ``release_artist`` table in
 batches, persists per-artist styles from ``release_style``, and updates each
 artist's ``discogs_artist_id`` and reconciliation status.
 
+Also provides Wikidata reconciliation by Discogs artist ID: for artists with
+a ``discogs_artist_id``, queries Wikidata for matching P1953 entities and
+populates ``entity.wikidata_qid``.
+
 Usage::
 
     from semantic_index.discogs_client import DiscogsClient
     from semantic_index.entity_store import EntityStore
     from semantic_index.reconciliation import ArtistReconciler
+    from semantic_index.wikidata_client import WikidataClient
 
     store = EntityStore("output/wxyc_artist_graph.db")
     store.initialize()
-    client = DiscogsClient(cache_dsn="postgresql://...", api_base_url=None)
-    reconciler = ArtistReconciler(store, client)
+    discogs = DiscogsClient(cache_dsn="postgresql://...", api_base_url=None)
+    wikidata = WikidataClient()
+    reconciler = ArtistReconciler(store, discogs, wikidata_client=wikidata)
     report = reconciler.reconcile_batch(batch_size=1000)
+    wikidata_report = reconciler.reconcile_wikidata()
 """
 
 from __future__ import annotations
@@ -25,21 +32,29 @@ import logging
 from semantic_index.discogs_client import DiscogsClient
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ReconciliationReport
+from semantic_index.wikidata_client import WikidataClient
 
 logger = logging.getLogger(__name__)
 
 
 class ArtistReconciler:
-    """Bulk Discogs matching for unreconciled artists.
+    """Bulk Discogs and Wikidata matching for artists.
 
     Args:
         store: Entity store for reading/writing artist data.
         client: Discogs client whose cache connection is used for bulk lookups.
+        wikidata_client: Optional Wikidata client for P1953 lookups.
     """
 
-    def __init__(self, store: EntityStore, client: DiscogsClient) -> None:
+    def __init__(
+        self,
+        store: EntityStore,
+        client: DiscogsClient,
+        wikidata_client: WikidataClient | None = None,
+    ) -> None:
         self._store = store
         self._client = client
+        self._wikidata_client = wikidata_client
 
     def reconcile_batch(self, batch_size: int = 1000) -> ReconciliationReport:
         """Query unreconciled artists and process in batches.
@@ -182,6 +197,100 @@ class ArtistReconciler:
             succeeded=succeeded,
             no_match=no_match,
             errored=errored,
+            skipped=skipped,
+        )
+
+    def reconcile_wikidata(self) -> ReconciliationReport:
+        """Look up Wikidata entities by Discogs artist ID (P1953).
+
+        For each artist with a ``discogs_artist_id`` whose entity does not yet
+        have a ``wikidata_qid``, queries Wikidata via SPARQL. On match, creates
+        or updates the entity and links it to the artist.
+
+        Raises:
+            ValueError: If no WikidataClient was provided at construction time.
+
+        Returns:
+            ReconciliationReport with counts.
+        """
+        if self._wikidata_client is None:
+            raise ValueError("WikidataClient is required for reconcile_wikidata")
+
+        total = self._store._conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
+        needing = self._store.get_artists_needing_wikidata()
+        skipped = total - len(needing)
+
+        if not needing:
+            return ReconciliationReport(
+                total=total, attempted=0, succeeded=0, no_match=0, errored=0, skipped=skipped
+            )
+
+        discogs_ids = [discogs_id for _, _, discogs_id in needing]
+        try:
+            wikidata_map = self._wikidata_client.lookup_by_discogs_ids(discogs_ids)
+        except Exception:
+            logger.warning("Wikidata lookup failed", exc_info=True)
+            return ReconciliationReport(
+                total=total,
+                attempted=len(needing),
+                succeeded=0,
+                no_match=0,
+                errored=len(needing),
+                skipped=skipped,
+            )
+
+        succeeded = 0
+        no_match = 0
+
+        for artist_id, canonical_name, discogs_id in needing:
+            wd_entity = wikidata_map.get(discogs_id)
+            if wd_entity is None:
+                no_match += 1
+                continue
+
+            # Reuse an existing entity with this QID, or create/update one
+            existing = self._store.get_entity_by_qid(wd_entity.qid)
+            if existing is not None:
+                entity_id = existing.id
+            else:
+                row = self._store.get_artist_by_name(canonical_name)
+                raw_eid = row["entity_id"] if row else None
+                current_entity_id: int | None = (
+                    int(raw_eid) if isinstance(raw_eid, (int, float)) else None
+                )
+                if current_entity_id is not None:
+                    self._store.update_entity_qid(current_entity_id, wd_entity.qid)
+                    entity_id = current_entity_id
+                else:
+                    entity = self._store.get_or_create_entity(
+                        wd_entity.name, "artist", wikidata_qid=wd_entity.qid
+                    )
+                    entity_id = entity.id
+
+            self._store.upsert_artist(canonical_name, entity_id=entity_id)
+            self._store.log_reconciliation(
+                artist_id=artist_id,
+                source="wikidata",
+                external_id=wd_entity.qid,
+                confidence=None,
+                method="discogs_id_lookup",
+            )
+            succeeded += 1
+
+        attempted = succeeded + no_match
+        logger.info(
+            "Wikidata reconciliation complete: %d attempted, %d succeeded, %d no_match, %d skipped",
+            attempted,
+            succeeded,
+            no_match,
+            skipped,
+        )
+        return ReconciliationReport(
+            total=total,
+            attempted=attempted,
+            succeeded=succeeded,
+            no_match=no_match,
+            errored=0,
             skipped=skipped,
         )
 
