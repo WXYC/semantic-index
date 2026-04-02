@@ -279,6 +279,7 @@ def run(args: argparse.Namespace) -> None:
 
     # 5c. Entity store setup (optional)
     entity_store: EntityStore | None = None
+    dedup_report = None
     if args.entity_store_path:
         store_path = args.entity_store_path
         log.info("Opening entity store: %s", store_path)
@@ -330,6 +331,16 @@ def run(args: argparse.Namespace) -> None:
                 wikidata_report.succeeded,
                 wikidata_report.no_match,
                 wikidata_report.errored,
+            )
+
+        # 5f. Entity deduplication by shared QID (runs after all reconciliation)
+        dedup_report = entity_store.deduplicate_by_qid()
+        if dedup_report.groups_found > 0:
+            log.info(
+                "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
+                dedup_report.groups_found,
+                dedup_report.entities_merged,
+                dedup_report.artists_reassigned,
             )
 
     # 6. Extract adjacency pairs
@@ -491,6 +502,10 @@ def run(args: argparse.Namespace) -> None:
         print(f"  Labels created:          {lh_report.labels_created:>12,}")
         print(f"  Labels matched (WD):     {lh_report.labels_matched:>12,}")
         print(f"  Label hierarchy edges:   {lh_report.hierarchy_edges:>12,}")
+    if dedup_report is not None and dedup_report.groups_found > 0:
+        print(f"  Dedup groups:            {dedup_report.groups_found:>12,}")
+        print(f"  Entities merged:         {dedup_report.entities_merged:>12,}")
+        print(f"  Artists reassigned:      {dedup_report.artists_reassigned:>12,}")
     print(f"  Graph nodes:             {graph.number_of_nodes():>12,}")
     print(f"  Graph edges:             {graph.number_of_edges():>12,}")
     print(f"  GEXF output:             {gexf_path}")
