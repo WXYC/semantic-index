@@ -29,7 +29,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
 | `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), and name search via wbsearchentities API. |
 | `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles. Creates the artist table from scratch on a fresh database or migrates an existing one. |
-| `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. Wikidata reconciliation by Discogs ID (P1953) to populate entity QIDs. |
+| `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. |
+| `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
@@ -157,6 +158,7 @@ python run_pipeline.py dump.sql --entity-store-path output/wxyc_artist_graph.db 
 - `--entity-store-path PATH` — Path to entity store SQLite database. Creates it if needed.
 - `--skip-reconciliation` — Skip Discogs reconciliation step.
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
+- `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--entity-store-path` and enrichment data.
 
 ## Graph API
 

@@ -162,6 +162,86 @@ class TestGetInfluences:
         assert result[0].source_qid == "Q2774"
 
 
+class TestLookupLabelsByDiscogsIds:
+    """Tests for Discogs label ID (P1902) lookups."""
+
+    def test_single_label_returns_entity(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q1312934"),
+                    "itemLabel": _literal("Warp Records"),
+                    "discogsLabelId": _literal("23528"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_labels_by_discogs_ids([23528])
+
+        assert 23528 in result
+        assert result[23528].qid == "Q1312934"
+        assert result[23528].name == "Warp Records"
+
+    def test_multiple_labels(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q1312934"),
+                    "itemLabel": _literal("Warp Records"),
+                    "discogsLabelId": _literal("23528"),
+                },
+                {
+                    "item": _uri("Q843988"),
+                    "itemLabel": _literal("Sub Pop"),
+                    "discogsLabelId": _literal("1594"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_labels_by_discogs_ids([23528, 1594])
+
+        assert len(result) == 2
+        assert result[23528].name == "Warp Records"
+        assert result[1594].name == "Sub Pop"
+
+    def test_empty_input_returns_empty(self):
+        client = WikidataClient()
+        result = client.lookup_labels_by_discogs_ids([])
+        assert result == {}
+
+    def test_not_found_returns_empty(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response([])
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_labels_by_discogs_ids([99999])
+
+        assert result == {}
+
+    def test_sparql_error_returns_empty(self):
+        mock_client = MagicMock()
+        mock_client.get.side_effect = Exception("Timeout")
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_labels_by_discogs_ids([23528])
+
+        assert result == {}
+
+
 class TestGetLabelHierarchy:
     """Tests for label hierarchy (P749/P355) queries."""
 

@@ -27,6 +27,7 @@ from semantic_index.discogs_edges import (
 from semantic_index.discogs_enrichment import DiscogsEnricher
 from semantic_index.entity_store import EntityStore
 from semantic_index.graph_export import build_graph, export_gexf, print_top_neighbors
+from semantic_index.label_hierarchy import populate_label_hierarchy
 from semantic_index.models import (
     FlowsheetEntry,
     LibraryCode,
@@ -122,6 +123,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Compute Discogs-derived edges (shared personnel, styles, labels, compilations). "
         "Off by default.",
+    )
+    parser.add_argument(
+        "--populate-label-hierarchy",
+        action="store_true",
+        help="Populate label and label_hierarchy tables from Wikidata P749/P355. "
+        "Requires --entity-store-path and enrichment data.",
     )
     return parser.parse_args(argv)
 
@@ -370,6 +377,7 @@ def run(args: argparse.Namespace) -> None:
     ss_edges = []
     lf_edges = []
     comp_edges = []
+    lh_report = None
 
     if not args.skip_enrichment and (args.discogs_cache_dsn or args.api_base_url):
         log.info("Setting up Discogs client...")
@@ -398,6 +406,25 @@ def run(args: argparse.Namespace) -> None:
             log.info("  %d compilation edges", len(comp_edges))
     elif not args.skip_enrichment:
         log.warning("Skipping Discogs enrichment: no cache DSN or API URL available")
+
+    # 10b. Label hierarchy from Wikidata (optional, requires entity store + enrichments)
+    if args.populate_label_hierarchy and entity_store is not None and enrichments:
+        from semantic_index.wikidata_client import WikidataClient
+
+        log.info("Populating label hierarchy from Wikidata P749/P355...")
+        wikidata_client = WikidataClient()
+        lh_report = populate_label_hierarchy(entity_store, enrichments, wikidata_client)
+        log.info(
+            "  %d labels created, %d matched to Wikidata, %d hierarchy edges",
+            lh_report.labels_created,
+            lh_report.labels_matched,
+            lh_report.hierarchy_edges,
+        )
+    elif args.populate_label_hierarchy:
+        if entity_store is None:
+            log.warning("Skipping label hierarchy: requires --entity-store-path")
+        elif not enrichments:
+            log.warning("Skipping label hierarchy: no enrichment data available")
 
     # 11. Print top neighbors for spotlight artists
     print_top_neighbors(edges, SPOTLIGHT_ARTISTS, n=20)
@@ -460,6 +487,10 @@ def run(args: argparse.Namespace) -> None:
             print(f"  Shared style edges:      {len(ss_edges):>12,}")
             print(f"  Label family edges:      {len(lf_edges):>12,}")
             print(f"  Compilation edges:       {len(comp_edges):>12,}")
+    if lh_report is not None:
+        print(f"  Labels created:          {lh_report.labels_created:>12,}")
+        print(f"  Labels matched (WD):     {lh_report.labels_matched:>12,}")
+        print(f"  Label hierarchy edges:   {lh_report.hierarchy_edges:>12,}")
     print(f"  Graph nodes:             {graph.number_of_nodes():>12,}")
     print(f"  Graph edges:             {graph.number_of_edges():>12,}")
     print(f"  GEXF output:             {gexf_path}")
