@@ -19,6 +19,9 @@ from semantic_index.models import (
     LibraryRelease,
     PersonnelCredit,
     ResolvedEntry,
+    WikidataEntity,
+    WikidataInfluence,
+    WikidataLabelHierarchy,
 )
 
 
@@ -171,3 +174,36 @@ def make_entity(
     Uses a fixed id=1 since the real id is assigned by SQLite AUTOINCREMENT.
     """
     return Entity(id=1, name=name, entity_type=entity_type, wikidata_qid=wikidata_qid)
+
+
+def make_wikidata_entity(
+    qid: str = "Q2774",
+    name: str = "Autechre",
+    description: str | None = "British electronic music duo",
+    discogs_artist_id: int | None = 2774,
+) -> WikidataEntity:
+    return WikidataEntity(
+        qid=qid, name=name, description=description, discogs_artist_id=discogs_artist_id
+    )
+
+
+def make_wikidata_influence(
+    source_qid: str = "Q2774",
+    target_qid: str = "Q484641",
+    target_name: str = "Kraftwerk",
+) -> WikidataInfluence:
+    return WikidataInfluence(source_qid=source_qid, target_qid=target_qid, target_name=target_name)
+
+
+def make_wikidata_label_hierarchy(
+    parent_qid: str = "Q21077",
+    parent_name: str = "Universal Music Group",
+    child_qid: str = "Q1312934",
+    child_name: str = "Warp Records",
+) -> WikidataLabelHierarchy:
+    return WikidataLabelHierarchy(
+        parent_qid=parent_qid,
+        parent_name=parent_name,
+        child_qid=child_qid,
+        child_name=child_name,
+    )
