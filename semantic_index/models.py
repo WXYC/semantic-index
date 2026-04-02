@@ -273,6 +273,19 @@ class WikidataInfluence(BaseModel):
     target_name: str
 
 
+class WikidataInfluenceEdge(BaseModel):
+    """A directed influence edge between two artists from Wikidata P737.
+
+    Represents "source_artist is influenced by target_artist".
+    Both artists must exist in the graph (resolved via entity store QIDs).
+    """
+
+    source_artist: str  # influenced artist (canonical name)
+    target_artist: str  # influence source (canonical name)
+    source_qid: str  # Wikidata QID of the influenced artist
+    target_qid: str  # Wikidata QID of the influence
+
+
 class WikidataLabelHierarchy(BaseModel):
     """A parent-child label relationship (P749 parent org / P355 subsidiary)."""
 

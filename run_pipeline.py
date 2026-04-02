@@ -130,6 +130,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Populate label and label_hierarchy tables from Wikidata P749/P355. "
         "Requires --entity-store-path and enrichment data.",
     )
+    parser.add_argument(
+        "--compute-wikidata-influences",
+        action="store_true",
+        help="Query Wikidata P737 (influenced by) and create directed influence edges. "
+        "Requires --entity-store-path with reconciled Wikidata QIDs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -388,6 +394,7 @@ def run(args: argparse.Namespace) -> None:
     ss_edges = []
     lf_edges = []
     comp_edges = []
+    influence_edges = []
     lh_report = None
 
     if not args.skip_enrichment and (args.discogs_cache_dsn or args.api_base_url):
@@ -435,6 +442,30 @@ def run(args: argparse.Namespace) -> None:
         elif not enrichments:
             log.warning("Skipping label hierarchy: no enrichment data available")
 
+    # 10c. Wikidata influence edges (optional, requires entity store with QIDs)
+    if args.compute_wikidata_influences and entity_store is not None:
+        from semantic_index.wikidata_influence import extract_wikidata_influences
+
+        log.info("Querying Wikidata P737 influence relationships...")
+        wikidata_client = WikidataClient()
+
+        # Collect all QIDs from the entity store
+        qid_rows = entity_store._conn.execute(
+            "SELECT e.wikidata_qid FROM artist a "
+            "JOIN entity e ON a.entity_id = e.id "
+            "WHERE e.wikidata_qid IS NOT NULL"
+        ).fetchall()
+        all_qids = [row[0] for row in qid_rows]
+        log.info("  %d artists with Wikidata QIDs", len(all_qids))
+
+        if all_qids:
+            raw_influences = wikidata_client.get_influences(all_qids)
+            log.info("  %d raw influence relationships from Wikidata", len(raw_influences))
+            influence_edges = extract_wikidata_influences(entity_store, raw_influences)
+            log.info("  %d influence edges between known artists", len(influence_edges))
+    elif args.compute_wikidata_influences:
+        log.warning("Skipping Wikidata influences: requires --entity-store-path")
+
     # 11. Print top neighbors for spotlight artists
     print_top_neighbors(edges, SPOTLIGHT_ARTISTS, n=20)
 
@@ -465,6 +496,7 @@ def run(args: argparse.Namespace) -> None:
             label_family_edges=lf_edges,
             compilation_edges=comp_edges,
             entity_store=entity_store,
+            wikidata_influence_edges=influence_edges,
         )
         log.info("SQLite written to %s", sqlite_path)
 
@@ -496,6 +528,8 @@ def run(args: argparse.Namespace) -> None:
             print(f"  Shared style edges:      {len(ss_edges):>12,}")
             print(f"  Label family edges:      {len(lf_edges):>12,}")
             print(f"  Compilation edges:       {len(comp_edges):>12,}")
+    if influence_edges:
+        print(f"  Influence edges:         {len(influence_edges):>12,}")
     if lh_report is not None:
         print(f"  Labels created:          {lh_report.labels_created:>12,}")
         print(f"  Labels matched (WD):     {lh_report.labels_matched:>12,}")
