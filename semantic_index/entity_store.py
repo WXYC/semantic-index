@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from types import TracebackType
 
-from semantic_index.models import ArtistStats, Entity, ReconciliationEvent
+from semantic_index.models import ArtistStats, DeduplicationReport, Entity, ReconciliationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _ENTITY_STORE_SCHEMA = """
 -- Real-world person, group, or organization.
 CREATE TABLE IF NOT EXISTS entity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    wikidata_qid TEXT UNIQUE,
+    wikidata_qid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'artist',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -152,12 +152,61 @@ class EntityStore:
         This is fully idempotent — safe to call on a fresh database, an
         old-schema database, or an already-migrated database.
         """
+        self._migrate_entity_unique_qid()
         self._conn.executescript(_ENTITY_STORE_SCHEMA)
         self._migrate_artist_table()
         if self._has_table("artist"):
             self._conn.executescript(_ARTIST_INDEXES)
         self._conn.commit()
         logger.info("Entity store initialized: %s", self._db_path)
+
+    def _migrate_entity_unique_qid(self) -> None:
+        """Rebuild the entity table without the UNIQUE constraint on wikidata_qid.
+
+        Older databases have ``wikidata_qid TEXT UNIQUE``, which prevents
+        multiple entities from sharing a QID during reconciliation. This
+        migration detects the UNIQUE constraint via ``PRAGMA index_list``
+        and rebuilds the table without it so that the deduplication step
+        can find and merge duplicate-QID entities.
+
+        Safe to call when the entity table doesn't exist yet (no-op) or
+        when the constraint has already been removed (no-op).
+        """
+        if not self._has_table("entity"):
+            return
+
+        indexes = self._conn.execute("PRAGMA index_list(entity)").fetchall()
+        has_unique_qid = False
+        for idx in indexes:
+            idx_name = idx[1]
+            is_unique = bool(idx[2])
+            if is_unique:
+                cols = self._conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                if any(col[2] == "wikidata_qid" for col in cols):
+                    has_unique_qid = True
+                    break
+
+        if not has_unique_qid:
+            return
+
+        logger.info("Rebuilding entity table to remove UNIQUE constraint on wikidata_qid")
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute("ALTER TABLE entity RENAME TO _entity_old")
+        self._conn.execute(
+            """CREATE TABLE entity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wikidata_qid TEXT,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'artist',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"""
+        )
+        self._conn.execute("INSERT INTO entity SELECT * FROM _entity_old")
+        self._conn.execute("DROP TABLE _entity_old")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
+        logger.info("Entity table rebuilt without UNIQUE constraint on wikidata_qid")
 
     def _has_table(self, name: str) -> bool:
         """Check whether a table exists in the database."""
@@ -293,6 +342,73 @@ class EntityStore:
         )
         self._conn.execute("DELETE FROM entity WHERE id = ?", (merge_id,))
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Entity Deduplication
+    # ------------------------------------------------------------------
+
+    def find_duplicate_qid_groups(self) -> list[tuple[str, list[int]]]:
+        """Find groups of entities sharing the same non-NULL Wikidata QID.
+
+        Returns:
+            List of ``(wikidata_qid, [entity_id, ...])`` tuples for QIDs
+            with two or more entities. Entity IDs are sorted ascending.
+        """
+        rows = self._conn.execute(
+            """SELECT wikidata_qid, GROUP_CONCAT(id)
+               FROM entity
+               WHERE wikidata_qid IS NOT NULL
+               GROUP BY wikidata_qid
+               HAVING COUNT(*) > 1
+               ORDER BY wikidata_qid"""
+        ).fetchall()
+        return [(row[0], sorted(int(x) for x in row[1].split(","))) for row in rows]
+
+    def deduplicate_by_qid(self) -> DeduplicationReport:
+        """Find entities sharing a Wikidata QID and merge duplicates.
+
+        For each QID with multiple entities, keeps the entity with the
+        lowest ID and merges the rest into it using ``merge_entities()``.
+
+        Returns:
+            DeduplicationReport with counts of groups found, entities
+            merged, and artists reassigned.
+        """
+        groups = self.find_duplicate_qid_groups()
+        entities_merged = 0
+        artists_reassigned = 0
+
+        for qid, entity_ids in groups:
+            keep_id = entity_ids[0]
+            for merge_id in entity_ids[1:]:
+                count = self._conn.execute(
+                    "SELECT COUNT(*) FROM artist WHERE entity_id = ?", (merge_id,)
+                ).fetchone()[0]
+                artists_reassigned += count
+                self.merge_entities(keep_id, merge_id)
+                entities_merged += 1
+            logger.info(
+                "Deduplicated QID %s: kept entity %d, merged %d entities",
+                qid,
+                keep_id,
+                len(entity_ids) - 1,
+            )
+
+        if groups:
+            logger.info(
+                "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
+                len(groups),
+                entities_merged,
+                artists_reassigned,
+            )
+        else:
+            logger.info("Entity deduplication: no duplicate QIDs found")
+
+        return DeduplicationReport(
+            groups_found=len(groups),
+            entities_merged=entities_merged,
+            artists_reassigned=artists_reassigned,
+        )
 
     # ------------------------------------------------------------------
     # Artist Upsert

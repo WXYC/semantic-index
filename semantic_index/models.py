@@ -288,3 +288,11 @@ class LabelHierarchyReport(BaseModel):
     labels_created: int  # Unique labels inserted into the label table
     labels_matched: int  # Labels matched to Wikidata QIDs
     hierarchy_edges: int  # Parent-child relationships inserted
+
+
+class DeduplicationReport(BaseModel):
+    """Summary of an entity deduplication run."""
+
+    groups_found: int  # QIDs with 2+ entities
+    entities_merged: int  # Total entities merged (deleted)
+    artists_reassigned: int  # Total artist rows re-parented
