@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from semantic_index.wikidata_client import WikidataClient
+from semantic_index.wikidata_client import MUSICAL_GROUP_TYPES, MUSICIAN_OCCUPATIONS, WikidataClient
 
 
 def _sparql_response(bindings: list[dict]) -> dict:
@@ -433,3 +433,160 @@ class TestGracefulDegradation:
         # First batch succeeded, second failed
         assert len(result) == 1
         assert 2774 in result
+
+
+class TestSearchMusicianByName:
+    """Tests for musician-filtered name search (search + SPARQL P31/P106 validation)."""
+
+    def _make_search_response(self, items: list[dict]) -> dict:
+        """Build a mock wbsearchentities API response."""
+        return {"search": items}
+
+    def _make_filter_response(self, qids: list[str]) -> MagicMock:
+        """Build a mock SPARQL response that returns the given QIDs as musicians."""
+        resp = MagicMock()
+        resp.json.return_value = _sparql_response(
+            [{"item": _uri(qid), "itemLabel": _literal(qid)} for qid in qids]
+        )
+        return resp
+
+    def test_returns_musician_entity(self):
+        """A search result that passes the musician filter is returned."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response(
+            [{"id": "Q2774", "label": "Autechre", "description": "British electronic music duo"}]
+        )
+        filter_resp = self._make_filter_response(["Q2774"])
+
+        mock_client = MagicMock()
+        # First call: wbsearchentities; second call: SPARQL filter
+        mock_client.get.side_effect = [search_resp, filter_resp]
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("Autechre")
+
+        assert len(result) == 1
+        assert result[0].qid == "Q2774"
+        assert result[0].name == "Autechre"
+
+    def test_filters_out_non_musician(self):
+        """Search results that don't pass the musician filter are excluded."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response(
+            [
+                {"id": "Q218981", "label": "Cat Power", "description": "American singer"},
+                {"id": "Q999999", "label": "Cat Power (film)", "description": "2024 documentary"},
+            ]
+        )
+        # Only Q218981 passes the musician filter
+        filter_resp = self._make_filter_response(["Q218981"])
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = [search_resp, filter_resp]
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("Cat Power")
+
+        assert len(result) == 1
+        assert result[0].qid == "Q218981"
+
+    def test_no_search_results_returns_empty(self):
+        """If wbsearchentities returns nothing, result is empty without SPARQL call."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response([])
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = search_resp
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("xyznonexistent")
+
+        assert result == []
+        # Only the search call, no SPARQL filter call
+        assert mock_client.get.call_count == 1
+
+    def test_no_musicians_among_results_returns_empty(self):
+        """If none of the search results are musicians, result is empty."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response(
+            [{"id": "Q12345", "label": "Stereolab", "description": "a place"}]
+        )
+        filter_resp = self._make_filter_response([])
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = [search_resp, filter_resp]
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("Stereolab")
+
+        assert result == []
+
+    def test_blank_name_returns_empty(self):
+        """Blank names skip both search and SPARQL."""
+        client = WikidataClient()
+        result = client.search_musician_by_name("   ")
+        assert result == []
+
+    def test_preserves_search_order(self):
+        """Results maintain the original search relevance order."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response(
+            [
+                {"id": "Q218981", "label": "Cat Power", "description": "American singer"},
+                {"id": "Q777777", "label": "Cat Power Trio", "description": "jazz trio"},
+            ]
+        )
+        # Both pass the filter, but SPARQL may return them in any order
+        filter_resp = self._make_filter_response(["Q777777", "Q218981"])
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = [search_resp, filter_resp]
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("Cat Power")
+
+        assert len(result) == 2
+        assert result[0].qid == "Q218981"  # original search order preserved
+        assert result[1].qid == "Q777777"
+
+    def test_sparql_error_returns_empty(self):
+        """If the SPARQL filter fails, gracefully return empty."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response(
+            [{"id": "Q2774", "label": "Autechre", "description": "duo"}]
+        )
+
+        mock_client = MagicMock()
+        # Search succeeds, then SPARQL filter raises
+        mock_client.get.side_effect = [search_resp, Exception("SPARQL timeout")]
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.search_musician_by_name("Autechre")
+
+        assert result == []
+
+    def test_limit_passed_to_search(self):
+        """The limit parameter is forwarded to wbsearchentities."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response([])
+        mock_client = MagicMock()
+        mock_client.get.return_value = search_resp
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            client.search_musician_by_name("Autechre", limit=5)
+
+        # The search call should have limit=5
+        search_call = mock_client.get.call_args_list[0]
+        assert search_call.kwargs["params"]["limit"] == 5
+
+    def test_constants_exported(self):
+        """Verify the filter constants are available for inspection."""
+        assert "Q639669" in MUSICIAN_OCCUPATIONS  # musician
+        assert "Q215380" in MUSICAL_GROUP_TYPES  # musical group/band

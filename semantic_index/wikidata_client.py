@@ -25,6 +25,31 @@ logger = logging.getLogger(__name__)
 _QID_PATTERN = re.compile(r"^Q\d+$")
 _RATE_INTERVAL = 1.0  # seconds between requests
 
+# Wikidata QIDs for musician-related occupations (P106 values).
+MUSICIAN_OCCUPATIONS: frozenset[str] = frozenset(
+    {
+        "Q639669",  # musician
+        "Q177220",  # singer
+        "Q753110",  # songwriter
+        "Q488205",  # singer-songwriter
+        "Q36834",  # composer
+        "Q855091",  # guitarist
+        "Q386854",  # rapper
+        "Q183945",  # record producer
+        "Q130857",  # disc jockey
+        "Q806349",  # bandleader
+    }
+)
+
+# Wikidata QIDs for musical group types (P31 values).
+MUSICAL_GROUP_TYPES: frozenset[str] = frozenset(
+    {
+        "Q215380",  # musical group/band
+        "Q5741069",  # musical duo
+        "Q56816954",  # music project
+    }
+)
+
 
 def _extract_qid(uri: str) -> str:
     """Extract QID from a Wikidata entity URI.
@@ -343,3 +368,73 @@ class WikidataClient:
             return []
         finally:
             client.close()
+
+    def search_musician_by_name(self, name: str, limit: int = 10) -> list[WikidataEntity]:
+        """Search for Wikidata entities by name, filtered to musicians.
+
+        Two-step process: first finds candidates via ``wbsearchentities``,
+        then validates them with a SPARQL query checking P31 (instance of)
+        and P106 (occupation) to keep only humans with musician occupations
+        or musical groups/duos.
+
+        Args:
+            name: Search string (artist name).
+            limit: Maximum candidates to retrieve from search (capped at 50).
+
+        Returns:
+            List of WikidataEntity instances that are musicians, in search
+            relevance order.
+        """
+        candidates = self.search_by_name(name, limit=limit)
+        if not candidates:
+            return []
+
+        candidate_qids = [c.qid for c in candidates]
+        musician_qids = self._filter_musicians(candidate_qids)
+        if not musician_qids:
+            return []
+
+        return [c for c in candidates if c.qid in musician_qids]
+
+    def _filter_musicians(self, qids: list[str]) -> set[str]:
+        """Filter QIDs to those that are musicians or musical groups.
+
+        Uses a SPARQL query to check:
+        - Human (P31=Q5) with a musician-related occupation (P106), OR
+        - Musical group/duo/project (P31 in MUSICAL_GROUP_TYPES).
+
+        Args:
+            qids: Candidate Wikidata QIDs to filter.
+
+        Returns:
+            Set of QIDs that pass the musician filter.
+        """
+        valid_qids = self._validate_qids(qids)
+        if not valid_qids:
+            return set()
+
+        values = " ".join(f"wd:{qid}" for qid in valid_qids)
+        occupations = " ".join(f"wd:{qid}" for qid in MUSICIAN_OCCUPATIONS)
+        group_types = " ".join(f"wd:{qid}" for qid in MUSICAL_GROUP_TYPES)
+
+        query = (
+            "SELECT DISTINCT ?item WHERE {\n"
+            f"  VALUES ?item {{ {values} }}\n"
+            "  {\n"
+            "    ?item wdt:P31 wd:Q5 .\n"
+            f"    VALUES ?occupation {{ {occupations} }}\n"
+            "    ?item wdt:P106 ?occupation .\n"
+            "  }\n"
+            "  UNION\n"
+            "  {\n"
+            f"    VALUES ?groupType {{ {group_types} }}\n"
+            "    ?item wdt:P31 ?groupType .\n"
+            "  }\n"
+            "}"
+        )
+        try:
+            bindings = self._sparql_query(query)
+            return {_extract_qid(_binding_value(b, "item") or "") for b in bindings}
+        except Exception:
+            logger.warning("SPARQL musician filter failed for %s", qids, exc_info=True)
+            return set()

@@ -708,194 +708,212 @@ class TestReconcileMembers:
 # ---------------------------------------------------------------------------
 
 
+def _make_mock_wikidata_client(
+    results_by_name: dict[str, list[WikidataEntity]],
+) -> WikidataClient:
+    """Build a mock WikidataClient whose search_musician_by_name returns preset results.
+
+    Args:
+        results_by_name: Maps artist name (case-insensitive) to WikidataEntity list.
+    """
+    mock = MagicMock(spec=WikidataClient)
+    lower_map = {k.lower(): v for k, v in results_by_name.items()}
+    mock.search_musician_by_name.side_effect = lambda name, **kw: lower_map.get(name.lower(), [])
+    return mock
+
+
 class TestReconcileWikidata:
-    def test_creates_entity_and_populates_qid(self, store: EntityStore):
-        """Artists with discogs_artist_id get entities with wikidata_qid."""
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
+    def test_returns_reconciliation_report(self, store: EntityStore):
+        aid1 = store.upsert_artist("Autechre")
+        aid2 = store.upsert_artist("Cat Power")
+        store.update_reconciliation_status(aid1, "no_match")
+        store.update_reconciliation_status(aid2, "no_match")
 
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-        }
+        wikidata = _make_mock_wikidata_client(
+            {"Autechre": [WikidataEntity(qid="Q2774", name="Autechre")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
+        report = reconciler.reconcile_wikidata(wikidata)
+        assert isinstance(report, ReconciliationReport)
+        assert report.total == 2
+        assert report.attempted == 2
         assert report.succeeded == 1
-        assert report.no_match == 0
+        assert report.no_match == 1
+        assert report.errored == 0
+        assert report.skipped == 0
 
+    def test_creates_entity_with_qid(self, store: EntityStore):
+        aid = store.upsert_artist("Autechre")
+        store.update_reconciliation_status(aid, "no_match")
+
+        wikidata = _make_mock_wikidata_client(
+            {"Autechre": [WikidataEntity(qid="Q2774", name="Autechre")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        reconciler.reconcile_wikidata(wikidata)
+        entity = store.get_entity_by_qid("Q2774")
+        assert entity is not None
+        assert entity.name == "Autechre"
+        assert entity.entity_type == "artist"
+
+    def test_links_artist_to_entity(self, store: EntityStore):
+        aid = store.upsert_artist("Autechre")
+        store.update_reconciliation_status(aid, "no_match")
+
+        wikidata = _make_mock_wikidata_client(
+            {"Autechre": [WikidataEntity(qid="Q2774", name="Autechre")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        reconciler.reconcile_wikidata(wikidata)
         row = store.get_artist_by_name("Autechre")
         assert row is not None
         assert row["entity_id"] is not None
-
-        entity = store._conn.execute(
-            "SELECT wikidata_qid, name FROM entity WHERE id = ?", (row["entity_id"],)
-        ).fetchone()
-        assert entity[0] == "Q2774"
-        assert entity[1] == "Autechre"
-
-    def test_updates_existing_entity_qid(self, store: EntityStore):
-        """If artist already has an entity without QID, updates it."""
-        entity = store.get_or_create_entity("Autechre", "artist")
-        store.upsert_artist("Autechre", discogs_artist_id=2774, entity_id=entity.id)
-
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-        }
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
-        assert report.succeeded == 1
-
-        updated_entity = store.get_entity_by_qid("Q2774")
-        assert updated_entity is not None
-        assert updated_entity.id == entity.id
-
-    def test_no_match_counted(self, store: EntityStore):
-        """Artists whose discogs ID has no Wikidata match are counted as no_match."""
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
-
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {}
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
-        assert report.attempted == 1
-        assert report.succeeded == 0
-        assert report.no_match == 1
-
-    def test_skips_artists_already_with_qid(self, store: EntityStore):
-        """Artists whose entity already has a QID are skipped."""
-        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
-        store.upsert_artist("Autechre", discogs_artist_id=2774, entity_id=entity.id)
-        store.upsert_artist("Stereolab", discogs_artist_id=10272)
-
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            10272: WikidataEntity(qid="Q650826", name="Stereolab", discogs_artist_id=10272),
-        }
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
-        assert report.skipped == 1
-        assert report.attempted == 1
-        assert report.succeeded == 1
-
-    def test_skips_artists_without_discogs_id(self, store: EntityStore):
-        """Artists without discogs_artist_id are not attempted."""
-        store.upsert_artist("Unknown Band")
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
-
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-        }
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
-        assert report.total == 2
-        assert report.attempted == 1
-        assert report.succeeded == 1
-        assert report.skipped == 1
+        # Verify it points to the right entity
+        entity = store.get_entity_by_qid("Q2774")
+        assert row["entity_id"] == entity.id
 
     def test_logs_reconciliation_event(self, store: EntityStore):
-        aid = store.upsert_artist("Autechre", discogs_artist_id=2774)
+        aid = store.upsert_artist("Stereolab")
+        store.update_reconciliation_status(aid, "no_match")
 
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-        }
+        wikidata = _make_mock_wikidata_client(
+            {"Stereolab": [WikidataEntity(qid="Q650826", name="Stereolab")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        reconciler.reconcile_wikidata()
+        reconciler.reconcile_wikidata(wikidata)
         history = store.get_reconciliation_history(aid)
         assert len(history) == 1
         assert history[0].source == "wikidata"
-        assert history[0].external_id == "Q2774"
-        assert history[0].method == "discogs_id_lookup"
+        assert history[0].external_id == "Q650826"
+        assert history[0].method == "name_search"
 
-    def test_multiple_artists(self, store: EntityStore):
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
-        store.upsert_artist("Stereolab", discogs_artist_id=10272)
-        store.upsert_artist("Father John Misty", discogs_artist_id=555)
+    def test_updates_status_to_reconciled(self, store: EntityStore):
+        aid = store.upsert_artist("Cat Power")
+        store.update_reconciliation_status(aid, "no_match")
 
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-            10272: WikidataEntity(qid="Q650826", name="Stereolab", discogs_artist_id=10272),
-        }
+        wikidata = _make_mock_wikidata_client(
+            {"Cat Power": [WikidataEntity(qid="Q218981", name="Cat Power")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
+        reconciler.reconcile_wikidata(wikidata)
+        row = store._conn.execute(
+            "SELECT reconciliation_status FROM artist WHERE id = ?", (aid,)
+        ).fetchone()
+        assert row[0] == "reconciled"
 
-        report = reconciler.reconcile_wikidata()
+    def test_unmatched_stays_no_match(self, store: EntityStore):
+        aid = store.upsert_artist("Unknown Band")
+        store.update_reconciliation_status(aid, "no_match")
+
+        wikidata = _make_mock_wikidata_client({})
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        reconciler.reconcile_wikidata(wikidata)
+        row = store._conn.execute(
+            "SELECT reconciliation_status FROM artist WHERE id = ?", (aid,)
+        ).fetchone()
+        assert row[0] == "no_match"
+
+    def test_only_processes_no_match_artists(self, store: EntityStore):
+        """Reconciled and unreconciled artists are skipped."""
+        aid_reconciled = store.upsert_artist("Autechre", discogs_artist_id=42)
+        store.update_reconciliation_status(aid_reconciled, "reconciled")
+        store.upsert_artist("Stereolab")  # stays unreconciled
+        aid_no_match = store.upsert_artist("Cat Power")
+        store.update_reconciliation_status(aid_no_match, "no_match")
+
+        wikidata = _make_mock_wikidata_client(
+            {"Cat Power": [WikidataEntity(qid="Q218981", name="Cat Power")]}
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        report = reconciler.reconcile_wikidata(wikidata)
         assert report.total == 3
-        assert report.attempted == 3
-        assert report.succeeded == 2
-        assert report.no_match == 1
+        assert report.skipped == 2
+        assert report.attempted == 1
+        assert report.succeeded == 1
+
+    def test_takes_first_result(self, store: EntityStore):
+        """Uses the top search result (best relevance) when multiple candidates pass."""
+        aid = store.upsert_artist("Cat Power")
+        store.update_reconciliation_status(aid, "no_match")
+
+        wikidata = _make_mock_wikidata_client(
+            {
+                "Cat Power": [
+                    WikidataEntity(qid="Q218981", name="Cat Power"),
+                    WikidataEntity(qid="Q999999", name="Cat Power Trio"),
+                ]
+            }
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        reconciler.reconcile_wikidata(wikidata)
+        entity = store.get_entity_by_qid("Q218981")
+        assert entity is not None
+        # The second candidate should not have been created
+        assert store.get_entity_by_qid("Q999999") is None
+
+    def test_empty_no_match_set(self, store: EntityStore):
+        store.upsert_artist("Autechre")  # unreconciled, not no_match
+        wikidata = _make_mock_wikidata_client({})
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+
+        report = reconciler.reconcile_wikidata(wikidata)
+        assert report.total == 1
+        assert report.attempted == 0
+        assert report.succeeded == 0
+        assert report.skipped == 1
 
     def test_reuses_existing_entity_by_qid(self, store: EntityStore):
-        """If an entity already exists with the matching QID, reuses it."""
-        existing = store.get_or_create_entity(
-            "Autechre (electronic duo)", "artist", wikidata_qid="Q2774"
+        """If an entity with the QID already exists, links to it instead of creating a new one."""
+        existing = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+        aid = store.upsert_artist("Autechre")
+        store.update_reconciliation_status(aid, "no_match")
+
+        wikidata = _make_mock_wikidata_client(
+            {"Autechre": [WikidataEntity(qid="Q2774", name="Autechre")]}
         )
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.return_value = {
-            2774: WikidataEntity(qid="Q2774", name="Autechre", discogs_artist_id=2774),
-        }
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        reconciler.reconcile_wikidata()
+        reconciler.reconcile_wikidata(wikidata)
         row = store.get_artist_by_name("Autechre")
         assert row["entity_id"] == existing.id
 
-    def test_no_wikidata_client_raises(self, store: EntityStore):
-        """reconcile_wikidata raises ValueError when no WikidataClient is configured."""
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client)
+    def test_multiple_artists_matched(self, store: EntityStore):
+        aid1 = store.upsert_artist("Autechre")
+        aid2 = store.upsert_artist("Father John Misty")
+        aid3 = store.upsert_artist("Jessica Pratt")
+        for aid in (aid1, aid2, aid3):
+            store.update_reconciliation_status(aid, "no_match")
 
-        with pytest.raises(ValueError, match="WikidataClient"):
-            reconciler.reconcile_wikidata()
+        wikidata = _make_mock_wikidata_client(
+            {
+                "Autechre": [WikidataEntity(qid="Q2774", name="Autechre")],
+                "Father John Misty": [WikidataEntity(qid="Q17070647", name="Father John Misty")],
+            }
+        )
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-    def test_empty_artist_table(self, store: EntityStore):
-        wikidata_client = MagicMock(spec=WikidataClient)
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
+        report = reconciler.reconcile_wikidata(wikidata)
+        assert report.succeeded == 2
+        assert report.no_match == 1
 
-        report = reconciler.reconcile_wikidata()
-        assert report.total == 0
-        assert report.attempted == 0
-        assert report.succeeded == 0
-        # lookup_by_discogs_ids should not be called with no IDs
-        wikidata_client.lookup_by_discogs_ids.assert_not_called()
+    def test_search_exception_counts_as_errored(self, store: EntityStore):
+        """If search_musician_by_name raises, the artist is counted as errored."""
+        aid = store.upsert_artist("Autechre")
+        store.update_reconciliation_status(aid, "no_match")
 
-    def test_wikidata_error_counts_as_errored(self, store: EntityStore):
-        store.upsert_artist("Autechre", discogs_artist_id=2774)
+        wikidata = MagicMock(spec=WikidataClient)
+        wikidata.search_musician_by_name.side_effect = Exception("Network error")
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
 
-        wikidata_client = MagicMock(spec=WikidataClient)
-        wikidata_client.lookup_by_discogs_ids.side_effect = Exception("SPARQL timeout")
-
-        client = DiscogsClient(cache_dsn=None, api_base_url=None)
-        reconciler = ArtistReconciler(store, client, wikidata_client=wikidata_client)
-
-        report = reconciler.reconcile_wikidata()
+        report = reconciler.reconcile_wikidata(wikidata)
         assert report.attempted == 1
         assert report.errored == 1
         assert report.succeeded == 0
