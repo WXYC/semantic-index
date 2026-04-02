@@ -114,19 +114,18 @@ class ArtistReconciler:
             skipped=skipped,
         )
 
-    def reconcile_aliases(self, batch_size: int = 1000) -> ReconciliationReport:
-        """Retry no_match artists against Discogs alias and name variation tables.
+    def reconcile_members(self, batch_size: int = 1000) -> ReconciliationReport:
+        """Re-try no_match artists against the Discogs ``artist_member`` table.
 
-        Queries artists with ``reconciliation_status='no_match'`` (set by a
-        prior ``reconcile_batch()`` run) and attempts to match them via the
-        discogs-cache ``artist_alias`` and ``artist_name_variation`` tables.
+        Queries in both directions: WXYC artist name as a Discogs group name
+        (has members), and as a Discogs member name. Only artists with
+        ``reconciliation_status='no_match'`` are attempted.
 
         Args:
             batch_size: Number of artist names per bulk Discogs query.
 
         Returns:
-            ReconciliationReport with counts of attempted, succeeded,
-            no_match, errored, and skipped artists.
+            ReconciliationReport with counts.
         """
         total = self._store._conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
         no_match_artists = self._store.get_no_match_artists()
@@ -143,16 +142,16 @@ class ArtistReconciler:
             batch_names = [name for _, name in batch]
 
             try:
-                matches = self._reconcile_discogs_aliases(batch_names)
+                matches = self._reconcile_member_bulk(batch_names)
             except Exception:
-                logger.warning("Alias reconciliation failed for batch", exc_info=True)
+                logger.warning("Member reconciliation failed for batch", exc_info=True)
                 errored += len(batch_names)
                 continue
 
             for name in batch_names:
                 artist_id = name_to_id[name]
                 if name in matches:
-                    discogs_id, styles = matches[name]
+                    discogs_id, styles, method = matches[name]
                     self._store.upsert_artist(name, discogs_artist_id=discogs_id)
                     if styles:
                         self._store.persist_artist_styles(artist_id, styles)
@@ -161,7 +160,7 @@ class ArtistReconciler:
                         source="discogs",
                         external_id=str(discogs_id),
                         confidence=None,
-                        method="alias_lookup",
+                        method=method,
                     )
                     self._store.update_reconciliation_status(artist_id, "reconciled")
                     succeeded += 1
@@ -170,7 +169,7 @@ class ArtistReconciler:
 
         attempted = succeeded + no_match + errored
         logger.info(
-            "Alias reconciliation complete: %d attempted, %d succeeded, %d no_match, %d errored, %d skipped",
+            "Member reconciliation complete: %d attempted, %d succeeded, %d no_match, %d errored, %d skipped",
             attempted,
             succeeded,
             no_match,
@@ -199,6 +198,86 @@ class ArtistReconciler:
             return execute(fallback_sql, params).fetchall()  # type: ignore[no-any-return]
         except Exception:
             return execute(fallback_sql, params).fetchall()  # type: ignore[no-any-return]
+
+    def _reconcile_member_bulk(self, names: list[str]) -> dict[str, tuple[int, list[str], str]]:
+        """Batch lookup against the Discogs ``artist_member`` table in both directions.
+
+        Direction 1 (group): WXYC artist name matches a Discogs group name
+        that has members in ``artist_member``. Returns the group's ``artist.id``.
+
+        Direction 2 (member): WXYC artist name matches ``artist_member.member_name``.
+        Returns the member's ``member_id`` (Discogs artist ID).
+
+        Group matches take priority when a name matches in both directions.
+
+        Args:
+            names: List of canonical artist names to look up.
+
+        Returns:
+            Dict mapping canonical_name to ``(discogs_artist_id, [styles], method)``.
+            Method is ``"member_group"`` or ``"member_name"``.
+        """
+        if not names:
+            return {}
+
+        conn = self._client._get_cache_conn()
+        if conn is None:
+            return {}
+
+        lower_to_canonical: dict[str, str] = {n.lower(): n for n in names}
+        lower_names = list(lower_to_canonical.keys())
+
+        matches: dict[str, tuple[int, str]] = {}  # canonical -> (discogs_id, method)
+
+        # Direction 1: name matches a group with members
+        group_rows = conn.execute(
+            "SELECT lower(a.name), a.id FROM artist a "
+            "WHERE lower(a.name) = ANY(%s) "
+            "AND EXISTS (SELECT 1 FROM artist_member am WHERE am.artist_id = a.id)",
+            (lower_names,),
+        ).fetchall()
+
+        for lower_name, artist_id in group_rows:
+            canonical = lower_to_canonical.get(lower_name)
+            if canonical is not None and artist_id is not None:
+                matches[canonical] = (artist_id, "member_group")
+
+        # Direction 2: name matches a member name (skip already-matched)
+        remaining_lower = [n for n in lower_names if lower_to_canonical.get(n) not in matches]
+        if remaining_lower:
+            member_rows = conn.execute(
+                "SELECT DISTINCT lower(am.member_name), am.member_id "
+                "FROM artist_member am "
+                "WHERE lower(am.member_name) = ANY(%s)",
+                (remaining_lower,),
+            ).fetchall()
+
+            for lower_name, member_id in member_rows:
+                canonical = lower_to_canonical.get(lower_name)
+                if canonical is not None and member_id is not None and canonical not in matches:
+                    matches[canonical] = (member_id, "member_name")
+
+        if not matches:
+            return {}
+
+        # Fetch styles by discogs_artist_id
+        matched_ids = list({did for did, _ in matches.values()})
+        style_rows = conn.execute(
+            "SELECT DISTINCT ra.artist_id, rs.style "
+            "FROM release_style rs "
+            "JOIN release_artist ra ON rs.release_id = ra.release_id "
+            "WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
+            (matched_ids,),
+        ).fetchall()
+
+        id_styles: dict[int, list[str]] = {}
+        for artist_id, style in style_rows:
+            id_styles.setdefault(artist_id, []).append(style)
+
+        return {
+            canonical: (discogs_id, id_styles.get(discogs_id, []), method)
+            for canonical, (discogs_id, method) in matches.items()
+        }
 
     def _reconcile_discogs_bulk(self, names: list[str]) -> dict[str, tuple[int, list[str]]]:
         """Batch Discogs lookup via the ``release_artist`` table.
