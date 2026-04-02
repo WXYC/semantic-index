@@ -28,11 +28,15 @@ Usage::
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from semantic_index.discogs_client import DiscogsClient
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ReconciliationReport
 from semantic_index.wikidata_client import WikidataClient
+
+if TYPE_CHECKING:
+    from semantic_index.wikidata_client import WikidataClient
 
 logger = logging.getLogger(__name__)
 
@@ -200,89 +204,70 @@ class ArtistReconciler:
             skipped=skipped,
         )
 
-    def reconcile_wikidata(self) -> ReconciliationReport:
-        """Look up Wikidata entities by Discogs artist ID (P1953).
+    def reconcile_wikidata(self, wikidata_client: WikidataClient) -> ReconciliationReport:
+        """Search Wikidata by name for artists with no Discogs match.
 
-        For each artist with a ``discogs_artist_id`` whose entity does not yet
-        have a ``wikidata_qid``, queries Wikidata via SPARQL. On match, creates
-        or updates the entity and links it to the artist.
+        For each ``no_match`` artist, searches Wikidata for musician entities
+        matching the artist name. The top result (if any) is linked via the
+        entity store and logged as a ``wikidata`` / ``name_search`` reconciliation.
 
-        Raises:
-            ValueError: If no WikidataClient was provided at construction time.
+        Args:
+            wikidata_client: WikidataClient instance for name search.
 
         Returns:
             ReconciliationReport with counts.
         """
-        if self._wikidata_client is None:
-            raise ValueError("WikidataClient is required for reconcile_wikidata")
-
         total = self._store._conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
-        needing = self._store.get_artists_needing_wikidata()
-        skipped = total - len(needing)
-
-        if not needing:
-            return ReconciliationReport(
-                total=total, attempted=0, succeeded=0, no_match=0, errored=0, skipped=skipped
-            )
-
-        discogs_ids = [discogs_id for _, _, discogs_id in needing]
-        try:
-            wikidata_map = self._wikidata_client.lookup_by_discogs_ids(discogs_ids)
-        except Exception:
-            logger.warning("Wikidata lookup failed", exc_info=True)
-            return ReconciliationReport(
-                total=total,
-                attempted=len(needing),
-                succeeded=0,
-                no_match=0,
-                errored=len(needing),
-                skipped=skipped,
-            )
+        no_match_artists = self._store.get_no_match_artists()
+        skipped = total - len(no_match_artists)
 
         succeeded = 0
         no_match = 0
+        errored = 0
 
-        for artist_id, canonical_name, discogs_id in needing:
-            wd_entity = wikidata_map.get(discogs_id)
-            if wd_entity is None:
+        for artist_id, name in no_match_artists:
+            try:
+                results = wikidata_client.search_musician_by_name(name, limit=5)
+            except Exception:
+                logger.warning(
+                    "Wikidata name search failed for artist %d (%s)", artist_id, name, exc_info=True
+                )
+                errored += 1
+                continue
+
+            if not results:
                 no_match += 1
                 continue
 
-            # Reuse an existing entity with this QID, or create/update one
-            existing = self._store.get_entity_by_qid(wd_entity.qid)
-            if existing is not None:
-                entity_id = existing.id
-            else:
-                row = self._store.get_artist_by_name(canonical_name)
-                raw_eid = row["entity_id"] if row else None
-                current_entity_id: int | None = (
-                    int(raw_eid) if isinstance(raw_eid, (int, float)) else None
-                )
-                if current_entity_id is not None:
-                    self._store.update_entity_qid(current_entity_id, wd_entity.qid)
-                    entity_id = current_entity_id
-                else:
-                    entity = self._store.get_or_create_entity(
-                        wd_entity.name, "artist", wikidata_qid=wd_entity.qid
-                    )
-                    entity_id = entity.id
+            best = results[0]
 
-            self._store.upsert_artist(canonical_name, entity_id=entity_id)
+            # Reuse existing entity if one already has this QID
+            entity = self._store.get_entity_by_qid(best.qid)
+            if entity is None:
+                entity = self._store.get_or_create_entity(
+                    name=best.name,
+                    entity_type="artist",
+                    wikidata_qid=best.qid,
+                )
+
+            self._store.upsert_artist(name, entity_id=entity.id)
             self._store.log_reconciliation(
                 artist_id=artist_id,
                 source="wikidata",
-                external_id=wd_entity.qid,
+                external_id=best.qid,
                 confidence=None,
-                method="discogs_id_lookup",
+                method="name_search",
             )
+            self._store.update_reconciliation_status(artist_id, "reconciled")
             succeeded += 1
 
-        attempted = succeeded + no_match
+        attempted = succeeded + no_match + errored
         logger.info(
-            "Wikidata reconciliation complete: %d attempted, %d succeeded, %d no_match, %d skipped",
+            "Wikidata reconciliation complete: %d attempted, %d succeeded, %d no_match, %d errored, %d skipped",
             attempted,
             succeeded,
             no_match,
+            errored,
             skipped,
         )
         return ReconciliationReport(
@@ -290,7 +275,7 @@ class ArtistReconciler:
             attempted=attempted,
             succeeded=succeeded,
             no_match=no_match,
-            errored=0,
+            errored=errored,
             skipped=skipped,
         )
 

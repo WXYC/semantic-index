@@ -37,6 +37,7 @@ from semantic_index.pmi import compute_pmi
 from semantic_index.reconciliation import ArtistReconciler
 from semantic_index.sql_parser import iter_table_rows, load_table_rows
 from semantic_index.sqlite_export import export_sqlite
+from semantic_index.wikidata_client import WikidataClient
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-reconciliation",
         action="store_true",
         help="Skip Discogs reconciliation step (requires --entity-store-path)",
+    )
+    parser.add_argument(
+        "--wikidata-reconciliation",
+        action="store_true",
+        help="Search Wikidata by name for artists with no Discogs match. "
+        "Filtered to musicians (P31=human/musical group, P106=musician). "
+        "Requires --entity-store-path.",
     )
     parser.add_argument(
         "--compute-discogs-edges",
@@ -276,13 +284,14 @@ def run(args: argparse.Namespace) -> None:
         entity_store.bulk_upsert_artists(all_canonical)
 
         # 5d. Reconcile via Discogs (unless skipped or no cache DSN)
+        reconcile_client = DiscogsClient(
+            cache_dsn=args.discogs_cache_dsn,
+            api_base_url=None,
+        )
+        reconciler = ArtistReconciler(entity_store, reconcile_client)
+
         if not args.skip_reconciliation and args.discogs_cache_dsn:
             log.info("Running Discogs reconciliation...")
-            reconcile_client = DiscogsClient(
-                cache_dsn=args.discogs_cache_dsn,
-                api_base_url=None,
-            )
-            reconciler = ArtistReconciler(entity_store, reconcile_client)
             report = reconciler.reconcile_batch()
             log.info(
                 "Reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
@@ -302,6 +311,19 @@ def run(args: argparse.Namespace) -> None:
             )
         elif not args.skip_reconciliation:
             log.warning("Skipping reconciliation: no discogs-cache DSN available")
+
+        # 5e. Wikidata name search for remaining no_match artists (opt-in)
+        if args.wikidata_reconciliation:
+            log.info("Running Wikidata name search for no_match artists...")
+            wikidata_client = WikidataClient()
+            wikidata_report = reconciler.reconcile_wikidata(wikidata_client)
+            log.info(
+                "Wikidata reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                wikidata_report.attempted,
+                wikidata_report.succeeded,
+                wikidata_report.no_match,
+                wikidata_report.errored,
+            )
 
     # 6. Extract adjacency pairs
     log.info("Extracting adjacency pairs...")
