@@ -291,6 +291,16 @@ def run(args: argparse.Namespace) -> None:
                 report.no_match,
                 report.errored,
             )
+
+            # Retry no_match artists against alias and name variation tables
+            alias_report = reconciler.reconcile_aliases()
+            log.info(
+                "Alias reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                alias_report.attempted,
+                alias_report.succeeded,
+                alias_report.no_match,
+                alias_report.errored,
+            )
         elif not args.skip_reconciliation:
             log.warning("Skipping reconciliation: no discogs-cache DSN available")
 

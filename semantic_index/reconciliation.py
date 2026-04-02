@@ -114,6 +114,78 @@ class ArtistReconciler:
             skipped=skipped,
         )
 
+    def reconcile_aliases(self, batch_size: int = 1000) -> ReconciliationReport:
+        """Retry no_match artists against Discogs alias and name variation tables.
+
+        Queries artists with ``reconciliation_status='no_match'`` (set by a
+        prior ``reconcile_batch()`` run) and attempts to match them via the
+        discogs-cache ``artist_alias`` and ``artist_name_variation`` tables.
+
+        Args:
+            batch_size: Number of artist names per bulk Discogs query.
+
+        Returns:
+            ReconciliationReport with counts of attempted, succeeded,
+            no_match, errored, and skipped artists.
+        """
+        total = self._store._conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
+        no_match_artists = self._store.get_no_match_artists()
+        skipped = total - len(no_match_artists)
+
+        succeeded = 0
+        no_match = 0
+        errored = 0
+
+        name_to_id = {name: aid for aid, name in no_match_artists}
+
+        for batch_start in range(0, len(no_match_artists), batch_size):
+            batch = no_match_artists[batch_start : batch_start + batch_size]
+            batch_names = [name for _, name in batch]
+
+            try:
+                matches = self._reconcile_discogs_aliases(batch_names)
+            except Exception:
+                logger.warning("Alias reconciliation failed for batch", exc_info=True)
+                errored += len(batch_names)
+                continue
+
+            for name in batch_names:
+                artist_id = name_to_id[name]
+                if name in matches:
+                    discogs_id, styles = matches[name]
+                    self._store.upsert_artist(name, discogs_artist_id=discogs_id)
+                    if styles:
+                        self._store.persist_artist_styles(artist_id, styles)
+                    self._store.log_reconciliation(
+                        artist_id=artist_id,
+                        source="discogs",
+                        external_id=str(discogs_id),
+                        confidence=None,
+                        method="alias_lookup",
+                    )
+                    self._store.update_reconciliation_status(artist_id, "reconciled")
+                    succeeded += 1
+                else:
+                    no_match += 1
+
+        attempted = succeeded + no_match + errored
+        logger.info(
+            "Alias reconciliation complete: %d attempted, %d succeeded, %d no_match, %d errored, %d skipped",
+            attempted,
+            succeeded,
+            no_match,
+            errored,
+            skipped,
+        )
+        return ReconciliationReport(
+            total=total,
+            attempted=attempted,
+            succeeded=succeeded,
+            no_match=no_match,
+            errored=errored,
+            skipped=skipped,
+        )
+
     @staticmethod
     def _query_with_fallback(
         conn: object, primary_sql: str, fallback_sql: str, params: tuple
@@ -192,5 +264,78 @@ class ArtistReconciler:
         # 3. Build result
         return {
             canonical: (discogs_id, artist_styles.get(canonical, []))
+            for canonical, discogs_id in matches.items()
+        }
+
+    def _reconcile_discogs_aliases(self, names: list[str]) -> dict[str, tuple[int, list[str]]]:
+        """Batch Discogs alias lookup via ``artist_alias`` and ``artist_name_variation``.
+
+        Queries the discogs-cache PostgreSQL using ``ANY()`` for efficient
+        bulk matching against alias names and name variations, then fetches
+        per-artist styles from ``release_style``.
+
+        Args:
+            names: List of canonical artist names to look up.
+
+        Returns:
+            Dict mapping canonical_name to ``(discogs_artist_id, [styles])``.
+            Only names with a match are included.
+        """
+        if not names:
+            return {}
+
+        conn = self._client._get_cache_conn()
+        if conn is None:
+            return {}
+
+        lower_to_canonical: dict[str, str] = {n.lower(): n for n in names}
+        lower_names = list(lower_to_canonical.keys())
+
+        # 1. Try artist_alias table
+        alias_rows = conn.execute(
+            "SELECT lower(alias_name), artist_id FROM artist_alias WHERE lower(alias_name) = ANY(%s)",
+            (lower_names,),
+        ).fetchall()
+
+        matches: dict[str, int] = {}
+        for lower_name, artist_id in alias_rows:
+            canonical = lower_to_canonical.get(lower_name)
+            if canonical is not None and artist_id is not None:
+                matches[canonical] = artist_id
+
+        # 2. Try artist_name_variation for remaining unmatched names
+        remaining = [n for n in lower_names if lower_to_canonical.get(n) not in matches]
+        if remaining:
+            variation_rows = conn.execute(
+                "SELECT lower(name), artist_id "
+                "FROM artist_name_variation WHERE lower(name) = ANY(%s)",
+                (remaining,),
+            ).fetchall()
+
+            for lower_name, artist_id in variation_rows:
+                canonical = lower_to_canonical.get(lower_name)
+                if canonical is not None and artist_id is not None:
+                    matches[canonical] = artist_id
+
+        if not matches:
+            return {}
+
+        # 3. Fetch styles by artist_id for matched artists
+        matched_ids = list(set(matches.values()))
+        style_rows = conn.execute(
+            "SELECT DISTINCT ra.artist_id, rs.style "
+            "FROM release_style rs "
+            "JOIN release_artist ra ON rs.release_id = ra.release_id "
+            "WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
+            (matched_ids,),
+        ).fetchall()
+
+        id_styles: dict[int, list[str]] = {}
+        for artist_id, style in style_rows:
+            id_styles.setdefault(artist_id, []).append(style)
+
+        # 4. Build result
+        return {
+            canonical: (discogs_id, id_styles.get(discogs_id, []))
             for canonical, discogs_id in matches.items()
         }
