@@ -8,8 +8,10 @@ The semantic-index pipeline processes 22 years of WXYC flowsheet data (~2.6M ent
 |-----------|--------|-------|---------|-------------|
 | SQL parsing | 40 min | 2 sec | 1,200x | Rust PyO3 parser |
 | Artist resolution | 38 min | 2 min | 19x | Batch C scoring + result cache |
-| Discogs reconciliation | ~24 hrs | 32 min | 45x | Bulk SQL queries + materialized tables |
-| **Total pipeline** | **~25 hrs** | **~37 min** | **~40x** | |
+| Discogs reconciliation | ~24 hrs | 49 sec | 1,760x | Bulk SQL queries + materialized summary tables + indexes |
+| Cached reruns (parse+resolve) | 4 min | 7 sec | 34x | Pickle cache keyed by dump file size+mtime |
+| **Total pipeline (first run)** | **~25 hrs** | **~15 min** | **~100x** | |
+| **Total pipeline (cached rerun)** | **~25 hrs** | **~12 min** | **~125x** | |
 
 ## 1. Rust SQL Parser
 
@@ -67,3 +69,70 @@ The semantic-index pipeline processes 22 years of WXYC flowsheet data (~2.6M ent
 **Why it's fast**: Pickle deserialization of pre-resolved Python objects is orders of magnitude faster than re-parsing SQL text + re-running fuzzy matching. The cache key (file size + mtime) ensures stale caches are automatically invalidated when the dump file changes.
 
 **Files**: `run_pipeline.py`
+
+## 5. Materialized Summary Tables
+
+**Bottleneck**: Even with bulk `ANY()` queries, the Discogs reconciliation spent most of its time on joins. Each batch of 1000 names triggered a join between `release_artist` (78M rows) and `release_style` (28M rows) to fetch styles. At 5.8 seconds per batch × 144 batches = 14 minutes just for style queries.
+
+**Optimization**: Precomputed the expensive joins into flat lookup tables in PostgreSQL:
+
+```sql
+CREATE TABLE artist_style_summary AS
+SELECT DISTINCT lower(ra.artist_name) AS artist_name, rs.style
+FROM release_artist ra JOIN release_style rs ON ra.release_id = rs.release_id
+WHERE ra.extra = 0;
+-- 6.8M rows, ~10 minutes to build once
+
+CREATE TABLE artist_discogs_id AS
+SELECT DISTINCT lower(artist_name) AS artist_name, artist_id AS discogs_artist_id
+FROM release_artist WHERE extra = 0;
+-- 2.8M rows
+```
+
+The reconciler queries these flat tables with `WHERE artist_name = ANY(...)` — no join at all. Style lookups: 5.8s → 0.01s per batch (580x). Total reconciliation: 32 minutes → 49 seconds.
+
+**Why it's fast**: The summary tables are precomputed once (during initial Discogs cache setup) and eliminate all runtime joins. The indexed `ANY()` lookups on a 6.8M-row flat table are orders of magnitude faster than joining 78M × 28M rows.
+
+**Files**: PostgreSQL materialized tables (created via `psql`), `semantic_index/reconciliation.py` (falls back to join if summary tables don't exist)
+
+## 6. PostgreSQL Indexes
+
+**Bottleneck**: The discogs-cache PostgreSQL tables (`release_artist`, `release_track_artist`, `artist_alias`, `artist_member`) had no indexes on the columns used for lookups. Each `ANY()` query did a sequential scan of tens of millions of rows.
+
+**Optimization**: Created expression indexes matching the exact query predicates:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_ra_lower_name ON release_artist (lower(artist_name)) WHERE extra = 0;
+CREATE INDEX CONCURRENTLY idx_rta_lower_name ON release_track_artist (lower(artist_name));
+CREATE INDEX CONCURRENTLY idx_artist_alias_name ON artist_alias (lower(alias_name));
+CREATE INDEX CONCURRENTLY idx_artist_member_name ON artist_member (lower(member_name));
+CREATE INDEX CONCURRENTLY idx_artist_member_group ON artist_member (lower(group_name));
+```
+
+`CONCURRENTLY` avoids blocking running queries. Each index takes 1-5 minutes to build on tens of millions of rows but only needs to be created once.
+
+**Why it's fast**: Indexed lookups are O(log n) instead of O(n). For `release_artist` (78M rows): 3.7 seconds → 5ms per query (740x).
+
+**Files**: PostgreSQL indexes (created via `psql`)
+
+## 7. Discogs XML Converter Extensions
+
+**Bottleneck**: The Discogs cache had no `release_style`, `release_genre`, or `release_company` tables. Styles (critical for the semantic index) could only be fetched from the library-metadata-lookup API at 50 req/min — making style enrichment take hours.
+
+**Optimization**: Extended the Rust discogs-xml-converter to parse `<genres>`, `<styles>`, and `<companies>` elements from the Discogs XML dump and stream them directly into PostgreSQL via COPY. Added three new tables with ~25M, ~29M, and ~34M rows respectively.
+
+**Why it's fast**: The Rust converter processes 57GB of XML in ~100 minutes using streaming XML parsing (quick-xml) and PostgreSQL COPY for batch insertion. Once the data is in PostgreSQL, style lookups are instant via the materialized summary tables.
+
+**Files**: `discogs-xml-converter/src/model.rs`, `discogs-xml-converter/src/parser.rs`, `discogs-xml-converter/src/pg_output.rs`
+
+## 8. Wikidata Rate Limit Handling
+
+**Bottleneck**: The Wikidata SPARQL endpoint at `query.wikidata.org` returns HTTP 403 ("Too many requests") when queries arrive faster than ~1 per second. The per-artist name search made one SPARQL filter call per candidate batch, triggering rate limits and losing matches.
+
+**Optimization**: Two changes:
+
+1. **Exponential backoff**: SPARQL queries retry up to 3 times with 2s, 4s, 8s delays on 403/429 responses. After max retries, returns empty result instead of raising.
+
+2. **Batch musician filter**: Added `search_musicians_batch()` that collects all candidates from multiple name searches first, then runs a single SPARQL filter query for all candidates instead of one per name. Reduces SPARQL calls from N (one per name search result) to 1.
+
+**Files**: `semantic_index/wikidata_client.py`
