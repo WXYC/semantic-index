@@ -54,6 +54,20 @@ def _get_artist_or_404(db: sqlite3.Connection, artist_id: int) -> ArtistSummary:
     return _artist_summary(row)
 
 
+@router.get("/artists/random", response_model=ArtistSummary)
+def random_artist(
+    db: sqlite3.Connection = Depends(get_db),
+) -> ArtistSummary:
+    """Return a random artist, weighted toward higher play counts."""
+    row = db.execute(
+        "SELECT id, canonical_name, genre, total_plays FROM artist "
+        "ORDER BY RANDOM() LIMIT 1",
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No artists in database")
+    return _artist_summary(row)
+
+
 @router.get("/artists/search", response_model=SearchResponse)
 def search_artists(
     q: str = Query(min_length=1),

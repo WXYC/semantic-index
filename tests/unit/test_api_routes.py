@@ -199,6 +199,25 @@ class TestSearch:
         assert resp.status_code == 422
 
 
+class TestRandom:
+    @pytest.mark.asyncio
+    async def test_random_returns_valid_artist(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/random")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "id" in data
+        assert "canonical_name" in data
+        assert "genre" in data
+        assert "total_plays" in data
+
+    @pytest.mark.asyncio
+    async def test_random_returns_artist_from_database(self, client: AsyncClient) -> None:
+        """The returned artist must be one that exists in our fixture database."""
+        known_names = {"Autechre", "Stereolab", "Cat Power", "Father John Misty"}
+        resp = await client.get("/graph/artists/random")
+        assert resp.json()["canonical_name"] in known_names
+
+
 class TestNeighbors:
     @pytest.mark.asyncio
     async def test_dj_transition_neighbors(
