@@ -377,9 +377,17 @@ document.getElementById('neighborLimit').addEventListener('change', () => {
   }
 });
 
-// Load Autechre by default
+// Load a random WXYC artist on each page load
+const DEFAULT_ARTISTS = [
+  'Autechre', 'Prince Jammy', 'Juana Molina', 'Stereolab', 'Cat Power',
+  'Jessica Pratt', 'Chuquimamani-Condori', 'Duke Ellington', 'Sessa',
+  'Anne Gillis', 'Father John Misty', 'Rafael Toral', 'Buck Meek',
+  'Nourished by Time', 'For Tracy Hyde', 'Rochelle Jordan', 'Large Professor',
+];
+const defaultArtist = DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
+
 (async () => {
-  const data = await api('/graph/artists/search', { q: 'Autechre', limit: 1 });
+  const data = await api('/graph/artists/search', { q: defaultArtist, limit: 1 });
   if (data && data.results && data.results.length > 0) {
     const artist = data.results[0];
     searchInput.value = artist.canonical_name;
