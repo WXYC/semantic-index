@@ -24,6 +24,11 @@
     border-radius: 4px; font-family: inherit; font-size: 12px;
   }
   #controls label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  #random {
+    background: none; border: 1px solid #444; color: #888; padding: 5px 8px;
+    border-radius: 4px; font-size: 15px; cursor: pointer; line-height: 1;
+  }
+  #random:hover { color: #e0e0e0; border-color: #6a9fb5; }
   #status { font-size: 11px; color: #666; margin-left: auto; }
   .title { font-size: 14px; font-weight: 600; color: #6a9fb5; letter-spacing: 1px; }
 
@@ -44,6 +49,7 @@
 <div id="controls">
   <span class="title">WXYC</span>
   <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
+  <button id="random" title="Random artist">&#x1F3B2;</button>
   <div>
     <label>Edge type</label>
     <select id="edgeType">
@@ -401,7 +407,7 @@ window.addEventListener('popstate', async () => {
   }
 });
 
-// Initialize from URL or random artist
+// Random artist list — used for initial load and the dice button
 const DEFAULT_ARTISTS = [
   'Autechre', 'Prince Jammy', 'Juana Molina', 'Stereolab', 'Cat Power',
   'Jessica Pratt', 'Chuquimamani-Condori', 'Duke Ellington', 'Sessa',
@@ -409,6 +415,15 @@ const DEFAULT_ARTISTS = [
   'Nourished by Time', 'For Tracy Hyde', 'Rochelle Jordan', 'Large Professor',
 ];
 
+function loadRandomArtist() {
+  const name = DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
+  clearGraph();
+  searchAndLoad(name, document.getElementById('depth').value);
+}
+
+document.getElementById('random').addEventListener('click', loadRandomArtist);
+
+// Initialize from URL or random artist
 (async () => {
   const state = parseURL(window.location.search);
   document.getElementById('edgeType').value = state.edge;
