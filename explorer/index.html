@@ -81,7 +81,9 @@
 
 <svg id="graph"></svg>
 
-<script>
+<script type="module">
+import { parseURL, buildURL, DEFAULTS } from './url-state.js';
+
 const API_BASE = window.location.hostname === 'localhost' || window.location.protocol === 'file:'
   ? 'http://localhost:8000'
   : window.location.origin;
@@ -224,6 +226,14 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
 
   setStatus(`${nodes.length} artists, ${links.length} edges`);
   render();
+
+  // Update URL to reflect current state
+  const controls = {
+    edge: document.getElementById('edgeType').value,
+    depth: document.getElementById('depth').value,
+    limit: document.getElementById('neighborLimit').value,
+  };
+  history.pushState({ artistId }, '', buildURL(artistId, controls));
 }
 
 function render() {
@@ -269,6 +279,7 @@ function render() {
     .on('click', (e, d) => {
       e.stopPropagation();
       clearGraph();
+      searchInput.value = d.canonical_name;
       loadNeighborhood(d.id, d.canonical_name, parseInt(document.getElementById('depth').value));
     })
     .on('mouseover', (e, d) => {
@@ -355,43 +366,64 @@ searchInput.addEventListener('keydown', (e) => {
 });
 
 // Re-render when controls change
-document.getElementById('edgeType').addEventListener('change', () => {
+function reloadCenter() {
   const centerNode = nodes.find(n => n.isCenter);
   if (centerNode) {
     clearGraph();
     loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
   }
-});
-document.getElementById('depth').addEventListener('change', () => {
-  const centerNode = nodes.find(n => n.isCenter);
-  if (centerNode) {
-    clearGraph();
-    loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
-  }
-});
-document.getElementById('neighborLimit').addEventListener('change', () => {
-  const centerNode = nodes.find(n => n.isCenter);
-  if (centerNode) {
-    clearGraph();
-    loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
+}
+document.getElementById('edgeType').addEventListener('change', reloadCenter);
+document.getElementById('depth').addEventListener('change', reloadCenter);
+document.getElementById('neighborLimit').addEventListener('change', reloadCenter);
+
+// Back/forward navigation
+window.addEventListener('popstate', async () => {
+  const state = parseURL(window.location.search);
+  document.getElementById('edgeType').value = state.edge;
+  document.getElementById('depth').value = state.depth;
+  document.getElementById('neighborLimit').value = state.limit;
+  if (state.artist != null) {
+    const data = await api(`/graph/artists/${state.artist}`);
+    if (data) {
+      clearGraph();
+      searchInput.value = data.canonical_name;
+      loadNeighborhood(state.artist, data.canonical_name, parseInt(state.depth));
+    }
   }
 });
 
-// Load a random WXYC artist on each page load
+// Initialize from URL or random artist
 const DEFAULT_ARTISTS = [
   'Autechre', 'Prince Jammy', 'Juana Molina', 'Stereolab', 'Cat Power',
   'Jessica Pratt', 'Chuquimamani-Condori', 'Duke Ellington', 'Sessa',
   'Anne Gillis', 'Father John Misty', 'Rafael Toral', 'Buck Meek',
   'Nourished by Time', 'For Tracy Hyde', 'Rochelle Jordan', 'Large Professor',
 ];
-const defaultArtist = DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
 
 (async () => {
-  const data = await api('/graph/artists/search', { q: defaultArtist, limit: 1 });
+  const state = parseURL(window.location.search);
+  document.getElementById('edgeType').value = state.edge;
+  document.getElementById('depth').value = state.depth;
+  document.getElementById('neighborLimit').value = state.limit;
+
+  if (state.artist != null) {
+    // Load artist from URL
+    const data = await api(`/graph/artists/${state.artist}`);
+    if (data) {
+      searchInput.value = data.canonical_name;
+      loadNeighborhood(data.id, data.canonical_name, parseInt(state.depth));
+      return;
+    }
+  }
+
+  // No artist in URL — pick a random one
+  const randomName = DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
+  const data = await api('/graph/artists/search', { q: randomName, limit: 1 });
   if (data && data.results && data.results.length > 0) {
     const artist = data.results[0];
     searchInput.value = artist.canonical_name;
-    loadNeighborhood(artist.id, artist.canonical_name, 2);
+    loadNeighborhood(artist.id, artist.canonical_name, parseInt(state.depth));
   } else {
     setStatus('API not available — start the server with: DB_PATH=output/wxyc_artist_graph.db python -m semantic_index.api');
   }
