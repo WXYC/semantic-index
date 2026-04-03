@@ -407,18 +407,14 @@ window.addEventListener('popstate', async () => {
   }
 });
 
-// Random artist list — used for initial load and the dice button
-const DEFAULT_ARTISTS = [
-  'Autechre', 'Prince Jammy', 'Juana Molina', 'Stereolab', 'Cat Power',
-  'Jessica Pratt', 'Chuquimamani-Condori', 'Duke Ellington', 'Sessa',
-  'Anne Gillis', 'Father John Misty', 'Rafael Toral', 'Buck Meek',
-  'Nourished by Time', 'For Tracy Hyde', 'Rochelle Jordan', 'Large Professor',
-];
-
-function loadRandomArtist() {
-  const name = DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
-  clearGraph();
-  searchAndLoad(name, document.getElementById('depth').value);
+// Load a random artist from the full database
+async function loadRandomArtist() {
+  const data = await api('/graph/artists/random');
+  if (data) {
+    clearGraph();
+    searchInput.value = data.canonical_name;
+    loadNeighborhood(data.id, data.canonical_name, parseInt(document.getElementById('depth').value));
+  }
 }
 
 document.getElementById('random').addEventListener('click', loadRandomArtist);
@@ -430,8 +426,12 @@ document.getElementById('random').addEventListener('click', loadRandomArtist);
   document.getElementById('depth').value = state.depth;
   document.getElementById('neighborLimit').value = state.limit;
 
-  const name = state.artist || DEFAULT_ARTISTS[Math.floor(Math.random() * DEFAULT_ARTISTS.length)];
-  if (!await searchAndLoad(name, state.depth)) {
+  if (state.artist) {
+    if (await searchAndLoad(state.artist, state.depth)) return;
+  }
+  // No artist in URL or search failed — load a random one
+  await loadRandomArtist();
+  if (nodes.length === 0) {
     setStatus('API not available — start the server with: DB_PATH=output/wxyc_artist_graph.db python -m semantic_index.api');
   }
 })();
