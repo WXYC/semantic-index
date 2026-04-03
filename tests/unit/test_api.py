@@ -100,6 +100,12 @@ class TestRootRoute:
         assert "text/html" in response.headers["content-type"]
         assert "WXYC" in response.text
 
+    def test_url_state_js_served(self, client: TestClient):
+        response = client.get("/url-state.js")
+        assert response.status_code == 200
+        assert "javascript" in response.headers["content-type"]
+        assert "parseURL" in response.text
+
 
 class TestApiSchemas:
     def test_artist_summary_fields(self):

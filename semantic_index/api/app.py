@@ -8,11 +8,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from semantic_index.api.routes import router
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-EXPLORER_HTML = PROJECT_ROOT / "explorer" / "index.html"
+EXPLORER_DIR = PROJECT_ROOT / "explorer"
+EXPLORER_HTML = EXPLORER_DIR / "index.html"
 
 
 def create_app(db_path: str) -> FastAPI:
@@ -49,5 +51,7 @@ def create_app(db_path: str) -> FastAPI:
     def root() -> FileResponse:
         """Serve the D3.js graph explorer."""
         return FileResponse(EXPLORER_HTML, media_type="text/html")
+
+    app.mount("/", StaticFiles(directory=str(EXPLORER_DIR)), name="explorer")
 
     return app
