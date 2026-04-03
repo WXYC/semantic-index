@@ -8,10 +8,11 @@ The semantic-index pipeline processes 22 years of WXYC flowsheet data (~2.6M ent
 |-----------|--------|-------|---------|-------------|
 | SQL parsing | 40 min | 2 sec | 1,200x | Rust PyO3 parser |
 | Artist resolution | 38 min | 2 min | 19x | Batch C scoring + result cache |
-| Discogs reconciliation | ~24 hrs | 49 sec | 1,760x | Bulk SQL queries + materialized summary tables + indexes |
+| Discogs reconciliation | ~24 hrs | 39 sec | 2,215x | Bulk SQL queries + materialized summary tables + indexes |
+| Discogs enrichment | 25 min | ~3 min | 8x | Summary table enrichment (no release_id joins) |
 | Cached reruns (parse+resolve) | 4 min | 7 sec | 34x | Pickle cache keyed by dump file size+mtime |
-| **Total pipeline (first run)** | **~25 hrs** | **~15 min** | **~100x** | |
-| **Total pipeline (cached rerun)** | **~25 hrs** | **~12 min** | **~125x** | |
+| **Total pipeline (first run)** | **~25 hrs** | **~14 min** | **~107x** | |
+| **Total pipeline (cached rerun)** | **~25 hrs** | **~12 min** | **~130x** | |
 
 ## 1. Rust SQL Parser
 
