@@ -19,9 +19,14 @@ describe("parseURL", () => {
     assert.equal(state.limit, "10");
   });
 
-  it("parses artist ID as integer", () => {
-    const state = parseURL("?artist=42");
-    assert.equal(state.artist, 42);
+  it("parses artist name", () => {
+    const state = parseURL("?artist=Autechre");
+    assert.equal(state.artist, "Autechre");
+  });
+
+  it("decodes URL-encoded artist name", () => {
+    const state = parseURL("?artist=Father%20John%20Misty");
+    assert.equal(state.artist, "Father John Misty");
   });
 
   it("returns null artist when param is absent", () => {
@@ -30,53 +35,56 @@ describe("parseURL", () => {
   });
 
   it("parses all params together", () => {
-    const state = parseURL("?artist=7&edge=sharedStyle&depth=1&limit=50");
-    assert.equal(state.artist, 7);
+    const state = parseURL("?artist=Stereolab&edge=sharedStyle&depth=1&limit=50");
+    assert.equal(state.artist, "Stereolab");
     assert.equal(state.edge, "sharedStyle");
     assert.equal(state.depth, "1");
     assert.equal(state.limit, "50");
   });
 
   it("falls back to defaults for missing non-artist params", () => {
-    const state = parseURL("?artist=7");
+    const state = parseURL("?artist=Autechre");
     assert.equal(state.edge, "djTransition");
     assert.equal(state.depth, "2");
     assert.equal(state.limit, "10");
   });
 
   it("ignores unknown params", () => {
-    const state = parseURL("?artist=7&foo=bar");
-    assert.equal(state.artist, 7);
-    assert.equal(state.edge, "djTransition");
-    // no foo property
+    const state = parseURL("?artist=Autechre&foo=bar");
+    assert.equal(state.artist, "Autechre");
     assert.equal(Object.hasOwn(state, "foo"), false);
   });
 });
 
 describe("buildURL", () => {
   it("returns just artist param when all controls are defaults", () => {
-    const url = buildURL(42, { edge: "djTransition", depth: "2", limit: "10" });
-    assert.equal(url, "?artist=42");
+    const url = buildURL("Autechre", { edge: "djTransition", depth: "2", limit: "10" });
+    assert.equal(url, "?artist=Autechre");
+  });
+
+  it("URL-encodes artist names with spaces", () => {
+    const url = buildURL("Father John Misty", { edge: "djTransition", depth: "2", limit: "10" });
+    assert.equal(url, "?artist=Father+John+Misty");
   });
 
   it("includes non-default edge type", () => {
-    const url = buildURL(42, { edge: "sharedStyle", depth: "2", limit: "10" });
-    assert.equal(url, "?artist=42&edge=sharedStyle");
+    const url = buildURL("Autechre", { edge: "sharedStyle", depth: "2", limit: "10" });
+    assert.equal(url, "?artist=Autechre&edge=sharedStyle");
   });
 
   it("includes non-default depth", () => {
-    const url = buildURL(42, { edge: "djTransition", depth: "1", limit: "10" });
-    assert.equal(url, "?artist=42&depth=1");
+    const url = buildURL("Autechre", { edge: "djTransition", depth: "1", limit: "10" });
+    assert.equal(url, "?artist=Autechre&depth=1");
   });
 
   it("includes non-default limit", () => {
-    const url = buildURL(42, { edge: "djTransition", depth: "2", limit: "50" });
-    assert.equal(url, "?artist=42&limit=50");
+    const url = buildURL("Autechre", { edge: "djTransition", depth: "2", limit: "50" });
+    assert.equal(url, "?artist=Autechre&limit=50");
   });
 
   it("includes all non-default params", () => {
-    const url = buildURL(7, { edge: "labelFamily", depth: "1", limit: "5" });
-    assert.equal(url, "?artist=7&edge=labelFamily&depth=1&limit=5");
+    const url = buildURL("Stereolab", { edge: "labelFamily", depth: "1", limit: "5" });
+    assert.equal(url, "?artist=Stereolab&edge=labelFamily&depth=1&limit=5");
   });
 
   it("returns pathname when no artist and all defaults", () => {
@@ -91,18 +99,18 @@ describe("buildURL", () => {
 
   it("round-trips with parseURL", () => {
     const controls = { edge: "compilation", depth: "1", limit: "20" };
-    const url = buildURL(99, controls);
+    const url = buildURL("Cat Power", controls);
     const parsed = parseURL(url);
-    assert.equal(parsed.artist, 99);
+    assert.equal(parsed.artist, "Cat Power");
     assert.equal(parsed.edge, "compilation");
     assert.equal(parsed.depth, "1");
     assert.equal(parsed.limit, "20");
   });
 
   it("round-trips defaults through parseURL", () => {
-    const url = buildURL(42, { edge: "djTransition", depth: "2", limit: "10" });
+    const url = buildURL("Autechre", { edge: "djTransition", depth: "2", limit: "10" });
     const parsed = parseURL(url);
-    assert.equal(parsed.artist, 42);
+    assert.equal(parsed.artist, "Autechre");
     assert.equal(parsed.edge, "djTransition");
     assert.equal(parsed.depth, "2");
     assert.equal(parsed.limit, "10");
