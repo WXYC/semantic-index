@@ -58,13 +58,15 @@ def _get_artist_or_404(db: sqlite3.Connection, artist_id: int) -> ArtistSummary:
 def random_artist(
     db: sqlite3.Connection = Depends(get_db),
 ) -> ArtistSummary:
-    """Return a random artist, weighted toward higher play counts."""
+    """Return a random artist that has at least one DJ transition edge."""
     row = db.execute(
-        "SELECT id, canonical_name, genre, total_plays FROM artist "
+        "SELECT a.id, a.canonical_name, a.genre, a.total_plays FROM artist a "
+        "WHERE a.id IN (SELECT source_id FROM dj_transition "
+        "              UNION SELECT target_id FROM dj_transition) "
         "ORDER BY RANDOM() LIMIT 1",
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="No artists in database")
+        raise HTTPException(status_code=404, detail="No connected artists in database")
     return _artist_summary(row)
 
 

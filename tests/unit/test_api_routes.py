@@ -211,11 +211,15 @@ class TestRandom:
         assert "total_plays" in data
 
     @pytest.mark.asyncio
-    async def test_random_returns_artist_from_database(self, client: AsyncClient) -> None:
-        """The returned artist must be one that exists in our fixture database."""
-        known_names = {"Autechre", "Stereolab", "Cat Power", "Father John Misty"}
-        resp = await client.get("/graph/artists/random")
-        assert resp.json()["canonical_name"] in known_names
+    async def test_random_only_returns_connected_artists(self, client: AsyncClient) -> None:
+        """The random endpoint should only return artists that have DJ transition edges.
+
+        Father John Misty has no DJ transition edges in the fixture, so should never appear.
+        """
+        connected = {"Autechre", "Stereolab", "Cat Power"}
+        for _ in range(20):
+            resp = await client.get("/graph/artists/random")
+            assert resp.json()["canonical_name"] in connected
 
 
 class TestNeighbors:
