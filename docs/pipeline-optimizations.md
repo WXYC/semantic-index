@@ -92,9 +92,22 @@ FROM release_artist WHERE extra = 0;
 
 The reconciler queries these flat tables with `WHERE artist_name = ANY(...)` — no join at all. Style lookups: 5.8s → 0.01s per batch (580x). Total reconciliation: 32 minutes → 49 seconds.
 
-**Why it's fast**: The summary tables are precomputed once (during initial Discogs cache setup) and eliminate all runtime joins. The indexed `ANY()` lookups on a 6.8M-row flat table are orders of magnitude faster than joining 78M × 28M rows.
+**Why it's fast**: The summary tables are precomputed once (during initial Discogs cache setup) and eliminate all runtime joins. The indexed `ANY()` lookups on a 6.8M-row flat table are orders of magnitude faster than joining 78M × 28M rows. The enrichment module (`discogs_client.py`) auto-detects summary tables and uses them when available, falling back to release-level joins otherwise.
 
-**Files**: PostgreSQL materialized tables (created via `psql`), `semantic_index/reconciliation.py` (falls back to join if summary tables don't exist)
+**Build cost**: The summary tables are a one-time cost after each Discogs cache refresh (monthly). Building all 5 tables + indexes takes ~13 minutes:
+
+| Table | Rows | Build time | Index time |
+|-------|------|-----------|-----------|
+| `artist_style_summary` | 6.8M | ~55 sec | ~15 sec |
+| `artist_label_summary` | 7.9M | ~60 sec | ~15 sec |
+| `artist_personnel_summary` | 21M | ~8 min | ~45 sec |
+| `artist_discogs_id` | 2.8M | ~15 sec | ~10 sec |
+| `artist_release_count` | 2.8M | ~15 sec | ~10 sec |
+| **Total** | | **~11 min** | **~2 min** |
+
+The 13-minute build cost pays for itself on the first pipeline run (~22 minutes saved per run on enrichment alone).
+
+**Files**: PostgreSQL materialized tables (created via `psql`), `semantic_index/discogs_client.py` (auto-detects and uses summary tables), `semantic_index/reconciliation.py` (falls back to join if summary tables don't exist)
 
 ## 6. PostgreSQL Indexes
 
