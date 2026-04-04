@@ -449,7 +449,7 @@ def _insert_edges(
             transition_rows.append((source_id, target_id, edge.raw_count, edge.pmi))
 
     conn.executemany(
-        "INSERT INTO dj_transition (source_id, target_id, raw_count, pmi) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO dj_transition (source_id, target_id, raw_count, pmi) VALUES (?, ?, ?, ?)",
         transition_rows,
     )
 
@@ -462,7 +462,7 @@ def _insert_edges(
             xref_rows.append((a_id, b_id, xref.comment, xref.source))
 
     conn.executemany(
-        "INSERT INTO cross_reference (artist_a_id, artist_b_id, comment, source) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO cross_reference (artist_a_id, artist_b_id, comment, source) VALUES (?, ?, ?, ?)",
         xref_rows,
     )
 

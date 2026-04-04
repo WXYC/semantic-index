@@ -144,6 +144,77 @@ class TestExtractSharedPersonnel:
 
         assert len(edges) == 0
 
+    def test_max_artists_excludes_ubiquitous_personnel(self):
+        """Personnel credited on more than max_artists should be skipped."""
+        # "Bob Ludwig" appears on all 4 artists — should be excluded with max_artists=3
+        # "Rob Brown" appears on only 2 — should still generate an edge
+        enrichments = {
+            "Autechre": make_artist_enrichment(
+                canonical_name="Autechre",
+                personnel=[
+                    make_personnel_credit(name="Bob Ludwig"),
+                    make_personnel_credit(name="Rob Brown"),
+                ],
+            ),
+            "Cat Power": make_artist_enrichment(
+                canonical_name="Cat Power",
+                personnel=[make_personnel_credit(name="Bob Ludwig")],
+            ),
+            "Father John Misty": make_artist_enrichment(
+                canonical_name="Father John Misty",
+                personnel=[make_personnel_credit(name="Bob Ludwig")],
+            ),
+            "Stereolab": make_artist_enrichment(
+                canonical_name="Stereolab",
+                personnel=[
+                    make_personnel_credit(name="Bob Ludwig"),
+                    make_personnel_credit(name="Rob Brown"),
+                ],
+            ),
+        }
+
+        edges = extract_shared_personnel(enrichments, max_artists=3)
+
+        # Only the Rob Brown edge (Autechre-Stereolab) should survive
+        assert len(edges) == 1
+        assert edges[0].artist_a == "Autechre"
+        assert edges[0].artist_b == "Stereolab"
+        assert edges[0].shared_names == ["Rob Brown"]
+
+    def test_max_artists_none_disables_cap(self):
+        """max_artists=None (default) should not filter anything."""
+        enrichments = {
+            "Autechre": make_artist_enrichment(
+                canonical_name="Autechre",
+                personnel=[make_personnel_credit(name="Rob Brown")],
+            ),
+            "Stereolab": make_artist_enrichment(
+                canonical_name="Stereolab",
+                personnel=[make_personnel_credit(name="Rob Brown")],
+            ),
+        }
+
+        edges = extract_shared_personnel(enrichments, max_artists=None)
+
+        assert len(edges) == 1
+
+    def test_max_artists_at_boundary_included(self):
+        """Personnel on exactly max_artists should be included."""
+        enrichments = {
+            "Autechre": make_artist_enrichment(
+                canonical_name="Autechre",
+                personnel=[make_personnel_credit(name="Rob Brown")],
+            ),
+            "Stereolab": make_artist_enrichment(
+                canonical_name="Stereolab",
+                personnel=[make_personnel_credit(name="Rob Brown")],
+            ),
+        }
+
+        edges = extract_shared_personnel(enrichments, max_artists=2)
+
+        assert len(edges) == 1
+
 
 class TestExtractSharedStyles:
     """Tests for extract_shared_styles."""
@@ -260,6 +331,55 @@ class TestExtractSharedStyles:
         assert len(edges) == 1
         assert edges[0].artist_a == "Autechre"
         assert edges[0].artist_b == "Stereolab"
+
+    def test_max_artists_excludes_ubiquitous_style(self):
+        """Styles shared by more than max_artists should be excluded from pairing."""
+        # "Experimental" on all 4 artists — excluded with max_artists=3
+        # "IDM" on only Autechre and Stereolab — should still produce an edge
+        enrichments = {
+            "Autechre": make_artist_enrichment(
+                canonical_name="Autechre",
+                styles=["Experimental", "IDM"],
+            ),
+            "Cat Power": make_artist_enrichment(
+                canonical_name="Cat Power",
+                styles=["Experimental", "Folk"],
+            ),
+            "Father John Misty": make_artist_enrichment(
+                canonical_name="Father John Misty",
+                styles=["Experimental", "Indie Rock"],
+            ),
+            "Stereolab": make_artist_enrichment(
+                canonical_name="Stereolab",
+                styles=["Experimental", "IDM"],
+            ),
+        }
+
+        edges = extract_shared_styles(enrichments, min_jaccard=0.0, max_artists=3)
+
+        # Only IDM-based edge should survive (Autechre-Stereolab)
+        pairs = {(e.artist_a, e.artist_b) for e in edges}
+        assert ("Autechre", "Stereolab") in pairs
+        # No edges from the "Experimental" tag
+        for e in edges:
+            assert "Experimental" not in e.shared_tags
+
+    def test_max_artists_at_boundary_included(self):
+        """Styles on exactly max_artists should be included."""
+        enrichments = {
+            "Autechre": make_artist_enrichment(
+                canonical_name="Autechre",
+                styles=["IDM"],
+            ),
+            "Stereolab": make_artist_enrichment(
+                canonical_name="Stereolab",
+                styles=["IDM"],
+            ),
+        }
+
+        edges = extract_shared_styles(enrichments, min_jaccard=0.0, max_artists=2)
+
+        assert len(edges) == 1
 
 
 class TestExtractLabelFamily:

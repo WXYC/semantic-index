@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 def extract_shared_personnel(
     enrichments: dict[str, ArtistEnrichment],
     min_shared: int = 1,
+    max_artists: int | None = None,
 ) -> list[SharedPersonnelEdge]:
     """Build edges between artists who share credited musicians.
 
@@ -32,6 +33,8 @@ def extract_shared_personnel(
     Args:
         enrichments: Mapping of canonical artist name to enrichment data.
         min_shared: Minimum number of shared personnel to emit an edge.
+        max_artists: Skip personnel credited on more than this many artists
+            (ubiquitous engineers/producers are noise). None disables the cap.
 
     Returns:
         Deterministically sorted list of SharedPersonnelEdge.
@@ -43,12 +46,19 @@ def extract_shared_personnel(
             personnel_to_artists[credit.name].add(artist_name)
 
     # For each pair of artists, count shared personnel
+    skipped = 0
     pair_shared: dict[tuple[str, str], set[str]] = defaultdict(set)
     for personnel_name, artists in personnel_to_artists.items():
         if len(artists) < 2:
             continue
+        if max_artists is not None and len(artists) > max_artists:
+            skipped += 1
+            continue
         for a, b in combinations(sorted(artists), 2):
             pair_shared[(a, b)].add(personnel_name)
+
+    if skipped:
+        logger.info("  Skipped %d personnel names exceeding max_artists=%d", skipped, max_artists)
 
     # Build edges, filtering by min_shared
     edges: list[SharedPersonnelEdge] = []
@@ -70,6 +80,7 @@ def extract_shared_personnel(
 def extract_shared_styles(
     enrichments: dict[str, ArtistEnrichment],
     min_jaccard: float = 0.1,
+    max_artists: int | None = None,
 ) -> list[SharedStyleEdge]:
     """Build edges between artists with overlapping Discogs style tags.
 
@@ -80,6 +91,8 @@ def extract_shared_styles(
     Args:
         enrichments: Mapping of canonical artist name to enrichment data.
         min_jaccard: Minimum Jaccard similarity to emit an edge.
+        max_artists: Skip style tags shared by more than this many artists
+            (broad tags like "Experimental" are noise). None disables the cap.
 
     Returns:
         Deterministically sorted list of SharedStyleEdge.
@@ -96,19 +109,30 @@ def extract_shared_styles(
         for style in styles:
             style_to_artists[style].add(artist_name)
 
-    # Collect candidate pairs (those sharing at least one tag)
+    # Collect candidate pairs (those sharing at least one non-excluded tag)
+    skipped = 0
     candidate_pairs: set[tuple[str, str]] = set()
-    for artists in style_to_artists.values():
+    excluded_styles: set[str] = set()
+    for style, artists in style_to_artists.items():
         if len(artists) < 2:
+            continue
+        if max_artists is not None and len(artists) > max_artists:
+            skipped += 1
+            excluded_styles.add(style)
             continue
         for a, b in combinations(sorted(artists), 2):
             candidate_pairs.add((a, b))
 
-    # Compute Jaccard for each candidate pair
+    if skipped:
+        logger.info("  Skipped %d styles exceeding max_artists=%d", skipped, max_artists)
+
+    # Compute Jaccard for each candidate pair (using only non-excluded styles)
     edges: list[SharedStyleEdge] = []
     for a, b in sorted(candidate_pairs):
-        styles_a = artist_styles[a]
-        styles_b = artist_styles[b]
+        styles_a = artist_styles[a] - excluded_styles
+        styles_b = artist_styles[b] - excluded_styles
+        if not styles_a or not styles_b:
+            continue
         intersection = styles_a & styles_b
         union = styles_a | styles_b
         jaccard = len(intersection) / len(union)

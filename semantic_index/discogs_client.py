@@ -14,11 +14,15 @@ import httpx
 import psycopg
 
 from semantic_index.models import (
+    CompilationEdge,
     DiscogsCredit,
     DiscogsLabel,
     DiscogsRelease,
     DiscogsSearchResult,
     DiscogsTrack,
+    LabelFamilyEdge,
+    SharedPersonnelEdge,
+    SharedStyleEdge,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +52,7 @@ class DiscogsClient:
             return None
         if self._cache_conn is None or self._cache_conn.closed:
             try:
-                self._cache_conn = psycopg.connect(self._cache_dsn)
+                self._cache_conn = psycopg.connect(self._cache_dsn, autocommit=True)
             except Exception:
                 logger.warning("Failed to connect to discogs-cache", exc_info=True)
                 return None
@@ -592,3 +596,305 @@ class DiscogsClient:
                     continue
                 return None
         return None
+
+    # --- SQL-based edge computation ---
+    #
+    # These methods push combinatorial pair generation to PostgreSQL via self-joins
+    # on the pre-materialized summary tables. This avoids O(n^2) Python loops and
+    # lets PostgreSQL handle the heavy lifting with hash joins.
+
+    def _create_graph_artists_temp_table(
+        self, conn: psycopg.Connection, artist_names: list[str]
+    ) -> None:
+        """Create and populate a temp table of graph artist names."""
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _graph_artists (name TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM _graph_artists")
+        if artist_names:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO _graph_artists (name) VALUES (%s) ON CONFLICT DO NOTHING",
+                    [(n,) for n in artist_names],
+                )
+
+    def compute_shared_styles_sql(
+        self,
+        artist_names: list[str],
+        min_jaccard: float = 0.1,
+        max_artists: int | None = None,
+    ) -> list[SharedStyleEdge]:
+        """Compute shared-style edges via SQL self-join on artist_style_summary.
+
+        Args:
+            artist_names: Lowercased canonical artist names to include.
+            min_jaccard: Minimum Jaccard similarity threshold.
+            max_artists: Exclude styles shared by more than this many graph artists.
+
+        Returns:
+            List of SharedStyleEdge.
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not artist_names:
+            return []
+
+        try:
+            self._create_graph_artists_temp_table(conn, artist_names)
+
+            max_clause = ""
+            if max_artists is not None:
+                max_clause = f"HAVING COUNT(DISTINCT s2.artist_name) <= {int(max_artists)}"
+
+            rows = conn.execute(
+                f"""
+                WITH filtered_styles AS (
+                    SELECT DISTINCT s.artist_name, s.style
+                    FROM artist_style_summary s
+                    JOIN _graph_artists g ON s.artist_name = g.name
+                    WHERE s.style IN (
+                        SELECT s2.style
+                        FROM artist_style_summary s2
+                        JOIN _graph_artists g2 ON s2.artist_name = g2.name
+                        GROUP BY s2.style
+                        {max_clause}
+                    )
+                ),
+                style_counts AS (
+                    SELECT artist_name, COUNT(DISTINCT style) AS cnt
+                    FROM filtered_styles
+                    GROUP BY artist_name
+                ),
+                shared AS (
+                    SELECT a.artist_name AS artist_a, b.artist_name AS artist_b,
+                           COUNT(*) AS isect,
+                           array_agg(DISTINCT a.style ORDER BY a.style) AS shared_tags
+                    FROM filtered_styles a
+                    JOIN filtered_styles b
+                        ON a.style = b.style AND a.artist_name < b.artist_name
+                    GROUP BY a.artist_name, b.artist_name
+                )
+                SELECT s.artist_a, s.artist_b,
+                       s.isect::float / (ca.cnt + cb.cnt - s.isect) AS jaccard,
+                       s.shared_tags
+                FROM shared s
+                JOIN style_counts ca ON s.artist_a = ca.artist_name
+                JOIN style_counts cb ON s.artist_b = cb.artist_name
+                WHERE s.isect::float / (ca.cnt + cb.cnt - s.isect) >= %s
+                ORDER BY s.artist_a, s.artist_b
+                """,  # noqa: S608
+                (min_jaccard,),
+            ).fetchall()
+
+            edges = [
+                SharedStyleEdge(
+                    artist_a=row[0],
+                    artist_b=row[1],
+                    jaccard=row[2],
+                    shared_tags=row[3],
+                )
+                for row in rows
+            ]
+            logger.info("SQL: %d shared-style edges", len(edges))
+            return edges
+        except Exception:
+            logger.warning("SQL shared styles computation failed", exc_info=True)
+            conn.rollback()
+            return []
+
+    def compute_shared_personnel_sql(
+        self,
+        artist_names: list[str],
+        min_shared: int = 1,
+        max_artists: int | None = None,
+    ) -> list[SharedPersonnelEdge]:
+        """Compute shared-personnel edges via SQL self-join on artist_personnel_summary.
+
+        Args:
+            artist_names: Lowercased canonical artist names to include.
+            min_shared: Minimum number of shared personnel to emit an edge.
+            max_artists: Exclude personnel credited on more than this many graph artists.
+
+        Returns:
+            List of SharedPersonnelEdge.
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not artist_names:
+            return []
+
+        try:
+            self._create_graph_artists_temp_table(conn, artist_names)
+
+            max_having = "HAVING COUNT(DISTINCT p2.artist_name) >= 2"
+            if max_artists is not None:
+                max_having += f" AND COUNT(DISTINCT p2.artist_name) <= {int(max_artists)}"
+
+            rows = conn.execute(
+                f"""
+                WITH filtered_personnel AS (
+                    SELECT DISTINCT p.artist_name, p.personnel_name
+                    FROM artist_personnel_summary p
+                    JOIN _graph_artists g ON p.artist_name = g.name
+                    WHERE p.personnel_name IN (
+                        SELECT p2.personnel_name
+                        FROM artist_personnel_summary p2
+                        JOIN _graph_artists g2 ON p2.artist_name = g2.name
+                        GROUP BY p2.personnel_name
+                        {max_having}
+                    )
+                ),
+                shared AS (
+                    SELECT a.artist_name AS artist_a, b.artist_name AS artist_b,
+                           COUNT(*) AS shared_count,
+                           array_agg(DISTINCT a.personnel_name ORDER BY a.personnel_name) AS shared_names
+                    FROM filtered_personnel a
+                    JOIN filtered_personnel b
+                        ON a.personnel_name = b.personnel_name AND a.artist_name < b.artist_name
+                    GROUP BY a.artist_name, b.artist_name
+                )
+                SELECT artist_a, artist_b, shared_count, shared_names
+                FROM shared
+                WHERE shared_count >= %s
+                ORDER BY artist_a, artist_b
+                """,  # noqa: S608
+                (min_shared,),
+            ).fetchall()
+
+            edges = [
+                SharedPersonnelEdge(
+                    artist_a=row[0],
+                    artist_b=row[1],
+                    shared_count=row[2],
+                    shared_names=row[3],
+                )
+                for row in rows
+            ]
+            logger.info("SQL: %d shared-personnel edges", len(edges))
+            return edges
+        except Exception:
+            logger.warning("SQL shared personnel computation failed", exc_info=True)
+            conn.rollback()
+            return []
+
+    def compute_label_family_sql(
+        self,
+        artist_names: list[str],
+        max_label_artists: int = 500,
+    ) -> list[LabelFamilyEdge]:
+        """Compute label-family edges via SQL self-join on artist_label_summary.
+
+        Args:
+            artist_names: Lowercased canonical artist names to include.
+            max_label_artists: Exclude labels with more than this many graph artists.
+
+        Returns:
+            List of LabelFamilyEdge.
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not artist_names:
+            return []
+
+        try:
+            self._create_graph_artists_temp_table(conn, artist_names)
+
+            rows = conn.execute(
+                """
+                WITH filtered_labels AS (
+                    SELECT DISTINCT l.artist_name, l.label_name
+                    FROM artist_label_summary l
+                    JOIN _graph_artists g ON l.artist_name = g.name
+                    WHERE l.label_name IN (
+                        SELECT l2.label_name
+                        FROM artist_label_summary l2
+                        JOIN _graph_artists g2 ON l2.artist_name = g2.name
+                        GROUP BY l2.label_name
+                        HAVING COUNT(DISTINCT l2.artist_name) BETWEEN 2 AND %s
+                    )
+                ),
+                shared AS (
+                    SELECT a.artist_name AS artist_a, b.artist_name AS artist_b,
+                           array_agg(DISTINCT a.label_name ORDER BY a.label_name) AS shared_labels
+                    FROM filtered_labels a
+                    JOIN filtered_labels b
+                        ON a.label_name = b.label_name AND a.artist_name < b.artist_name
+                    GROUP BY a.artist_name, b.artist_name
+                )
+                SELECT artist_a, artist_b, shared_labels
+                FROM shared
+                ORDER BY artist_a, artist_b
+                """,
+                (max_label_artists,),
+            ).fetchall()
+
+            edges = [
+                LabelFamilyEdge(
+                    artist_a=row[0],
+                    artist_b=row[1],
+                    shared_labels=row[2],
+                )
+                for row in rows
+            ]
+            logger.info("SQL: %d label-family edges", len(edges))
+            return edges
+        except Exception:
+            logger.warning("SQL label family computation failed", exc_info=True)
+            conn.rollback()
+            return []
+
+    def compute_compilation_sql(
+        self,
+        artist_names: list[str],
+    ) -> list[CompilationEdge]:
+        """Compute compilation co-appearance edges via SQL self-join on artist_compilation_summary.
+
+        Args:
+            artist_names: Lowercased canonical artist names to include.
+
+        Returns:
+            List of CompilationEdge.
+        """
+        conn = self._get_cache_conn()
+        if conn is None or not artist_names:
+            return []
+
+        try:
+            self._create_graph_artists_temp_table(conn, artist_names)
+
+            rows = conn.execute(
+                """
+                WITH comp_appearances AS (
+                    SELECT DISTINCT c.artist_name, c.release_id
+                    FROM artist_compilation_summary c
+                    JOIN _graph_artists g ON c.artist_name = g.name
+                    UNION
+                    SELECT DISTINCT c.track_artist, c.release_id
+                    FROM artist_compilation_summary c
+                    JOIN _graph_artists g ON c.track_artist = g.name
+                    WHERE c.track_artist IS NOT NULL
+                ),
+                shared AS (
+                    SELECT a.artist_name AS artist_a, b.artist_name AS artist_b,
+                           COUNT(DISTINCT a.release_id) AS compilation_count
+                    FROM comp_appearances a
+                    JOIN comp_appearances b
+                        ON a.release_id = b.release_id AND a.artist_name < b.artist_name
+                    GROUP BY a.artist_name, b.artist_name
+                )
+                SELECT artist_a, artist_b, compilation_count
+                FROM shared
+                ORDER BY artist_a, artist_b
+                """
+            ).fetchall()
+
+            edges = [
+                CompilationEdge(
+                    artist_a=row[0],
+                    artist_b=row[1],
+                    compilation_count=row[2],
+                    compilation_titles=[],  # Titles not available from summary table
+                )
+                for row in rows
+            ]
+            logger.info("SQL: %d compilation edges", len(edges))
+            return edges
+        except Exception:
+            logger.warning("SQL compilation computation failed", exc_info=True)
+            conn.rollback()
+            return []
