@@ -95,6 +95,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Exclude labels with more than N artists from label family edges",
     )
     parser.add_argument(
+        "--max-style-artists",
+        type=int,
+        default=200,
+        help="Exclude styles shared by more than N artists (default: 200)",
+    )
+    parser.add_argument(
+        "--max-personnel-artists",
+        type=int,
+        default=200,
+        help="Exclude personnel credited on more than N artists (default: 200)",
+    )
+    parser.add_argument(
         "--cache-dir",
         default=None,
         help="Cache resolved entries to skip SQL parsing on reruns. "
@@ -413,15 +425,49 @@ def run(args: argparse.Namespace) -> None:
 
         # Extract Discogs-derived edges (only when explicitly requested)
         if args.compute_discogs_edges:
-            log.info("Extracting Discogs-derived edges...")
-            sp_edges = extract_shared_personnel(enrichments)
-            log.info("  %d shared personnel edges", len(sp_edges))
-            ss_edges = extract_shared_styles(enrichments, min_jaccard=args.min_jaccard)
-            log.info("  %d shared style edges", len(ss_edges))
-            lf_edges = extract_label_family(enrichments, max_label_artists=args.max_label_artists)
-            log.info("  %d label family edges", len(lf_edges))
-            comp_edges = extract_compilation_coappearance(enrichments)
-            log.info("  %d compilation edges", len(comp_edges))
+            if args.discogs_cache_dsn and discogs_client._has_summary_tables(
+                discogs_client._get_cache_conn()
+            ):
+                # Fast SQL path: push self-joins to PostgreSQL
+                log.info("Extracting Discogs-derived edges via SQL...")
+                artist_names_lower = list(enrichments.keys())
+                sp_edges = discogs_client.compute_shared_personnel_sql(
+                    artist_names_lower,
+                    max_artists=args.max_personnel_artists,
+                )
+                log.info("  %d shared personnel edges", len(sp_edges))
+                ss_edges = discogs_client.compute_shared_styles_sql(
+                    artist_names_lower,
+                    min_jaccard=args.min_jaccard,
+                    max_artists=args.max_style_artists,
+                )
+                log.info("  %d shared style edges", len(ss_edges))
+                lf_edges = discogs_client.compute_label_family_sql(
+                    artist_names_lower,
+                    max_label_artists=args.max_label_artists,
+                )
+                log.info("  %d label family edges", len(lf_edges))
+                comp_edges = discogs_client.compute_compilation_sql(artist_names_lower)
+                log.info("  %d compilation edges", len(comp_edges))
+            else:
+                # Python fallback with frequency caps
+                log.info("Extracting Discogs-derived edges (Python)...")
+                sp_edges = extract_shared_personnel(
+                    enrichments, max_artists=args.max_personnel_artists
+                )
+                log.info("  %d shared personnel edges", len(sp_edges))
+                ss_edges = extract_shared_styles(
+                    enrichments,
+                    min_jaccard=args.min_jaccard,
+                    max_artists=args.max_style_artists,
+                )
+                log.info("  %d shared style edges", len(ss_edges))
+                lf_edges = extract_label_family(
+                    enrichments, max_label_artists=args.max_label_artists
+                )
+                log.info("  %d label family edges", len(lf_edges))
+                comp_edges = extract_compilation_coappearance(enrichments)
+                log.info("  %d compilation edges", len(comp_edges))
     elif not args.skip_enrichment:
         log.warning("Skipping Discogs enrichment: no cache DSN or API URL available")
 
