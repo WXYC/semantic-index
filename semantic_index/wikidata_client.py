@@ -146,7 +146,10 @@ class WikidataClient:
                     backoff = 2 ** (attempt + 1)
                     logger.warning(
                         "Wikidata rate limited (HTTP %d), backing off %ds (attempt %d/%d)",
-                        resp.status_code, backoff, attempt + 1, max_retries,
+                        resp.status_code,
+                        backoff,
+                        attempt + 1,
+                        max_retries,
                     )
                     time.sleep(backoff)
                     continue
@@ -460,9 +463,7 @@ class WikidataClient:
 
         return [c for c in candidates if c.qid in musician_qids]
 
-    def search_musicians_batch(
-        self, names: list[str], limit: int = 5
-    ) -> dict[str, WikidataEntity]:
+    def search_musicians_batch(self, names: list[str], limit: int = 5) -> dict[str, WikidataEntity]:
         """Search for multiple artist names, batching the musician filter.
 
         Collects all candidates from individual name searches first, then

@@ -71,9 +71,7 @@ class TestComputeSharedStylesSql:
         assert edges == []
 
     def test_unknown_artists_return_empty(self, client):
-        edges = client.compute_shared_styles_sql(
-            ["zzz_nonexistent_artist_12345"], min_jaccard=0.1
-        )
+        edges = client.compute_shared_styles_sql(["zzz_nonexistent_artist_12345"], min_jaccard=0.1)
 
         assert edges == []
 
