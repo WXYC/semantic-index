@@ -3,8 +3,6 @@
 import sqlite3
 import tempfile
 
-import pytest
-
 from semantic_index.models import ArtistStats, PmiEdge
 from semantic_index.sqlite_export import export_sqlite
 from tests.conftest import make_adjacency_pair, make_resolved_entry
