@@ -216,7 +216,10 @@ def get_narrative(
     # Build the structured data for the prompt
     relationships = []
     for edge_type in EdgeType:
-        rels = _query_explain(db, source_id, target_id, edge_type)
+        try:
+            rels = _query_explain(db, source_id, target_id, edge_type)
+        except sqlite3.OperationalError:
+            continue  # table doesn't exist in this database
         for rel in rels:
             relationships.append({"type": rel.type, **rel.detail})
 
