@@ -157,7 +157,7 @@ def _compute_faceted_pair_count(
             f"WHERE p1.artist_id = :a AND p2.artist_id = :b AND {where} "  # noqa: S608
         )
         reverse = db.execute(sql2, params2).fetchone()[0]
-        return forward + reverse
+        return int(forward + reverse)
     except sqlite3.OperationalError:
         return None
 
