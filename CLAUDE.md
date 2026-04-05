@@ -40,8 +40,9 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary). |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse). |
 | `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets. |
+| `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -244,6 +245,7 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 | `GET` | `/graph/entities/{id}/artists` | All artists sharing an entity (alias group). Returns entity metadata and a list of artist summaries. |
 | `GET` | `/graph/facets` | Available facet values (months with data, DJ list) for filtering. Gracefully returns empty lists on databases without facet tables. |
+| `GET` | `/graph/artists/{id}/explain/{target_id}/narrative?month=&dj_id=` | LLM-generated natural-language explanation of the relationship between two artists. Uses Claude Haiku. Cached in sidecar SQLite DB. Returns 501 when `ANTHROPIC_API_KEY` is not set. |
 
 ### Deployment
 
@@ -257,6 +259,7 @@ Configuration via environment variables:
 - `DB_PATH` — path to SQLite database (default: `data/wxyc_artist_graph.db`)
 - `HOST` — bind address (default: `0.0.0.0`)
 - `PORT` — port (default: `8000`, set automatically by Railway)
+- `ANTHROPIC_API_KEY` — Anthropic API key for narrative generation (optional; narrative endpoint returns 501 when not set)
 
 ## Data
 

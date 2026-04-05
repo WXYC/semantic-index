@@ -43,6 +43,24 @@
 
   svg { cursor: grab; }
   svg:active { cursor: grabbing; }
+
+  #narrative-panel {
+    position: fixed; top: 0; right: -400px; width: 380px; height: 100vh;
+    background: rgba(15,15,15,0.97); border-left: 1px solid #333;
+    padding: 60px 20px 20px; z-index: 15;
+    transition: right 0.25s ease-out;
+    overflow-y: auto;
+  }
+  #narrative-panel.open { right: 0; }
+  #narrative-close {
+    position: absolute; top: 12px; right: 12px;
+    background: none; border: none; color: #888; font-size: 20px; cursor: pointer;
+  }
+  #narrative-close:hover { color: #e0e0e0; }
+  .panel-header { font-size: 14px; font-weight: 600; color: #6a9fb5; margin-bottom: 16px; }
+  .panel-header .arrow { margin: 0 8px; color: #555; }
+  .panel-body .loading { color: #666; font-style: italic; display: none; }
+  .panel-body .narrative-text { font-size: 13px; line-height: 1.6; color: #ccc; }
 </style>
 </head>
 <body>
@@ -98,6 +116,19 @@
   <div class="meta"></div>
 </div>
 
+<div id="narrative-panel">
+  <button id="narrative-close">&times;</button>
+  <div class="panel-header">
+    <span class="source-name"></span>
+    <span class="arrow">&harr;</span>
+    <span class="target-name"></span>
+  </div>
+  <div class="panel-body">
+    <div class="loading">Generating...</div>
+    <div class="narrative-text"></div>
+  </div>
+</div>
+
 <svg id="graph"></svg>
 
 <script type="module">
@@ -145,6 +176,7 @@ let nodes = [];
 let links = [];
 let nodeMap = new Map();
 
+const hitGroup = g.append('g').attr('class', 'hit-lines');
 const linkGroup = g.append('g').attr('class', 'links');
 const nodeGroup = g.append('g').attr('class', 'nodes');
 const labelGroup = g.append('g').attr('class', 'labels');
@@ -155,10 +187,10 @@ function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
 
-async function api(path, params = {}) {
+async function api(path, params = {}, signal) {
   const url = new URL(path, API_BASE);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const res = await fetch(url);
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) return null;
   return res.json();
 }
@@ -286,6 +318,21 @@ function render() {
     .force('center', d3.forceCenter(width / 2, height / 2))
     .force('collision', d3.forceCollide().radius(d => nodeRadius(d.total_plays) + 2));
 
+  // Hit lines (invisible wide targets for edge clicking)
+  const hit = hitGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
+  hit.exit().remove();
+  const hitEnter = hit.enter().append('line')
+    .attr('stroke', 'transparent')
+    .attr('stroke-width', 14)
+    .style('cursor', 'pointer')
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      const src = typeof d.source === 'object' ? d.source : nodeMap.get(d.source);
+      const tgt = typeof d.target === 'object' ? d.target : nodeMap.get(d.target);
+      if (src && tgt) openNarrativePanel(src.id, tgt.id, src.canonical_name, tgt.canonical_name);
+    });
+  const hitMerged = hitEnter.merge(hit);
+
   // Links
   const link = linkGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
   link.exit().remove();
@@ -344,6 +391,11 @@ function render() {
   const labelMerged = labelEnter.merge(label);
 
   simulation.on('tick', () => {
+    hitMerged
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y);
     linkMerged
       .attr('x1', d => d.source.x)
       .attr('y1', d => d.source.y)
@@ -362,11 +414,61 @@ function clearGraph() {
   nodes = [];
   links = [];
   nodeMap.clear();
+  hitGroup.selectAll('*').remove();
   linkGroup.selectAll('*').remove();
   nodeGroup.selectAll('*').remove();
   labelGroup.selectAll('*').remove();
   if (simulation) simulation.stop();
 }
+
+// Narrative panel
+let activeNarrativeController = null;
+
+async function openNarrativePanel(sourceId, targetId, sourceName, targetName) {
+  const panel = document.getElementById('narrative-panel');
+  panel.querySelector('.source-name').textContent = sourceName;
+  panel.querySelector('.target-name').textContent = targetName;
+  panel.querySelector('.loading').style.display = 'block';
+  panel.querySelector('.narrative-text').textContent = '';
+  panel.classList.add('open');
+
+  if (activeNarrativeController) activeNarrativeController.abort();
+  activeNarrativeController = new AbortController();
+
+  const params = {};
+  const monthVal = document.getElementById('monthFilter').value;
+  const djVal = document.getElementById('djFilter').value;
+  if (monthVal) params.month = monthVal;
+  if (djVal) params.dj_id = djVal;
+
+  try {
+    const data = await api(
+      `/graph/artists/${sourceId}/explain/${targetId}/narrative`,
+      params,
+      activeNarrativeController.signal
+    );
+    panel.querySelector('.loading').style.display = 'none';
+    if (data && data.narrative) {
+      panel.querySelector('.narrative-text').textContent = data.narrative;
+    } else {
+      panel.querySelector('.narrative-text').textContent = 'Narrative unavailable.';
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      panel.querySelector('.loading').style.display = 'none';
+      panel.querySelector('.narrative-text').textContent = 'Narrative unavailable.';
+    }
+  }
+}
+
+function closeNarrativePanel() {
+  document.getElementById('narrative-panel').classList.remove('open');
+  if (activeNarrativeController) activeNarrativeController.abort();
+}
+
+document.getElementById('narrative-close').addEventListener('click', closeNarrativePanel);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNarrativePanel(); });
+svg.on('click', () => closeNarrativePanel());
 
 // Search with debounce
 let searchTimeout;

@@ -22,6 +22,7 @@ api = [
     "pydantic-settings>=2.0",
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    "anthropic>=0.40",
 ]
 dev = [
     "pytest>=7.0.0",
