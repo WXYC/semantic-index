@@ -37,10 +37,11 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
+| `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse). |
-| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type, explain relationships, entity artist groups. |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary). |
+| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -120,6 +121,51 @@ CREATE TABLE reconciliation_log (
     method TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- Facet tables (created by facet_export.py for dynamic PMI)
+
+CREATE TABLE dj (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_id TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL
+);
+
+CREATE TABLE play (
+    id INTEGER PRIMARY KEY,
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    show_id INTEGER NOT NULL,
+    dj_id INTEGER REFERENCES dj(id),
+    sequence INTEGER NOT NULL,
+    month INTEGER NOT NULL,       -- 1-12 (0 = no timestamp)
+    request_flag INTEGER NOT NULL DEFAULT 0,
+    timestamp INTEGER
+);
+
+CREATE TABLE artist_month_count (
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    month INTEGER NOT NULL,
+    play_count INTEGER NOT NULL,
+    PRIMARY KEY (artist_id, month)
+);
+
+CREATE TABLE artist_dj_count (
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    dj_id INTEGER NOT NULL REFERENCES dj(id),
+    play_count INTEGER NOT NULL,
+    PRIMARY KEY (artist_id, dj_id)
+);
+
+CREATE TABLE month_total (
+    month INTEGER PRIMARY KEY,
+    total_plays INTEGER NOT NULL,
+    total_pairs INTEGER NOT NULL
+);
+
+CREATE TABLE dj_total (
+    dj_id INTEGER PRIMARY KEY REFERENCES dj(id),
+    total_plays INTEGER NOT NULL,
+    total_pairs INTEGER NOT NULL
+);
 ```
 
 ## Development
@@ -194,9 +240,10 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/health` | Health check — returns artist count or 503 if database is unreachable. |
 | `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
 | `GET` | `/graph/artists/{id}` | Full artist detail including external IDs (Discogs, MusicBrainz, Wikidata QID) joined from the entity table. Gracefully degrades on old-schema databases. |
-| `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`, `wikidataInfluence`. |
+| `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`, `wikidataInfluence`. Supports optional `month` (1-12) and `dj_id` facet filters for `djTransition` — computes PMI dynamically from play-level data. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 | `GET` | `/graph/entities/{id}/artists` | All artists sharing an entity (alias group). Returns entity metadata and a list of artist summaries. |
+| `GET` | `/graph/facets` | Available facet values (months with data, DJ list) for filtering. Gracefully returns empty lists on databases without facet tables. |
 
 ### Deployment
 

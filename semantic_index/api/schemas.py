@@ -80,3 +80,17 @@ class EntityArtists(BaseModel):
     entity_name: str
     wikidata_qid: str | None = None
     artists: list[ArtistSummary]
+
+
+class DjSummary(BaseModel):
+    """Minimal DJ representation for facet dropdowns."""
+
+    id: int
+    display_name: str
+
+
+class FacetsResponse(BaseModel):
+    """Response for GET /graph/facets — available facet values for filtering."""
+
+    months: list[int]
+    djs: list[DjSummary]

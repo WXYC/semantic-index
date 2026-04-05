@@ -181,6 +181,7 @@ def run(args: argparse.Namespace) -> None:
         codes = _cache["codes"]
         releases = _cache["releases"]
         show_to_dj = _cache["show_to_dj"]
+        show_dj_names = _cache.get("show_dj_names", {})
         total_entries = _cache["total_entries"]
         music_entries = _cache["music_entries"]
         catalog_resolved = _cache["catalog_resolved"]
@@ -208,6 +209,7 @@ def run(args: argparse.Namespace) -> None:
         # 3. Parse radio shows for DJ mapping
         log.info("Parsing FLOWSHEET_RADIO_SHOW_PROD table...")
         show_to_dj: dict[int, int | str] = {}
+        show_dj_names: dict[int, str] = {}
         for row in iter_table_rows(dump_path, "FLOWSHEET_RADIO_SHOW_PROD"):
             show_id = row[0]
             dj_id = row[3]  # DJ_ID (int or None)
@@ -216,6 +218,8 @@ def run(args: argparse.Namespace) -> None:
                 show_to_dj[show_id] = dj_id
             elif dj_name:
                 show_to_dj[show_id] = dj_name
+            if dj_name:
+                show_dj_names[show_id] = dj_name
         log.info("  %d shows with DJ mapping", len(show_to_dj))
 
         # 4. Build resolver
@@ -288,6 +292,7 @@ def run(args: argparse.Namespace) -> None:
                         "codes": codes,
                         "releases": releases,
                         "show_to_dj": show_to_dj,
+                        "show_dj_names": show_dj_names,
                         "total_entries": total_entries,
                         "music_entries": music_entries,
                         "catalog_resolved": catalog_resolved,
@@ -545,6 +550,30 @@ def run(args: argparse.Namespace) -> None:
             wikidata_influence_edges=influence_edges,
         )
         log.info("SQLite written to %s", sqlite_path)
+
+        # 14. Export facet tables for dynamic PMI
+        log.info("Exporting facet tables...")
+        import sqlite3 as _sqlite3
+
+        from semantic_index.facet_export import export_facet_tables
+
+        _facet_conn = _sqlite3.connect(str(sqlite_path))
+        _facet_conn.row_factory = _sqlite3.Row
+        _name_to_id = {
+            r["canonical_name"]: r["id"]
+            for r in _facet_conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+        }
+        _facet_conn.close()
+
+        export_facet_tables(
+            db_path=str(sqlite_path),
+            resolved_entries=resolved_entries,
+            name_to_id=_name_to_id,
+            show_to_dj=show_to_dj,
+            show_dj_names=show_dj_names,
+            adjacency_pairs=pairs,
+        )
+        log.info("Facet tables written to %s", sqlite_path)
 
     if entity_store is not None:
         entity_store.close()

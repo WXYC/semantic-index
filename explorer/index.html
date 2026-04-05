@@ -23,6 +23,7 @@
     background: #1a1a1a; border: 1px solid #444; color: #e0e0e0; padding: 6px 8px;
     border-radius: 4px; font-family: inherit; font-size: 12px;
   }
+  #controls select:disabled { opacity: 0.4; cursor: not-allowed; }
   #controls label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
   #random {
     background: none; border: 1px solid #444; color: #888; padding: 5px 8px;
@@ -75,6 +76,18 @@
       <option value="10" selected>10</option>
       <option value="20">20</option>
       <option value="50">50</option>
+    </select>
+  </div>
+  <div>
+    <label>Month</label>
+    <select id="monthFilter">
+      <option value="">All</option>
+    </select>
+  </div>
+  <div>
+    <label>DJ</label>
+    <select id="djFilter">
+      <option value="">All</option>
     </select>
   </div>
   <span id="status"></span>
@@ -168,11 +181,15 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   const edgeType = document.getElementById('edgeType').value;
   const limit = parseInt(document.getElementById('neighborLimit').value);
 
+  // Build neighbor params, including facets when active
+  const neighborParams = { type: edgeType, limit: limit };
+  const monthVal = document.getElementById('monthFilter').value;
+  const djVal = document.getElementById('djFilter').value;
+  if (monthVal) neighborParams.month = monthVal;
+  if (djVal) neighborParams.dj_id = djVal;
+
   // Fetch neighbors
-  const data = await api(`/graph/artists/${artistId}/neighbors`, {
-    type: edgeType,
-    limit: limit,
-  });
+  const data = await api(`/graph/artists/${artistId}/neighbors`, neighborParams);
 
   if (!data || !data.neighbors) {
     setStatus(`No neighbors found for ${artistName}`);
@@ -208,8 +225,11 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   if (depth >= 2) {
     const secondHopIds = data.neighbors.map(n => n.artist.id);
     const secondHopLimit = Math.max(3, Math.floor(limit / 2));
+    const secondHopParams = { type: edgeType, limit: secondHopLimit };
+    if (monthVal) secondHopParams.month = monthVal;
+    if (djVal) secondHopParams.dj_id = djVal;
     const promises = secondHopIds.slice(0, 10).map(id =>
-      api(`/graph/artists/${id}/neighbors`, { type: edgeType, limit: secondHopLimit })
+      api(`/graph/artists/${id}/neighbors`, secondHopParams)
     );
     const results = await Promise.all(promises);
     for (const res of results) {
@@ -238,6 +258,8 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     edge: document.getElementById('edgeType').value,
     depth: document.getElementById('depth').value,
     limit: document.getElementById('neighborLimit').value,
+    month: document.getElementById('monthFilter').value,
+    dj: document.getElementById('djFilter').value,
   };
   history.pushState({ artistName }, '', buildURL(artistName, controls));
 }
@@ -379,9 +401,16 @@ function reloadCenter() {
     loadNeighborhood(centerNode.id, centerNode.canonical_name, parseInt(document.getElementById('depth').value));
   }
 }
-document.getElementById('edgeType').addEventListener('change', reloadCenter);
+function updateFacetState() {
+  const isDjTransition = document.getElementById('edgeType').value === 'djTransition';
+  document.getElementById('monthFilter').disabled = !isDjTransition;
+  document.getElementById('djFilter').disabled = !isDjTransition;
+}
+document.getElementById('edgeType').addEventListener('change', () => { updateFacetState(); reloadCenter(); });
 document.getElementById('depth').addEventListener('change', reloadCenter);
 document.getElementById('neighborLimit').addEventListener('change', reloadCenter);
+document.getElementById('monthFilter').addEventListener('change', reloadCenter);
+document.getElementById('djFilter').addEventListener('change', reloadCenter);
 
 // Resolve an artist name via search and load their neighborhood
 async function searchAndLoad(name, depth) {
@@ -401,6 +430,9 @@ window.addEventListener('popstate', async () => {
   document.getElementById('edgeType').value = state.edge;
   document.getElementById('depth').value = state.depth;
   document.getElementById('neighborLimit').value = state.limit;
+  document.getElementById('monthFilter').value = state.month;
+  document.getElementById('djFilter').value = state.dj;
+  updateFacetState();
   if (state.artist != null) {
     clearGraph();
     await searchAndLoad(state.artist, state.depth);
@@ -419,12 +451,40 @@ async function loadRandomArtist() {
 
 document.getElementById('random').addEventListener('click', loadRandomArtist);
 
+// Populate facet dropdowns from API
+async function loadFacets() {
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const data = await api('/graph/facets');
+  if (!data) return;
+
+  const monthSelect = document.getElementById('monthFilter');
+  for (const m of data.months) {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = monthNames[m - 1];
+    monthSelect.appendChild(opt);
+  }
+
+  const djSelect = document.getElementById('djFilter');
+  for (const dj of data.djs) {
+    const opt = document.createElement('option');
+    opt.value = dj.id;
+    opt.textContent = dj.display_name;
+    djSelect.appendChild(opt);
+  }
+}
+
 // Initialize from URL or random artist
 (async () => {
+  await loadFacets();
+
   const state = parseURL(window.location.search);
   document.getElementById('edgeType').value = state.edge;
   document.getElementById('depth').value = state.depth;
   document.getElementById('neighborLimit').value = state.limit;
+  document.getElementById('monthFilter').value = state.month;
+  document.getElementById('djFilter').value = state.dj;
+  updateFacetState();
 
   if (state.artist) {
     if (await searchAndLoad(state.artist, state.depth)) return;
