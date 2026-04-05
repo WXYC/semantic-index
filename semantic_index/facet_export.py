@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def _extract_month(start_time_ms: int | None) -> int:
     """Extract month (1-12) from a Unix-millisecond timestamp, or 0 if None."""
     if start_time_ms is None:
         return 0
-    dt = datetime.fromtimestamp(start_time_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(start_time_ms / 1000, tz=UTC)
     return dt.month
 
 
@@ -153,13 +153,13 @@ def _insert_djs(
     # Also check other shows for better display names
     for show_id, dj_key in show_to_dj.items():
         key = str(dj_key)
-        name = show_dj_names.get(show_id)
-        if name and dj_display[key] == key:
-            dj_display[key] = name
+        better_name = show_dj_names.get(show_id)
+        if better_name and dj_display[key] == key:
+            dj_display[key] = better_name
 
     conn.executemany(
         "INSERT OR IGNORE INTO dj (original_id, display_name) VALUES (?, ?)",
-        [(key, name) for key, name in dj_display.items()],
+        list(dj_display.items()),
     )
 
     # Read back the assigned IDs
