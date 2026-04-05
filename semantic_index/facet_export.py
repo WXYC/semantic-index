@@ -187,16 +187,18 @@ def _insert_plays(
         month = _extract_month(fe.start_time)
         dj_id = show_to_dj_table_id.get(fe.show_id)
 
-        batch.append((
-            fe.id,
-            artist_id,
-            fe.show_id,
-            dj_id,
-            fe.sequence,
-            month,
-            fe.request_flag,
-            fe.start_time,
-        ))
+        batch.append(
+            (
+                fe.id,
+                artist_id,
+                fe.show_id,
+                dj_id,
+                fe.sequence,
+                month,
+                fe.request_flag,
+                fe.start_time,
+            )
+        )
 
     if skipped:
         logger.debug("  Skipped %d entries with unknown artist names", skipped)
@@ -231,8 +233,7 @@ def _compute_artist_dj_count(conn: sqlite3.Connection) -> None:
 def _build_show_to_month(conn: sqlite3.Connection) -> dict[int, int]:
     """Build show_id -> month mapping from the first play entry in each show."""
     rows = conn.execute(
-        "SELECT show_id, month FROM play WHERE month > 0 "
-        "GROUP BY show_id"
+        "SELECT show_id, month FROM play WHERE month > 0 GROUP BY show_id"
     ).fetchall()
     return {r["show_id"]: r["month"] for r in rows}
 
