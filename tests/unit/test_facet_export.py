@@ -23,15 +23,9 @@ def _build_test_db(
 
     # Create the base DB with artist table
     stats = artist_stats or {
-        "Autechre": ArtistStats(
-            canonical_name="Autechre", total_plays=10, genre="Electronic"
-        ),
-        "Stereolab": ArtistStats(
-            canonical_name="Stereolab", total_plays=8, genre="Rock"
-        ),
-        "Cat Power": ArtistStats(
-            canonical_name="Cat Power", total_plays=5, genre="Rock"
-        ),
+        "Autechre": ArtistStats(canonical_name="Autechre", total_plays=10, genre="Electronic"),
+        "Stereolab": ArtistStats(canonical_name="Stereolab", total_plays=8, genre="Rock"),
+        "Cat Power": ArtistStats(canonical_name="Cat Power", total_plays=5, genre="Rock"),
     }
     edges = pmi_edges or [
         PmiEdge(source="Autechre", target="Stereolab", raw_count=3, pmi=2.5),
@@ -114,9 +108,15 @@ class TestDjTable:
 class TestPlayTable:
     def test_play_table_row_count(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
-            make_resolved_entry(id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         count = conn.execute("SELECT COUNT(*) FROM play").fetchone()[0]
@@ -125,8 +125,12 @@ class TestPlayTable:
 
     def test_play_month_extraction(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JUL_10_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JUL_10_2024
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         rows = conn.execute("SELECT id, month FROM play ORDER BY id").fetchall()
@@ -136,7 +140,9 @@ class TestPlayTable:
 
     def test_play_month_zero_for_missing_timestamp(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=None),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=None
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         row = conn.execute("SELECT month FROM play").fetchone()
@@ -145,7 +151,9 @@ class TestPlayTable:
 
     def test_play_artist_id_mapped(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
         ]
         conn, name_to_id = _build_test_db(resolved_entries=entries)
         row = conn.execute("SELECT artist_id FROM play").fetchone()
@@ -154,7 +162,9 @@ class TestPlayTable:
 
     def test_play_dj_id_mapped(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
         ]
         conn, _ = _build_test_db(
             resolved_entries=entries,
@@ -168,7 +178,9 @@ class TestPlayTable:
 
     def test_play_dj_id_null_for_unmapped_show(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=99, sequence=1, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=99, sequence=1, start_time=JAN_15_2024
+            ),
         ]
         conn, _ = _build_test_db(
             resolved_entries=entries,
@@ -181,7 +193,14 @@ class TestPlayTable:
 
     def test_play_preserves_request_flag(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024, request_flag=1),
+            make_resolved_entry(
+                id=1,
+                canonical_name="Autechre",
+                show_id=1,
+                sequence=1,
+                start_time=JAN_15_2024,
+                request_flag=1,
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         row = conn.execute("SELECT request_flag FROM play").fetchone()
@@ -191,8 +210,12 @@ class TestPlayTable:
     def test_play_skips_entries_with_unknown_artist(self):
         """Entries whose canonical_name is not in name_to_id are skipped."""
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Unknown Artist", show_id=1, sequence=2, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Unknown Artist", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         count = conn.execute("SELECT COUNT(*) FROM play").fetchone()[0]
@@ -203,10 +226,18 @@ class TestPlayTable:
 class TestArtistMonthCount:
     def test_aggregation(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Autechre", show_id=2, sequence=1, start_time=JAN_20_2024),
-            make_resolved_entry(id=3, canonical_name="Autechre", show_id=3, sequence=1, start_time=JUL_10_2024),
-            make_resolved_entry(id=4, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Autechre", show_id=2, sequence=1, start_time=JAN_20_2024
+            ),
+            make_resolved_entry(
+                id=3, canonical_name="Autechre", show_id=3, sequence=1, start_time=JUL_10_2024
+            ),
+            make_resolved_entry(
+                id=4, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
         ]
         conn, name_to_id = _build_test_db(resolved_entries=entries)
         ae_id = name_to_id["Autechre"]
@@ -226,7 +257,9 @@ class TestArtistMonthCount:
 
     def test_excludes_month_zero(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=None),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=None
+            ),
         ]
         conn, _ = _build_test_db(resolved_entries=entries)
         count = conn.execute("SELECT COUNT(*) FROM artist_month_count").fetchone()[0]
@@ -237,9 +270,15 @@ class TestArtistMonthCount:
 class TestArtistDjCount:
     def test_aggregation(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Autechre", show_id=2, sequence=1, start_time=JAN_20_2024),
-            make_resolved_entry(id=3, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Autechre", show_id=2, sequence=1, start_time=JAN_20_2024
+            ),
+            make_resolved_entry(
+                id=3, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
         ]
         conn, name_to_id = _build_test_db(
             resolved_entries=entries,
@@ -261,10 +300,18 @@ class TestArtistDjCount:
 class TestMonthTotal:
     def test_total_plays_and_pairs(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
-            make_resolved_entry(id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024),
-            make_resolved_entry(id=4, canonical_name="Autechre", show_id=2, sequence=1, start_time=JUL_10_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=4, canonical_name="Autechre", show_id=2, sequence=1, start_time=JUL_10_2024
+            ),
         ]
         pairs = [
             make_adjacency_pair(source="Autechre", target="Stereolab", show_id=1),
@@ -285,9 +332,15 @@ class TestMonthTotal:
 class TestDjTotal:
     def test_total_plays_and_pairs(self):
         entries = [
-            make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-            make_resolved_entry(id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
-            make_resolved_entry(id=3, canonical_name="Cat Power", show_id=2, sequence=1, start_time=JAN_20_2024),
+            make_resolved_entry(
+                id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+            ),
+            make_resolved_entry(
+                id=3, canonical_name="Cat Power", show_id=2, sequence=1, start_time=JAN_20_2024
+            ),
         ]
         pairs = [
             make_adjacency_pair(source="Autechre", target="Stereolab", show_id=1),
@@ -301,9 +354,7 @@ class TestDjTotal:
 
         # Find DJ Cool's id
         dj_cool = conn.execute("SELECT id FROM dj WHERE original_id = '42'").fetchone()
-        row = conn.execute(
-            "SELECT * FROM dj_total WHERE dj_id = ?", (dj_cool["id"],)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM dj_total WHERE dj_id = ?", (dj_cool["id"],)).fetchone()
         assert row["total_plays"] == 2  # Autechre + Stereolab in show 1
         assert row["total_pairs"] == 1  # one pair in show 1
 

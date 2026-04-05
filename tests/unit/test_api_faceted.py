@@ -36,13 +36,19 @@ def _build_faceted_fixture_db() -> str:
 
     stats = {
         "Autechre": ArtistStats(
-            canonical_name="Autechre", total_plays=4, genre="Electronic",
+            canonical_name="Autechre",
+            total_plays=4,
+            genre="Electronic",
         ),
         "Stereolab": ArtistStats(
-            canonical_name="Stereolab", total_plays=3, genre="Rock",
+            canonical_name="Stereolab",
+            total_plays=3,
+            genre="Rock",
         ),
         "Cat Power": ArtistStats(
-            canonical_name="Cat Power", total_plays=2, genre="Rock",
+            canonical_name="Cat Power",
+            total_plays=2,
+            genre="Rock",
         ),
     }
     pmi_edges = [
@@ -64,15 +70,29 @@ def _build_faceted_fixture_db() -> str:
     # Resolved entries for all three shows
     resolved_entries = [
         # Show 1: January, DJ Cool
-        make_resolved_entry(id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024),
-        make_resolved_entry(id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024),
-        make_resolved_entry(id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024),
+        make_resolved_entry(
+            id=1, canonical_name="Autechre", show_id=1, sequence=1, start_time=JAN_15_2024
+        ),
+        make_resolved_entry(
+            id=2, canonical_name="Stereolab", show_id=1, sequence=2, start_time=JAN_15_2024
+        ),
+        make_resolved_entry(
+            id=3, canonical_name="Cat Power", show_id=1, sequence=3, start_time=JAN_15_2024
+        ),
         # Show 2: July, DJ Cool
-        make_resolved_entry(id=4, canonical_name="Autechre", show_id=2, sequence=1, start_time=JUL_10_2024),
-        make_resolved_entry(id=5, canonical_name="Cat Power", show_id=2, sequence=2, start_time=JUL_10_2024),
+        make_resolved_entry(
+            id=4, canonical_name="Autechre", show_id=2, sequence=1, start_time=JUL_10_2024
+        ),
+        make_resolved_entry(
+            id=5, canonical_name="Cat Power", show_id=2, sequence=2, start_time=JUL_10_2024
+        ),
         # Show 3: January, DJ Sunshine
-        make_resolved_entry(id=6, canonical_name="Stereolab", show_id=3, sequence=1, start_time=JAN_20_2024),
-        make_resolved_entry(id=7, canonical_name="Autechre", show_id=3, sequence=2, start_time=JAN_20_2024),
+        make_resolved_entry(
+            id=6, canonical_name="Stereolab", show_id=3, sequence=1, start_time=JAN_20_2024
+        ),
+        make_resolved_entry(
+            id=7, canonical_name="Autechre", show_id=3, sequence=2, start_time=JAN_20_2024
+        ),
     ]
     pairs = [
         # Show 1
@@ -240,7 +260,9 @@ class TestNeighborsMonthFilter:
 class TestNeighborsDjFilter:
     @pytest.mark.asyncio
     async def test_dj_cool_neighbors(
-        self, client: AsyncClient, faceted_artist_ids: dict[str, int],
+        self,
+        client: AsyncClient,
+        faceted_artist_ids: dict[str, int],
         faceted_dj_ids: dict[str, int],
     ) -> None:
         """DJ Cool plays Autechre in show 1 (→ Stereolab) and show 2 (→ Cat Power)."""
@@ -257,7 +279,9 @@ class TestNeighborsDjFilter:
 
     @pytest.mark.asyncio
     async def test_dj_sunshine_neighbors(
-        self, client: AsyncClient, faceted_artist_ids: dict[str, int],
+        self,
+        client: AsyncClient,
+        faceted_artist_ids: dict[str, int],
         faceted_dj_ids: dict[str, int],
     ) -> None:
         """DJ Sunshine only has show 3: Stereolab → Autechre."""
@@ -277,7 +301,9 @@ class TestNeighborsDjFilter:
 class TestNeighborsBothFacets:
     @pytest.mark.asyncio
     async def test_month_and_dj_combined(
-        self, client: AsyncClient, faceted_artist_ids: dict[str, int],
+        self,
+        client: AsyncClient,
+        faceted_artist_ids: dict[str, int],
         faceted_dj_ids: dict[str, int],
     ) -> None:
         """DJ Cool in January = only show 1: Autechre -> Stereolab -> Cat Power."""

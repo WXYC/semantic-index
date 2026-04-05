@@ -101,7 +101,9 @@ def get_facets(
     Gracefully returns empty lists on databases without facet tables.
     """
     try:
-        months = [r[0] for r in db.execute("SELECT month FROM month_total ORDER BY month").fetchall()]
+        months = [
+            r[0] for r in db.execute("SELECT month FROM month_total ORDER BY month").fetchall()
+        ]
         djs = [
             DjSummary(id=r["id"], display_name=r["display_name"])
             for r in db.execute("SELECT id, display_name FROM dj ORDER BY display_name").fetchall()
