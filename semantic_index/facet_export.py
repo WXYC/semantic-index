@@ -107,6 +107,17 @@ def export_facet_tables(
     try:
         conn.executescript(_FACET_SCHEMA)
 
+        # Clear existing facet data (safe to re-run)
+        for table in (
+            "dj_total",
+            "month_total",
+            "artist_dj_count",
+            "artist_month_count",
+            "play",
+            "dj",
+        ):
+            conn.execute(f"DELETE FROM {table}")  # noqa: S608
+
         # 1. Build DJ table
         dj_key_to_id = _insert_djs(conn, show_to_dj, show_dj_names)
 
