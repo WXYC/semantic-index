@@ -17,3 +17,4 @@ class Settings(BaseSettings):
     db_path: str = "data/wxyc_artist_graph.db"
     host: str = "0.0.0.0"
     port: int = 8000
+    anthropic_api_key: str | None = None

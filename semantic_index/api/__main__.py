@@ -14,7 +14,7 @@ from semantic_index.api.config import Settings
 logging.basicConfig(level=logging.INFO)
 
 settings = Settings()
-app = create_app(settings.db_path)
+app = create_app(settings.db_path, anthropic_api_key=settings.anthropic_api_key)
 
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.host, port=settings.port)

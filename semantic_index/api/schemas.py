@@ -82,6 +82,15 @@ class EntityArtists(BaseModel):
     artists: list[ArtistSummary]
 
 
+class NarrativeResponse(BaseModel):
+    """Response for GET /graph/artists/{id}/explain/{target_id}/narrative."""
+
+    source: ArtistSummary
+    target: ArtistSummary
+    narrative: str
+    cached: bool
+
+
 class DjSummary(BaseModel):
     """Minimal DJ representation for facet dropdowns."""
 
