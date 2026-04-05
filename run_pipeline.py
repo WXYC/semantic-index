@@ -148,7 +148,99 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Query Wikidata P737 (influenced by) and create directed influence edges. "
         "Requires --entity-store-path with reconciled Wikidata QIDs.",
     )
+    parser.add_argument(
+        "--facet-only",
+        action="store_true",
+        help="Only export facet tables (requires --cache-dir and an existing database). "
+        "Loads resolved entries from cache, recomputes adjacency pairs, reads artist IDs "
+        "from the existing database, and calls export_facet_tables. Skips all other steps.",
+    )
     return parser.parse_args(argv)
+
+
+def _run_facet_only(
+    args: argparse.Namespace,
+    cache_path: Path | None,
+    used_cache: bool,
+) -> None:
+    """Run only the facet export step using cached data and an existing database.
+
+    Validates that the cache was loaded and the target database exists, then
+    recomputes adjacency pairs, reads artist IDs from the database, and
+    exports facet tables.
+    """
+    import sqlite3 as _sqlite3
+
+    from semantic_index.facet_export import export_facet_tables
+
+    t0 = time.time()
+
+    # Validate --cache-dir was provided
+    if not args.cache_dir:
+        log.error("--facet-only requires --cache-dir")
+        sys.exit(1)
+
+    # Validate the cache was found and loaded
+    if not used_cache:
+        log.error(
+            "--facet-only: no cache file found at %s. "
+            "Run the full pipeline first to generate the cache.",
+            cache_path,
+        )
+        sys.exit(1)
+
+    # Determine target database path
+    if args.entity_store_path:
+        sqlite_path = Path(args.entity_store_path)
+    else:
+        sqlite_path = Path(args.output_dir) / "wxyc_artist_graph.db"
+
+    if not sqlite_path.exists():
+        log.error(
+            "--facet-only: target database not found at %s. "
+            "Run the full pipeline first to generate the database.",
+            sqlite_path,
+        )
+        sys.exit(1)
+
+    # The cache was already loaded and validated by the caller, but those
+    # values are local to run(). Re-read from the cache file directly.
+    log.info("Loading cache for facet-only export...")
+    with open(cache_path, "rb") as f:  # type: ignore[arg-type]
+        cache = pickle.load(f)  # noqa: S301
+    resolved_entries = cache["resolved_entries"]
+    show_to_dj = cache["show_to_dj"]
+    show_dj_names = cache.get("show_dj_names", {})
+
+    # Recompute adjacency pairs
+    log.info("Extracting adjacency pairs from %d resolved entries...", len(resolved_entries))
+    pairs = extract_adjacency_pairs(resolved_entries)
+    log.info("  %d adjacency pairs extracted", len(pairs))
+
+    # Read name_to_id from the existing database
+    log.info("Reading artist IDs from %s...", sqlite_path)
+    conn = _sqlite3.connect(str(sqlite_path))
+    conn.row_factory = _sqlite3.Row
+    name_to_id = {
+        r["canonical_name"]: r["id"]
+        for r in conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    }
+    conn.close()
+    log.info("  %d artists in database", len(name_to_id))
+
+    # Export facet tables
+    log.info("Exporting facet tables to %s...", sqlite_path)
+    export_facet_tables(
+        db_path=str(sqlite_path),
+        resolved_entries=resolved_entries,
+        name_to_id=name_to_id,
+        show_to_dj=show_to_dj,
+        show_dj_names=show_dj_names,
+        adjacency_pairs=pairs,
+    )
+
+    elapsed = time.time() - t0
+    log.info("Facet tables written to %s in %.1f seconds.", sqlite_path, elapsed)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -187,6 +279,11 @@ def run(args: argparse.Namespace) -> None:
         catalog_resolved = _cache["catalog_resolved"]
         log.info("  Loaded %d resolved entries from cache", len(resolved_entries))
         _used_cache = True
+
+    # --facet-only: export facet tables from cache + existing DB and exit early
+    if args.facet_only:
+        _run_facet_only(args, _cache_path, _used_cache)
+        return
 
     if not _used_cache:
         # 1. Parse genre table
