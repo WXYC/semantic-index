@@ -7,6 +7,8 @@ describe("DEFAULTS", () => {
     assert.equal(DEFAULTS.edge, "djTransition");
     assert.equal(DEFAULTS.depth, "2");
     assert.equal(DEFAULTS.limit, "10");
+    assert.equal(DEFAULTS.month, "");
+    assert.equal(DEFAULTS.dj, "");
   });
 });
 
@@ -17,6 +19,8 @@ describe("parseURL", () => {
     assert.equal(state.edge, "djTransition");
     assert.equal(state.depth, "2");
     assert.equal(state.limit, "10");
+    assert.equal(state.month, "");
+    assert.equal(state.dj, "");
   });
 
   it("parses artist name", () => {
@@ -108,11 +112,58 @@ describe("buildURL", () => {
   });
 
   it("round-trips defaults through parseURL", () => {
-    const url = buildURL("Autechre", { edge: "djTransition", depth: "2", limit: "10" });
+    const url = buildURL("Autechre", { ...DEFAULTS });
     const parsed = parseURL(url);
     assert.equal(parsed.artist, "Autechre");
     assert.equal(parsed.edge, "djTransition");
     assert.equal(parsed.depth, "2");
     assert.equal(parsed.limit, "10");
+    assert.equal(parsed.month, "");
+    assert.equal(parsed.dj, "");
+  });
+
+  it("includes non-default month", () => {
+    const url = buildURL("Autechre", { ...DEFAULTS, month: "3" });
+    assert.equal(url, "?artist=Autechre&month=3");
+  });
+
+  it("includes non-default dj", () => {
+    const url = buildURL("Autechre", { ...DEFAULTS, dj: "42" });
+    assert.equal(url, "?artist=Autechre&dj=42");
+  });
+
+  it("includes both month and dj", () => {
+    const url = buildURL("Autechre", { ...DEFAULTS, month: "12", dj: "7" });
+    assert.equal(url, "?artist=Autechre&month=12&dj=7");
+  });
+
+  it("round-trips facet params", () => {
+    const controls = { ...DEFAULTS, month: "6", dj: "3" };
+    const url = buildURL("Cat Power", controls);
+    const parsed = parseURL(url);
+    assert.equal(parsed.artist, "Cat Power");
+    assert.equal(parsed.month, "6");
+    assert.equal(parsed.dj, "3");
+    assert.equal(parsed.edge, "djTransition");
+  });
+});
+
+describe("parseURL facets", () => {
+  it("parses month param", () => {
+    const state = parseURL("?artist=Autechre&month=3");
+    assert.equal(state.month, "3");
+    assert.equal(state.dj, "");
+  });
+
+  it("parses dj param", () => {
+    const state = parseURL("?artist=Autechre&dj=42");
+    assert.equal(state.dj, "42");
+    assert.equal(state.month, "");
+  });
+
+  it("parses both facet params", () => {
+    const state = parseURL("?artist=Autechre&month=12&dj=7");
+    assert.equal(state.month, "12");
+    assert.equal(state.dj, "7");
   });
 });

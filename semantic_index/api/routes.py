@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
+from collections import defaultdict
 from enum import StrEnum
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,13 +15,17 @@ from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
     ArtistDetail,
     ArtistSummary,
+    DjSummary,
     EntityArtists,
     ExplainResponse,
+    FacetsResponse,
     NeighborEntry,
     NeighborsResponse,
     Relationship,
     SearchResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -85,6 +92,27 @@ def search_artists(
     return SearchResponse(results=[_artist_summary(r) for r in rows])
 
 
+@router.get("/facets", response_model=FacetsResponse)
+def get_facets(
+    db: sqlite3.Connection = Depends(get_db),
+) -> FacetsResponse:
+    """Return available facet values (months, DJs) for filtering.
+
+    Gracefully returns empty lists on databases without facet tables.
+    """
+    try:
+        months = [r[0] for r in db.execute("SELECT month FROM month_total ORDER BY month").fetchall()]
+        djs = [
+            DjSummary(id=r["id"], display_name=r["display_name"])
+            for r in db.execute("SELECT id, display_name FROM dj ORDER BY display_name").fetchall()
+        ]
+    except sqlite3.OperationalError:
+        logger.debug("Facet tables not found — returning empty facets")
+        months = []
+        djs = []
+    return FacetsResponse(months=months, djs=djs)
+
+
 @router.get("/artists/{artist_id}", response_model=ArtistDetail)
 def get_artist_detail(
     artist_id: int,
@@ -103,11 +131,22 @@ def get_neighbors(
     artist_id: int,
     type: EdgeType = Query(default=EdgeType.DJ_TRANSITION),
     limit: int = Query(default=20, ge=1, le=100),
+    month: int | None = Query(default=None, ge=1, le=12),
+    dj_id: int | None = Query(default=None, ge=1),
     db: sqlite3.Connection = Depends(get_db),
 ) -> NeighborsResponse:
-    """Return neighbors of an artist by edge type, ordered by weight descending."""
+    """Return neighbors of an artist by edge type, ordered by weight descending.
+
+    When ``month`` or ``dj_id`` are provided and the edge type is ``djTransition``,
+    computes PMI dynamically from the play table filtered by the given facets.
+    Facet parameters are ignored for other edge types.
+    """
     artist = _get_artist_or_404(db, artist_id)
-    neighbors = _query_neighbors(db, artist_id, type, limit)
+    has_facets = month is not None or dj_id is not None
+    if has_facets and type == EdgeType.DJ_TRANSITION:
+        neighbors = _neighbors_dj_transition_faceted(db, artist_id, limit, month, dj_id)
+    else:
+        neighbors = _query_neighbors(db, artist_id, type, limit)
     return NeighborsResponse(artist=artist, edge_type=type.value, neighbors=neighbors)
 
 
@@ -286,6 +325,199 @@ def _neighbors_dj_transition(
         )
         for r in rows
     ]
+
+
+def _neighbors_dj_transition_faceted(
+    db: sqlite3.Connection,
+    artist_id: int,
+    limit: int,
+    month: int | None = None,
+    dj_id: int | None = None,
+) -> list[NeighborEntry]:
+    """Compute faceted PMI neighbors dynamically from the play table.
+
+    Three query paths depending on active facets:
+    - Month only: marginals from artist_month_count, totals from month_total
+    - DJ only: marginals from artist_dj_count, totals from dj_total
+    - Both: marginals and totals computed dynamically from play table
+    """
+    # Step 1: Pair counts (self-join on play table, scoped to center artist)
+    pair_counts: dict[int, int] = defaultdict(int)
+
+    # Forward: center plays at position N, neighbor at N+1
+    forward_sql = (
+        "SELECT p2.artist_id AS neighbor_id, COUNT(*) AS pair_count "
+        "FROM play p1 "
+        "JOIN play p2 ON p2.show_id = p1.show_id AND p2.sequence = p1.sequence + 1 "
+        "WHERE p1.artist_id = :center"
+    )
+    # Reverse: neighbor plays at position N, center at N+1
+    reverse_sql = (
+        "SELECT p1.artist_id AS neighbor_id, COUNT(*) AS pair_count "
+        "FROM play p1 "
+        "JOIN play p2 ON p2.show_id = p1.show_id AND p2.sequence = p1.sequence + 1 "
+        "WHERE p2.artist_id = :center"
+    )
+
+    params: dict = {"center": artist_id}
+    facet_clauses = []
+    if month is not None:
+        facet_clauses.append("p1.month = :month")
+        params["month"] = month
+    if dj_id is not None:
+        facet_clauses.append("p1.dj_id = :dj_id")
+        params["dj_id"] = dj_id
+
+    if facet_clauses:
+        facet_where = " AND " + " AND ".join(facet_clauses)
+        forward_sql += facet_where
+        # For reverse, facets apply to p2 (the center's row)
+        reverse_facet = facet_where.replace("p1.", "p2.")
+        reverse_sql += reverse_facet
+
+    forward_sql += " GROUP BY p2.artist_id"
+    reverse_sql += " GROUP BY p1.artist_id"
+
+    for row in db.execute(forward_sql, params).fetchall():
+        pair_counts[row["neighbor_id"]] += row["pair_count"]
+    for row in db.execute(reverse_sql, params).fetchall():
+        pair_counts[row["neighbor_id"]] += row["pair_count"]
+
+    if not pair_counts:
+        return []
+
+    # Step 2: Marginals (play counts per artist in the filtered slice)
+    all_artist_ids = [artist_id, *pair_counts.keys()]
+    marginals = _get_faceted_marginals(db, all_artist_ids, month, dj_id)
+
+    # Step 3: Totals (total plays and pairs in the filtered slice)
+    total_plays, total_pairs = _get_faceted_totals(db, month, dj_id)
+
+    if total_plays == 0 or total_pairs == 0:
+        return []
+
+    center_plays = marginals.get(artist_id, 0)
+    if center_plays == 0:
+        return []
+
+    # Step 4: Compute PMI and filter
+    scored: list[tuple[int, int, float]] = []  # (neighbor_id, raw_count, pmi)
+    for neighbor_id, raw_count in pair_counts.items():
+        neighbor_plays = marginals.get(neighbor_id, 0)
+        if neighbor_plays == 0:
+            continue
+
+        p_pair = raw_count / total_pairs
+        p_center = center_plays / total_plays
+        p_neighbor = neighbor_plays / total_plays
+
+        denominator = p_center * p_neighbor
+        if denominator == 0:
+            continue
+
+        pmi = math.log2(p_pair / denominator)
+        if pmi > 0:
+            scored.append((neighbor_id, raw_count, pmi))
+
+    scored.sort(key=lambda x: x[2], reverse=True)
+    scored = scored[:limit]
+
+    if not scored:
+        return []
+
+    # Step 5: Build response (look up artist summaries)
+    neighbor_ids = [s[0] for s in scored]
+    placeholders = ",".join("?" * len(neighbor_ids))
+    artist_rows = db.execute(
+        f"SELECT id, canonical_name, genre, total_plays FROM artist WHERE id IN ({placeholders})",  # noqa: S608
+        neighbor_ids,
+    ).fetchall()
+    artist_map = {r["id"]: _artist_summary(r) for r in artist_rows}
+
+    return [
+        NeighborEntry(
+            artist=artist_map[nid],
+            weight=pmi,
+            detail={"raw_count": raw_count, "pmi": round(pmi, 4)},
+        )
+        for nid, raw_count, pmi in scored
+        if nid in artist_map
+    ]
+
+
+def _get_faceted_marginals(
+    db: sqlite3.Connection,
+    artist_ids: list[int],
+    month: int | None,
+    dj_id: int | None,
+) -> dict[int, int]:
+    """Get per-artist play counts for the given facet filter."""
+    placeholders = ",".join("?" * len(artist_ids))
+
+    if month is not None and dj_id is not None:
+        # Both facets: query play table directly
+        rows = db.execute(
+            f"SELECT artist_id, COUNT(*) AS play_count FROM play "  # noqa: S608
+            f"WHERE artist_id IN ({placeholders}) AND month = ? AND dj_id = ? "
+            f"GROUP BY artist_id",
+            [*artist_ids, month, dj_id],
+        ).fetchall()
+    elif month is not None:
+        rows = db.execute(
+            f"SELECT artist_id, play_count FROM artist_month_count "  # noqa: S608
+            f"WHERE artist_id IN ({placeholders}) AND month = ?",
+            [*artist_ids, month],
+        ).fetchall()
+    elif dj_id is not None:
+        rows = db.execute(
+            f"SELECT artist_id, play_count FROM artist_dj_count "  # noqa: S608
+            f"WHERE artist_id IN ({placeholders}) AND dj_id = ?",
+            [*artist_ids, dj_id],
+        ).fetchall()
+    else:
+        return {}
+
+    return {r["artist_id"]: r["play_count"] for r in rows}
+
+
+def _get_faceted_totals(
+    db: sqlite3.Connection,
+    month: int | None,
+    dj_id: int | None,
+) -> tuple[int, int]:
+    """Get total plays and total pairs for the given facet filter."""
+    if month is not None and dj_id is not None:
+        # Both facets: compute dynamically
+        plays_row = db.execute(
+            "SELECT COUNT(*) FROM play WHERE month = ? AND dj_id = ?",
+            (month, dj_id),
+        ).fetchone()
+        total_plays = plays_row[0] if plays_row else 0
+
+        # Count pairs: consecutive plays in the same show within the facet
+        pairs_row = db.execute(
+            "SELECT COUNT(*) FROM play p1 "
+            "JOIN play p2 ON p2.show_id = p1.show_id AND p2.sequence = p1.sequence + 1 "
+            "WHERE p1.month = ? AND p1.dj_id = ?",
+            (month, dj_id),
+        ).fetchone()
+        total_pairs = pairs_row[0] if pairs_row else 0
+    elif month is not None:
+        row = db.execute(
+            "SELECT total_plays, total_pairs FROM month_total WHERE month = ?", (month,)
+        ).fetchone()
+        total_plays = row["total_plays"] if row else 0
+        total_pairs = row["total_pairs"] if row else 0
+    elif dj_id is not None:
+        row = db.execute(
+            "SELECT total_plays, total_pairs FROM dj_total WHERE dj_id = ?", (dj_id,)
+        ).fetchone()
+        total_plays = row["total_plays"] if row else 0
+        total_pairs = row["total_pairs"] if row else 0
+    else:
+        return 0, 0
+
+    return total_plays, total_pairs
 
 
 def _neighbors_symmetric(
