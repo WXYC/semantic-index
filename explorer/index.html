@@ -291,6 +291,24 @@ function renderStreamingEmbeds(detail) {
     container.appendChild(iframe);
   }
 
+  if (detail.apple_music_artist_id) {
+    // Fetch top album from iTunes Search API (free, CORS-enabled)
+    fetch(`https://itunes.apple.com/lookup?id=${detail.apple_music_artist_id}&entity=album&limit=1`)
+      .then(r => r.json())
+      .then(data => {
+        const album = data.results && data.results.find(r => r.wrapperType === 'collection');
+        if (album) {
+          const iframe = document.createElement('iframe');
+          iframe.src = `https://embed.music.apple.com/us/album/${album.collectionId}?theme=dark`;
+          iframe.height = '175';
+          iframe.allow = 'autoplay; encrypted-media; fullscreen';
+          iframe.loading = 'lazy';
+          container.appendChild(iframe);
+        }
+      })
+      .catch(() => {}); // silently fail
+  }
+
 }
 
 function renderExternalLinks(detail) {
@@ -298,12 +316,6 @@ function renderExternalLinks(detail) {
   container.innerHTML = '';
   if (!detail) return;
 
-  if (detail.apple_music_artist_id) {
-    const a = document.createElement('a');
-    a.href = `https://music.apple.com/us/artist/${detail.apple_music_artist_id}`;
-    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Apple Music';
-    container.appendChild(a);
-  }
   if (detail.bandcamp_id) {
     const a = document.createElement('a');
     a.href = `https://${detail.bandcamp_id}.bandcamp.com`;
