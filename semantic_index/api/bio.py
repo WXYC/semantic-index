@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from semantic_index.api.database import get_db
-from semantic_index.api.schemas import BioResponse
+from semantic_index.api.schemas import BandcampAlbumResponse, BioResponse
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS bio_cache (
     artist_id INTEGER PRIMARY KEY,
     bio TEXT NOT NULL,
     source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bandcamp_album_cache (
+    bandcamp_id TEXT PRIMARY KEY,
+    album_id TEXT,
+    album_title TEXT,
     created_at TEXT NOT NULL
 );
 """
@@ -142,6 +149,48 @@ def _fetch_wikidata_description(wikidata_qid: str) -> str | None:
     return None
 
 
+def _fetch_bandcamp_album(bandcamp_id: str) -> tuple[str, str] | None:
+    """Scrape the Bandcamp artist page for the first album ID.
+
+    Parses ``data-item-id="album-{numeric_id}"`` attributes from the
+    discography grid.
+
+    Returns:
+        (album_id, album_title) tuple, or None if not found.
+    """
+    import re
+
+    try:
+        with httpx.Client(
+            timeout=10,
+            headers={"User-Agent": _WIKI_USER_AGENT},
+            follow_redirects=True,
+        ) as client:
+            resp = client.get(f"https://{bandcamp_id}.bandcamp.com")
+            resp.raise_for_status()
+            html = resp.text
+
+            # Extract album IDs from data-item-id attributes
+            match = re.search(r'data-item-id="album-(\d+)"', html)
+            if not match:
+                return None
+
+            album_id = match.group(1)
+
+            # Try to extract album title nearby
+            title_match = re.search(
+                r'data-item-id="album-' + album_id + r'".*?<p class="title">\s*([^<]+)',
+                html,
+                re.DOTALL,
+            )
+            album_title = title_match.group(1).strip() if title_match else ""
+
+            return album_id, album_title
+    except Exception:
+        logger.warning("Bandcamp scrape failed for %s", bandcamp_id, exc_info=True)
+        return None
+
+
 def _fetch_bio(detail: dict) -> tuple[str, str]:
     """Run the fallback chain and return (bio, source).
 
@@ -247,6 +296,50 @@ def get_bio(
             artist_id=artist_id,
             bio=bio,
             source=source,
+            cached=False,
+        )
+    finally:
+        cache_db.close()
+
+
+@bio_router.get(
+    "/bandcamp/{bandcamp_id}/album",
+    response_model=BandcampAlbumResponse,
+)
+def get_bandcamp_album(
+    bandcamp_id: str,
+    request: Request,
+) -> BandcampAlbumResponse:
+    """Look up the first album ID for a Bandcamp artist, with caching."""
+    cache_db = _get_cache_db(request.app.state.db_path)
+    try:
+        cached = cache_db.execute(
+            "SELECT album_id, album_title FROM bandcamp_album_cache WHERE bandcamp_id = ?",
+            (bandcamp_id,),
+        ).fetchone()
+        if cached:
+            return BandcampAlbumResponse(
+                bandcamp_id=bandcamp_id,
+                album_id=cached["album_id"],
+                album_title=cached["album_title"],
+                cached=True,
+            )
+
+        result = _fetch_bandcamp_album(bandcamp_id)
+        album_id = result[0] if result else None
+        album_title = result[1] if result else None
+
+        cache_db.execute(
+            "INSERT OR REPLACE INTO bandcamp_album_cache "
+            "(bandcamp_id, album_id, album_title, created_at) VALUES (?, ?, ?, ?)",
+            (bandcamp_id, album_id, album_title, datetime.now(UTC).isoformat()),
+        )
+        cache_db.commit()
+
+        return BandcampAlbumResponse(
+            bandcamp_id=bandcamp_id,
+            album_id=album_id,
+            album_title=album_title,
             cached=False,
         )
     finally:
