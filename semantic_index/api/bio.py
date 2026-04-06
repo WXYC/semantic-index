@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -18,6 +19,22 @@ from semantic_index.api.database import get_db
 from semantic_index.api.schemas import BandcampAlbumResponse, BioResponse
 
 logger = logging.getLogger(__name__)
+
+# Regex patterns for Discogs markup
+_DISCOGS_LINK = re.compile(r"\[([alr])=([^\]]*?)(?:\s*\(\d+\))?\]")
+_DISCOGS_URL = re.compile(r"\[url=[^\]]*\](.*?)\[/url\]", re.DOTALL)
+
+
+def strip_discogs_markup(text: str) -> str:
+    """Convert Discogs markup to plain text.
+
+    Handles ``[a=Artist Name]``, ``[a=Artist Name (3)]``,
+    ``[l=Label Name]``, ``[r=Release]``, and ``[url=...]text[/url]``.
+    """
+    text = _DISCOGS_URL.sub(r"\1", text)
+    text = _DISCOGS_LINK.sub(r"\2", text)
+    return text
+
 
 bio_router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -119,7 +136,7 @@ def _fetch_discogs_profile(discogs_artist_id: int) -> str | None:
                 "SELECT profile FROM artist WHERE id = %s", (discogs_artist_id,)
             ).fetchone()
             if row and row[0]:
-                result: str = row[0].strip()
+                result: str = strip_discogs_markup(row[0].strip())
                 return result
     except Exception:
         logger.warning(
