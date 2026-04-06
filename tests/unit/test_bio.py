@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.bio import _fetch_bio, _generated_summary
+from semantic_index.api.bio import _generated_summary
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ArtistStats
 
