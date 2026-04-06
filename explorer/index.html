@@ -90,6 +90,20 @@
   .sidebar-empty {
     padding: 20px; color: #555; font-size: 12px; text-align: center;
   }
+
+  .streaming-embeds { margin-top: 12px; }
+  .streaming-embeds iframe {
+    width: 100%; border: none; border-radius: 8px; margin-bottom: 8px;
+  }
+  .external-links {
+    margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .external-links a {
+    font-size: 11px; color: #6a9fb5; text-decoration: none;
+    padding: 3px 8px; border: 1px solid #333; border-radius: 3px;
+    transition: border-color 0.15s;
+  }
+  .external-links a:hover { border-color: #6a9fb5; }
 </style>
 </head>
 <body>
@@ -149,6 +163,8 @@
   <div class="sidebar-header">
     <span class="artist-name">Select an artist</span>
     <span class="artist-meta"></span>
+    <div class="streaming-embeds"></div>
+    <div class="external-links"></div>
   </div>
   <div class="sidebar-list">
     <div class="sidebar-empty">Search or click an artist to see relationships</div>
@@ -240,6 +256,66 @@ function linkWidth(weight) {
 let sidebarGeneration = 0;
 let activeCardId = null;
 
+function renderStreamingEmbeds(detail) {
+  const container = document.querySelector('.streaming-embeds');
+  container.innerHTML = '';
+  if (!detail) return;
+
+  if (detail.spotify_artist_id) {
+    const iframe = document.createElement('iframe');
+    iframe.src = `https://open.spotify.com/embed/artist/${detail.spotify_artist_id}?utm_source=generator&theme=0`;
+    iframe.height = '152';
+    iframe.allow = 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture';
+    iframe.loading = 'lazy';
+    container.appendChild(iframe);
+  }
+
+  if (detail.apple_music_artist_id) {
+    const iframe = document.createElement('iframe');
+    iframe.src = `https://embed.music.apple.com/us/artist/${detail.apple_music_artist_id}?theme=dark`;
+    iframe.height = '175';
+    iframe.allow = 'autoplay; encrypted-media; fullscreen';
+    iframe.setAttribute('sandbox', 'allow-forms allow-popups allow-same-origin allow-scripts allow-top-navigation-by-user-activation');
+    iframe.loading = 'lazy';
+    container.appendChild(iframe);
+  }
+
+  if (detail.bandcamp_id) {
+    const link = document.createElement('a');
+    link.href = `https://${detail.bandcamp_id}.bandcamp.com`;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Listen on Bandcamp';
+    link.style.cssText = 'display:inline-block;font-size:12px;color:#6a9fb5;padding:6px 12px;border:1px solid #333;border-radius:4px;text-decoration:none;margin-top:4px;';
+    container.appendChild(link);
+  }
+}
+
+function renderExternalLinks(detail) {
+  const container = document.querySelector('.external-links');
+  container.innerHTML = '';
+  if (!detail) return;
+
+  if (detail.discogs_artist_id) {
+    const a = document.createElement('a');
+    a.href = `https://www.discogs.com/artist/${detail.discogs_artist_id}`;
+    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Discogs';
+    container.appendChild(a);
+  }
+  if (detail.musicbrainz_artist_id) {
+    const a = document.createElement('a');
+    a.href = `https://musicbrainz.org/artist/${detail.musicbrainz_artist_id}`;
+    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'MusicBrainz';
+    container.appendChild(a);
+  }
+  if (detail.wikidata_qid) {
+    const a = document.createElement('a');
+    a.href = `https://www.wikidata.org/wiki/${detail.wikidata_qid}`;
+    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Wikidata';
+    container.appendChild(a);
+  }
+}
+
 function populateSidebar(centerArtist, neighbors) {
   sidebarGeneration++;
   const gen = sidebarGeneration;
@@ -248,6 +324,17 @@ function populateSidebar(centerArtist, neighbors) {
   header.querySelector('.artist-name').textContent = centerArtist.canonical_name;
   header.querySelector('.artist-meta').textContent =
     `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
+
+  // Clear embeds/links while loading
+  renderStreamingEmbeds(null);
+  renderExternalLinks(null);
+
+  // Fetch full artist detail for streaming IDs and external links
+  api(`/graph/artists/${centerArtist.id}`).then(detail => {
+    if (gen !== sidebarGeneration) return; // stale
+    renderStreamingEmbeds(detail);
+    renderExternalLinks(detail);
+  });
 
   const list = document.querySelector('.sidebar-list');
   list.innerHTML = '';

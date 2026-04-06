@@ -19,6 +19,7 @@ from semantic_index.models import (
     WikidataEntity,
     WikidataInfluence,
     WikidataLabelHierarchy,
+    WikidataStreamingIds,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,6 +322,60 @@ class WikidataClient:
             except Exception:
                 logger.warning(
                     "SPARQL lookup_labels_by_discogs_ids failed for batch starting at %d",
+                    batch_start,
+                    exc_info=True,
+                )
+
+        return result
+
+    def lookup_streaming_ids(self, qids: list[str]) -> dict[str, WikidataStreamingIds]:
+        """Look up streaming service IDs for Wikidata entities.
+
+        Queries P1902 (Spotify artist ID), P2850 (Apple Music artist ID),
+        and P3283 (Bandcamp profile ID) using OPTIONAL clauses so partial
+        results are returned. Only entities with at least one streaming ID
+        are included in the result.
+
+        Args:
+            qids: Wikidata QIDs to look up (e.g. ``["Q2774"]``).
+
+        Returns:
+            Dict mapping QID -> WikidataStreamingIds for entities with at
+            least one streaming ID.
+        """
+        valid_qids = self._validate_qids(qids)
+        if not valid_qids:
+            return {}
+
+        result: dict[str, WikidataStreamingIds] = {}
+        for batch_start in range(0, len(valid_qids), self._batch_size):
+            batch = valid_qids[batch_start : batch_start + self._batch_size]
+            values = " ".join(f"wd:{qid}" for qid in batch)
+            query = (
+                "SELECT ?item ?spotifyId ?appleMusicId ?bandcampId WHERE {\n"
+                f"  VALUES ?item {{ {values} }}\n"
+                "  OPTIONAL {{ ?item wdt:P1902 ?spotifyId . }}\n"
+                "  OPTIONAL {{ ?item wdt:P2850 ?appleMusicId . }}\n"
+                "  OPTIONAL {{ ?item wdt:P3283 ?bandcampId . }}\n"
+                "}"
+            )
+            try:
+                bindings = self._sparql_query(query)
+                for b in bindings:
+                    qid = _extract_qid(_binding_value(b, "item") or "")
+                    spotify = _binding_value(b, "spotifyId")
+                    apple_music = _binding_value(b, "appleMusicId")
+                    bandcamp = _binding_value(b, "bandcampId")
+                    if spotify or apple_music or bandcamp:
+                        result[qid] = WikidataStreamingIds(
+                            qid=qid,
+                            spotify_artist_id=spotify,
+                            apple_music_artist_id=apple_music,
+                            bandcamp_id=bandcamp,
+                        )
+            except Exception:
+                logger.warning(
+                    "SPARQL lookup_streaming_ids failed for batch starting at %d",
                     batch_start,
                     exc_info=True,
                 )

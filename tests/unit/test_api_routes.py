@@ -561,6 +561,14 @@ def _build_entity_store_fixture_db() -> str:
         "reconciled",  # type: ignore[index]
     )
 
+    # Set streaming IDs on Autechre's entity
+    store.update_entity_streaming_ids(
+        entity_ae.id,
+        spotify="5bMqBjPbCOWGgWJpbAqdQq",
+        apple_music="15821",
+        bandcamp="autechre",
+    )
+
     store.close()
     return path
 
@@ -620,6 +628,9 @@ class TestArtistDetail:
         assert data["musicbrainz_artist_id"] == "410c9baf-5469-44f6-9852-826524b80c61"
         assert data["wikidata_qid"] == "Q375855"
         assert data["reconciliation_status"] == "reconciled"
+        assert data["spotify_artist_id"] == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert data["apple_music_artist_id"] == "15821"
+        assert data["bandcamp_id"] == "autechre"
 
     @pytest.mark.asyncio
     async def test_artist_detail_no_entity(
@@ -636,6 +647,9 @@ class TestArtistDetail:
         assert data["musicbrainz_artist_id"] is None
         assert data["wikidata_qid"] is None
         assert data["reconciliation_status"] == "unreconciled"
+        assert data["spotify_artist_id"] is None
+        assert data["apple_music_artist_id"] is None
+        assert data["bandcamp_id"] is None
 
     @pytest.mark.asyncio
     async def test_artist_detail_404(self, entity_client: AsyncClient) -> None:
@@ -658,6 +672,9 @@ class TestArtistDetail:
         assert data["musicbrainz_artist_id"] is None
         assert data["wikidata_qid"] is None
         assert data["reconciliation_status"] == "unreconciled"
+        assert data["spotify_artist_id"] is None
+        assert data["apple_music_artist_id"] is None
+        assert data["bandcamp_id"] is None
 
 
 class TestEntityArtists:

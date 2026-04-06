@@ -159,6 +159,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Requires --entity-store-path with reconciled Wikidata QIDs.",
     )
     parser.add_argument(
+        "--fetch-streaming-ids",
+        action="store_true",
+        help="Fetch Spotify/Apple Music/Bandcamp IDs from Wikidata (P1902/P2850/P3283). "
+        "Requires --entity-store-path with reconciled Wikidata QIDs.",
+    )
+    parser.add_argument(
         "--facet-only",
         action="store_true",
         help="Only export facet tables (requires --cache-dir and an existing database). "
@@ -613,6 +619,16 @@ def run(args: argparse.Namespace) -> None:
                 dedup_report.entities_merged,
                 dedup_report.artists_reassigned,
             )
+
+        # 5g. Fetch streaming IDs from Wikidata (opt-in)
+        if args.fetch_streaming_ids:
+            log.info("Fetching streaming IDs from Wikidata (P1902/P2850/P3283)...")
+            streaming_wikidata = WikidataClient()
+            updated = reconciler.reconcile_streaming_ids(streaming_wikidata)
+            log.info("  Updated streaming IDs for %d entities", updated)
+
+    if args.fetch_streaming_ids and entity_store is None:
+        log.warning("--fetch-streaming-ids requires --entity-store-path")
 
     # 6. Extract adjacency pairs
     log.info("Extracting adjacency pairs...")

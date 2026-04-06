@@ -71,6 +71,9 @@ class ArtistDetail(BaseModel):
     musicbrainz_artist_id: str | None = None
     wikidata_qid: str | None = None
     reconciliation_status: str = "unreconciled"
+    spotify_artist_id: str | None = None
+    apple_music_artist_id: str | None = None
+    bandcamp_id: str | None = None
 
 
 class EntityArtists(BaseModel):

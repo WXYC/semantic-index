@@ -209,7 +209,8 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
             "  a.request_ratio, a.show_count, "
             "  a.entity_id, a.discogs_artist_id, a.musicbrainz_artist_id, "
             "  a.reconciliation_status, "
-            "  e.wikidata_qid "
+            "  e.wikidata_qid, "
+            "  e.spotify_artist_id, e.apple_music_artist_id, e.bandcamp_id "
             "FROM artist a "
             "LEFT JOIN entity e ON a.entity_id = e.id "
             "WHERE a.id = ?",
@@ -256,6 +257,9 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
         musicbrainz_artist_id=row["musicbrainz_artist_id"],
         wikidata_qid=row["wikidata_qid"],
         reconciliation_status=row["reconciliation_status"],
+        spotify_artist_id=row["spotify_artist_id"],
+        apple_music_artist_id=row["apple_music_artist_id"],
+        bandcamp_id=row["bandcamp_id"],
     )
 
 

@@ -262,6 +262,19 @@ class WikidataEntity(BaseModel):
     discogs_artist_id: int | None = None  # P1953
 
 
+class WikidataStreamingIds(BaseModel):
+    """Streaming service IDs from Wikidata for a single entity.
+
+    Fetched via SPARQL OPTIONAL queries for P1902 (Spotify artist ID),
+    P2850 (Apple Music artist ID), and P3283 (Bandcamp profile ID).
+    """
+
+    qid: str
+    spotify_artist_id: str | None = None  # P1902
+    apple_music_artist_id: str | None = None  # P2850
+    bandcamp_id: str | None = None  # P3283
+
+
 class WikidataInfluence(BaseModel):
     """An influence relationship (P737) between two Wikidata entities.
 
