@@ -74,9 +74,14 @@
   .sidebar-card .neighbor-name {
     font-size: 13px; font-weight: 600; color: #e0e0e0;
   }
+  .sidebar-card .navigate-link {
+    font-size: 14px; color: #555; cursor: pointer; text-decoration: none;
+    padding: 0 2px; transition: color 0.15s;
+  }
+  .sidebar-card .navigate-link:hover { color: #6a9fb5; }
   .sidebar-card .weight-badge {
     font-size: 10px; color: #6a9fb5; background: rgba(106,159,181,0.15);
-    padding: 1px 6px; border-radius: 3px; white-space: nowrap;
+    padding: 1px 6px; border-radius: 3px; white-space: nowrap; margin-left: auto;
   }
   .sidebar-card .neighbor-meta {
     font-size: 11px; color: #666; margin-bottom: 6px;
@@ -91,12 +96,26 @@
     padding: 20px; color: #555; font-size: 12px; text-align: center;
   }
 
-  .streaming-embeds { margin-top: 12px; }
+  .streaming-embeds { padding: 12px 20px 0; }
   .streaming-embeds iframe {
     width: 100%; border: none; border-radius: 8px; margin-bottom: 8px;
   }
+  .artist-bio {
+    font-size: 12px; line-height: 1.5; color: #aaa; padding: 8px 20px 0;
+    white-space: pre-line;
+  }
+  .artist-bio.clamped {
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .bio-toggle {
+    font-size: 11px; color: #6a9fb5; cursor: pointer;
+    background: none; border: none; padding: 4px 20px;
+    font-family: inherit;
+  }
+  .bio-toggle:hover { text-decoration: underline; }
   .external-links {
-    margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;
+    padding: 10px 20px; display: flex; gap: 10px; flex-wrap: wrap;
   }
   .external-links a {
     font-size: 11px; color: #6a9fb5; text-decoration: none;
@@ -163,10 +182,12 @@
   <div class="sidebar-header">
     <span class="artist-name">Select an artist</span>
     <span class="artist-meta"></span>
-    <div class="streaming-embeds"></div>
-    <div class="external-links"></div>
+    <p class="artist-bio clamped" style="display:none"></p>
+    <button class="bio-toggle" style="display:none"></button>
   </div>
   <div class="sidebar-list">
+    <div class="streaming-embeds"></div>
+    <div class="external-links"></div>
     <div class="sidebar-empty">Search or click an artist to see relationships</div>
   </div>
 </div>
@@ -270,25 +291,6 @@ function renderStreamingEmbeds(detail) {
     container.appendChild(iframe);
   }
 
-  if (detail.apple_music_artist_id) {
-    const iframe = document.createElement('iframe');
-    iframe.src = `https://embed.music.apple.com/us/artist/${detail.apple_music_artist_id}?theme=dark`;
-    iframe.height = '175';
-    iframe.allow = 'autoplay; encrypted-media; fullscreen';
-    iframe.setAttribute('sandbox', 'allow-forms allow-popups allow-same-origin allow-scripts allow-top-navigation-by-user-activation');
-    iframe.loading = 'lazy';
-    container.appendChild(iframe);
-  }
-
-  if (detail.bandcamp_id) {
-    const link = document.createElement('a');
-    link.href = `https://${detail.bandcamp_id}.bandcamp.com`;
-    link.target = '_blank';
-    link.rel = 'noopener';
-    link.textContent = 'Listen on Bandcamp';
-    link.style.cssText = 'display:inline-block;font-size:12px;color:#6a9fb5;padding:6px 12px;border:1px solid #333;border-radius:4px;text-decoration:none;margin-top:4px;';
-    container.appendChild(link);
-  }
 }
 
 function renderExternalLinks(detail) {
@@ -296,6 +298,18 @@ function renderExternalLinks(detail) {
   container.innerHTML = '';
   if (!detail) return;
 
+  if (detail.apple_music_artist_id) {
+    const a = document.createElement('a');
+    a.href = `https://music.apple.com/us/artist/${detail.apple_music_artist_id}`;
+    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Apple Music';
+    container.appendChild(a);
+  }
+  if (detail.bandcamp_id) {
+    const a = document.createElement('a');
+    a.href = `https://${detail.bandcamp_id}.bandcamp.com`;
+    a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Bandcamp';
+    container.appendChild(a);
+  }
   if (detail.discogs_artist_id) {
     const a = document.createElement('a');
     a.href = `https://www.discogs.com/artist/${detail.discogs_artist_id}`;
@@ -325,9 +339,25 @@ function populateSidebar(centerArtist, neighbors) {
   header.querySelector('.artist-meta').textContent =
     `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
 
-  // Clear embeds/links while loading
-  renderStreamingEmbeds(null);
-  renderExternalLinks(null);
+  const list = document.querySelector('.sidebar-list');
+  list.innerHTML = '';
+  activeCardId = null;
+
+  // Re-create embed/link containers at the top of the scrollable list
+  const embedsContainer = document.createElement('div');
+  embedsContainer.className = 'streaming-embeds';
+  list.appendChild(embedsContainer);
+
+  const extLinksContainer = document.createElement('div');
+  extLinksContainer.className = 'external-links';
+  list.appendChild(extLinksContainer);
+
+  // Clear bio while loading
+  const bioEl = document.querySelector('.artist-bio');
+  const bioToggle = document.querySelector('.bio-toggle');
+  bioEl.textContent = '';
+  bioEl.style.display = 'none';
+  bioToggle.style.display = 'none';
 
   // Fetch full artist detail for streaming IDs and external links
   api(`/graph/artists/${centerArtist.id}`).then(detail => {
@@ -336,12 +366,32 @@ function populateSidebar(centerArtist, neighbors) {
     renderExternalLinks(detail);
   });
 
-  const list = document.querySelector('.sidebar-list');
-  list.innerHTML = '';
-  activeCardId = null;
+  // Fetch bio
+  api(`/graph/artists/${centerArtist.id}/bio`).then(data => {
+    if (gen !== sidebarGeneration) return;
+    if (!data || !data.bio) return;
+
+    bioEl.textContent = data.bio;
+    bioEl.classList.add('clamped');
+    bioEl.style.display = 'block';
+
+    // Check if text overflows 3 lines
+    requestAnimationFrame(() => {
+      if (bioEl.scrollHeight > bioEl.clientHeight) {
+        bioToggle.textContent = 'Show more';
+        bioToggle.style.display = 'block';
+        bioToggle.onclick = () => {
+          const clamped = bioEl.classList.toggle('clamped');
+          bioToggle.textContent = clamped ? 'Show more' : 'Show less';
+        };
+      } else {
+        bioToggle.style.display = 'none';
+      }
+    });
+  });
 
   if (!neighbors || neighbors.length === 0) {
-    list.innerHTML = '<div class="sidebar-empty">No neighbors found</div>';
+    list.appendChild(Object.assign(document.createElement('div'), { className: 'sidebar-empty', textContent: 'No neighbors found' }));
     return;
   }
 
@@ -368,13 +418,22 @@ function populateSidebar(centerArtist, neighbors) {
     card.innerHTML = `
       <div class="card-header">
         <span class="neighbor-name">${escapeHtml(n.artist.canonical_name)}</span>
+        <a class="navigate-link" title="Go to ${escapeHtml(n.artist.canonical_name)}">&rarr;</a>
         <span class="weight-badge">${weightDisplay}</span>
       </div>
       <div class="neighbor-meta">${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays</div>
       <div class="narrative loading">Loading...</div>
     `;
 
-    // Click card: highlight edge and navigate
+    // Click navigate arrow: load this artist's neighborhood
+    card.querySelector('.navigate-link').addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearGraph();
+      searchInput.value = n.artist.canonical_name;
+      loadNeighborhood(n.artist.id, n.artist.canonical_name, parseInt(document.getElementById('depth').value));
+    });
+
+    // Click card: highlight edge
     card.addEventListener('click', () => {
       highlightEdge(centerArtist.id, n.artist.id);
       setActiveCard(card);

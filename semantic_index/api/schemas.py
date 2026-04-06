@@ -94,6 +94,15 @@ class NarrativeResponse(BaseModel):
     cached: bool
 
 
+class BioResponse(BaseModel):
+    """Response for GET /graph/artists/{id}/bio."""
+
+    artist_id: int
+    bio: str
+    source: str  # 'wikipedia', 'discogs', 'wikidata', 'generated'
+    cached: bool
+
+
 class DjSummary(BaseModel):
     """Minimal DJ representation for facet dropdowns."""
 
