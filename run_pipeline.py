@@ -530,13 +530,56 @@ def run(args: argparse.Namespace) -> None:
             except Exception:
                 log.warning("Wikidata QID assignment failed", exc_info=True)
 
-        # 5e3. MusicBrainz reconciliation via musicbrainz-cache
+        # 5e3a. MusicBrainz ID bridge via Wikidata (Discogs ID → QID → P434)
+        if args.wikidata_cache_dsn:
+            log.info("Assigning MusicBrainz IDs from wikidata-cache via QID bridge...")
+            try:
+                import psycopg as _pg2
+
+                wk_conn = _pg2.connect(args.wikidata_cache_dsn, autocommit=True)
+                # Get artists with Discogs IDs but no MusicBrainz ID
+                need_mb = entity_store._conn.execute(
+                    "SELECT a.id, a.discogs_artist_id FROM artist a "
+                    "WHERE a.discogs_artist_id IS NOT NULL "
+                    "AND a.musicbrainz_artist_id IS NULL"
+                ).fetchall()
+                if need_mb:
+                    discogs_ids = [str(row[1]) for row in need_mb]
+                    artist_id_by_discogs = {str(row[1]): row[0] for row in need_mb}
+                    # Join: Discogs ID → QID via P1953, then QID → MB ID via P434
+                    wk_rows = wk_conn.execute(
+                        "SELECT d.discogs_id, m.discogs_id AS mb_id "
+                        "FROM discogs_mapping d "
+                        "JOIN discogs_mapping m ON d.qid = m.qid AND m.property = 'P434' "
+                        "WHERE d.property = 'P1953' AND d.discogs_id = ANY(%s)",
+                        (discogs_ids,),
+                    ).fetchall()
+                    mb_bridged = 0
+                    for discogs_id_str, mb_uuid in wk_rows:
+                        artist_id = artist_id_by_discogs.get(discogs_id_str)
+                        if artist_id is not None:
+                            entity_store._conn.execute(
+                                "UPDATE artist SET musicbrainz_artist_id = ? "
+                                "WHERE id = ? AND musicbrainz_artist_id IS NULL",
+                                (mb_uuid, artist_id),
+                            )
+                            mb_bridged += 1
+                    entity_store._conn.commit()
+                    log.info(
+                        "  MusicBrainz via Wikidata bridge: %d/%d artists",
+                        mb_bridged,
+                        len(need_mb),
+                    )
+                wk_conn.close()
+            except Exception:
+                log.warning("MusicBrainz Wikidata bridge failed", exc_info=True)
+
+        # 5e3b. MusicBrainz name matching for remaining unmatched artists
         if args.musicbrainz_cache_dsn:
             from semantic_index.musicbrainz_client import MusicBrainzClient
 
-            log.info("Running MusicBrainz reconciliation...")
+            log.info("Running MusicBrainz name matching for remaining artists...")
             mb_client = MusicBrainzClient(cache_dsn=args.musicbrainz_cache_dsn)
-            # Get all artists without a MusicBrainz ID
             unmatched = entity_store._conn.execute(
                 "SELECT id, canonical_name FROM artist WHERE musicbrainz_artist_id IS NULL"
             ).fetchall()
@@ -555,7 +598,11 @@ def run(args: argparse.Namespace) -> None:
                         )
                         mb_matched += 1
                 entity_store._conn.commit()
-                log.info("  MusicBrainz: %d/%d artists matched", mb_matched, len(unmatched))
+                log.info(
+                    "  MusicBrainz name matching: %d/%d remaining artists matched",
+                    mb_matched,
+                    len(unmatched),
+                )
 
         # 5f. Entity deduplication by shared QID (runs after all reconciliation)
         dedup_report = entity_store.deduplicate_by_qid()
