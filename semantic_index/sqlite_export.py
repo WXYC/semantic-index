@@ -473,12 +473,17 @@ def _insert_enrichments(
     name_to_id: dict[str, int],
 ) -> None:
     """Insert per-artist enrichment data (styles, personnel, labels)."""
+    # Enrichment keys may be lowercased (from Discogs summary tables) while
+    # name_to_id uses the original-case canonical names.  Build a lowercase
+    # lookup so both cases resolve to the correct artist ID.
+    lower_to_id = {k.lower(): v for k, v in name_to_id.items()}
+
     style_rows = []
     personnel_rows = []
     label_rows = []
 
     for name, enrich in enrichments.items():
-        artist_id = name_to_id.get(name)
+        artist_id = name_to_id.get(name) or lower_to_id.get(name.lower())
         if artist_id is None:
             continue
 
