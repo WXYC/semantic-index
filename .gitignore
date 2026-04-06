@@ -33,3 +33,4 @@ orchestrator/statuses/
 orchestrator/package-lock.json
 
 coverage.json
+.cache/
