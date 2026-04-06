@@ -90,22 +90,24 @@ class MusicBrainzClient:
 
         try:
             lower_names = [n.lower() for n in names]
-            rows = conn.execute(
-                "SELECT lower(q.name) AS query_name, a.id, a.name "
-                "FROM unnest(%s::text[]) AS q(name) "
-                "JOIN mb_artist a ON lower(a.name) = lower(q.name) "
-                "UNION "
-                "SELECT lower(q.name) AS query_name, a.id, a.name "
-                "FROM unnest(%s::text[]) AS q(name) "
-                "JOIN mb_artist_alias aa ON lower(aa.name) = lower(q.name) "
-                "JOIN mb_artist a ON a.id = aa.artist",
-                (lower_names, lower_names),
-            ).fetchall()
-
             result: dict[str, tuple[int, str]] = {}
-            for query_name, mb_id, mb_name in rows:
-                if query_name not in result:
-                    result[query_name] = (mb_id, mb_name)
+            batch_size = 5000
+            for i in range(0, len(lower_names), batch_size):
+                batch = lower_names[i : i + batch_size]
+                rows = conn.execute(
+                    "SELECT lower(q.name) AS query_name, a.id, a.name "
+                    "FROM unnest(%s::text[]) AS q(name) "
+                    "JOIN mb_artist a ON lower(a.name) = lower(q.name) "
+                    "UNION "
+                    "SELECT lower(q.name) AS query_name, a.id, a.name "
+                    "FROM unnest(%s::text[]) AS q(name) "
+                    "JOIN mb_artist_alias aa ON lower(aa.name) = lower(q.name) "
+                    "JOIN mb_artist a ON a.id = aa.artist",
+                    (batch, batch),
+                ).fetchall()
+                for query_name, mb_id, mb_name in rows:
+                    if query_name not in result:
+                        result[query_name] = (mb_id, mb_name)
             return result
         except Exception:
             logger.warning("MusicBrainz batch lookup failed", exc_info=True)

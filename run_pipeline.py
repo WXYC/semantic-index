@@ -488,19 +488,36 @@ def run(args: argparse.Namespace) -> None:
                         (discogs_ids,),
                     ).fetchall()
                     qid_assigned = 0
+                    now = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
                     for discogs_id_str, qid in wk_rows:
                         match = artist_by_discogs.get(discogs_id_str)
                         if match is None:
                             continue
-                        _artist_id, entity_id = match
+                        artist_id, entity_id = match
                         if entity_id is not None:
                             entity_store._conn.execute(
                                 "UPDATE entity SET wikidata_qid = ?, "
-                                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                                f"updated_at = {now} "
                                 "WHERE id = ? AND wikidata_qid IS NULL",
                                 (qid, entity_id),
                             )
-                            qid_assigned += 1
+                        else:
+                            # Create entity with QID and link to artist
+                            artist_name = entity_store._conn.execute(
+                                "SELECT canonical_name FROM artist WHERE id = ?",
+                                (artist_id,),
+                            ).fetchone()[0]
+                            cur = entity_store._conn.execute(
+                                "INSERT INTO entity (name, entity_type, wikidata_qid, "
+                                f"created_at, updated_at) VALUES (?, 'artist', ?, {now}, {now})",
+                                (artist_name, qid),
+                            )
+                            new_entity_id = cur.lastrowid
+                            entity_store._conn.execute(
+                                "UPDATE artist SET entity_id = ? WHERE id = ?",
+                                (new_entity_id, artist_id),
+                            )
+                        qid_assigned += 1
                     entity_store._conn.commit()
                     log.info(
                         "  %d/%d artists assigned Wikidata QIDs via Discogs ID bridge",
