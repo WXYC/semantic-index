@@ -11,7 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.bio import _generated_summary
+from semantic_index.api.bio import _generated_summary, strip_discogs_markup
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ArtistStats
 
@@ -74,6 +74,39 @@ async def bio_client(bio_db_path: str) -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
+
+
+class TestStripDiscogsMarkup:
+    def test_artist_link(self):
+        assert strip_discogs_markup("[a=Rob Brown (3)]") == "Rob Brown"
+
+    def test_artist_link_no_disambiguation(self):
+        assert strip_discogs_markup("[a=Sean Booth]") == "Sean Booth"
+
+    def test_label_link(self):
+        assert strip_discogs_markup("[l=Warp Records]") == "Warp Records"
+
+    def test_release_link(self):
+        assert strip_discogs_markup("[r=Confield]") == "Confield"
+
+    def test_url_link(self):
+        assert strip_discogs_markup("[url=http://example.com]Example[/url]") == "Example"
+
+    def test_full_bio(self):
+        bio = (
+            "An English electronic music duo formed in 1987 in Rochdale, "
+            "Greater Manchester, UK by [a=Rob Brown (3)] and [a=Sean Booth]. "
+            "They are also heavily involved with the [a=Gescom] collective."
+        )
+        result = strip_discogs_markup(bio)
+        assert "[" not in result
+        assert "Rob Brown" in result
+        assert "Sean Booth" in result
+        assert "Gescom" in result
+
+    def test_plain_text_unchanged(self):
+        text = "Just a plain bio with no markup."
+        assert strip_discogs_markup(text) == text
 
 
 class TestGeneratedSummary:
