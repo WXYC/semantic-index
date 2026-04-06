@@ -103,6 +103,15 @@ class BioResponse(BaseModel):
     cached: bool
 
 
+class BandcampAlbumResponse(BaseModel):
+    """Response for GET /graph/bandcamp/{slug}/album."""
+
+    bandcamp_id: str
+    album_id: str | None = None
+    album_title: str | None = None
+    cached: bool
+
+
 class DjSummary(BaseModel):
     """Minimal DJ representation for facet dropdowns."""
 

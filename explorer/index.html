@@ -98,7 +98,8 @@
 
   .streaming-embeds { padding: 12px 20px 0; }
   .streaming-embeds iframe {
-    width: 100%; border: none; border-radius: 8px; margin-bottom: 8px;
+    width: 100% !important; max-width: 100%; border: none; border-radius: 8px; margin-bottom: 8px;
+    display: block;
   }
   .artist-bio {
     font-size: 12px; line-height: 1.5; color: #aaa; padding: 8px 20px 0;
@@ -282,6 +283,30 @@ function renderStreamingEmbeds(detail) {
   container.innerHTML = '';
   if (!detail) return;
 
+  // Priority: Bandcamp embed > Spotify embed > Apple Music embed
+  // Only show one player.
+
+  if (detail.bandcamp_id) {
+    // Try Bandcamp embed first (needs album ID from server)
+    api(`/graph/bandcamp/${detail.bandcamp_id}/album`).then(data => {
+      if (data && data.album_id) {
+        const iframe = document.createElement('iframe');
+        iframe.src = `https://bandcamp.com/EmbeddedPlayer/album=${data.album_id}/size=large/bgcol=0a0a0a/linkcol=6a9fb5/tracklist=false/artwork=small/transparent=true/`;
+        iframe.height = '120';
+        iframe.loading = 'lazy';
+        container.appendChild(iframe);
+      } else {
+        // Bandcamp album not found, fall back to Spotify or Apple Music
+        appendFallbackPlayer(container, detail);
+      }
+    }).catch(() => appendFallbackPlayer(container, detail));
+    return;
+  }
+
+  appendFallbackPlayer(container, detail);
+}
+
+function appendFallbackPlayer(container, detail) {
   if (detail.spotify_artist_id) {
     const iframe = document.createElement('iframe');
     iframe.src = `https://open.spotify.com/embed/artist/${detail.spotify_artist_id}?utm_source=generator&theme=0`;
@@ -289,10 +314,10 @@ function renderStreamingEmbeds(detail) {
     iframe.allow = 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture';
     iframe.loading = 'lazy';
     container.appendChild(iframe);
+    return;
   }
 
   if (detail.apple_music_artist_id) {
-    // Fetch top album from iTunes Search API (free, CORS-enabled)
     fetch(`https://itunes.apple.com/lookup?id=${detail.apple_music_artist_id}&entity=album&limit=1`)
       .then(r => r.json())
       .then(data => {
@@ -306,9 +331,8 @@ function renderStreamingEmbeds(detail) {
           container.appendChild(iframe);
         }
       })
-      .catch(() => {}); // silently fail
+      .catch(() => {});
   }
-
 }
 
 function renderExternalLinks(detail) {
