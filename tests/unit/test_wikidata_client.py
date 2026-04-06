@@ -702,32 +702,18 @@ class TestCacheFirstLookupByDiscogsIds:
         # SPARQL should not have been called
         http_mock.assert_not_called()
 
-    def test_cache_miss_falls_back_to_sparql(self):
-        """IDs not in the cache are looked up via SPARQL."""
+    def test_cache_miss_returns_empty_when_cache_connected(self):
+        """IDs not in the cache return empty — cache is authoritative."""
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = []
 
-        sparql_resp = MagicMock()
-        sparql_resp.json.return_value = _sparql_response(
-            [
-                {
-                    "item": _uri("Q334652"),
-                    "itemLabel": _literal("Stereolab"),
-                    "discogsId": _literal("388"),
-                },
-            ]
-        )
-        sparql_resp.status_code = 200
-        mock_http = MagicMock()
-        mock_http.get.return_value = sparql_resp
-
         client = _make_cache_client(mock_conn)
 
-        with patch("httpx.Client", return_value=mock_http):
+        with patch("httpx.Client") as http_mock:
             result = client.lookup_by_discogs_ids([388])
 
-        assert 388 in result
-        assert result[388].qid == "Q334652"
+        assert result == {}
+        http_mock.assert_not_called()
 
     def test_no_cache_dsn_uses_sparql_only(self):
         """Without cache_dsn, behaves exactly as before (SPARQL only)."""
