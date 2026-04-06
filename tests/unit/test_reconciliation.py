@@ -952,7 +952,9 @@ class TestReconcileStreamingIds:
     def test_skips_entities_already_with_ids(self, store: EntityStore):
         """Entities that already have streaming IDs are not re-queried."""
         entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
-        store.update_entity_streaming_ids(entity.id, spotify="existing", apple_music=None, bandcamp=None)
+        store.update_entity_streaming_ids(
+            entity.id, spotify="existing", apple_music=None, bandcamp=None
+        )
 
         wikidata = MagicMock(spec=WikidataClient)
         reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
