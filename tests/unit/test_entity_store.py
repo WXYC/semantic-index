@@ -88,9 +88,15 @@ class TestFreshDatabase:
         conn = sqlite3.connect(db_path)
         columns = _get_column_names(conn, "entity")
         assert columns == {
-            "id", "wikidata_qid", "name", "entity_type",
-            "spotify_artist_id", "apple_music_artist_id", "bandcamp_id",
-            "created_at", "updated_at",
+            "id",
+            "wikidata_qid",
+            "name",
+            "entity_type",
+            "spotify_artist_id",
+            "apple_music_artist_id",
+            "bandcamp_id",
+            "created_at",
+            "updated_at",
         }
         conn.close()
         store.close()
@@ -474,7 +480,9 @@ class TestEntityStreamingIds:
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )"""
         )
-        conn.execute("INSERT INTO entity (name, entity_type, wikidata_qid) VALUES ('Autechre', 'artist', 'Q2774')")
+        conn.execute(
+            "INSERT INTO entity (name, entity_type, wikidata_qid) VALUES ('Autechre', 'artist', 'Q2774')"
+        )
         conn.commit()
         conn.close()
 
@@ -486,7 +494,9 @@ class TestEntityStreamingIds:
         assert "bandcamp_id" in columns
 
         # Existing data preserved
-        row = store._conn.execute("SELECT name, wikidata_qid FROM entity WHERE name = 'Autechre'").fetchone()
+        row = store._conn.execute(
+            "SELECT name, wikidata_qid FROM entity WHERE name = 'Autechre'"
+        ).fetchone()
         assert row[0] == "Autechre"
         assert row[1] == "Q2774"
         store.close()
@@ -531,9 +541,13 @@ class TestEntityStreamingIds:
         entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
 
         # First update: set spotify
-        store.update_entity_streaming_ids(entity.id, spotify="abc123", apple_music=None, bandcamp=None)
+        store.update_entity_streaming_ids(
+            entity.id, spotify="abc123", apple_music=None, bandcamp=None
+        )
         # Second update: set bandcamp but pass None for spotify
-        store.update_entity_streaming_ids(entity.id, spotify=None, apple_music=None, bandcamp="autechre")
+        store.update_entity_streaming_ids(
+            entity.id, spotify=None, apple_music=None, bandcamp="autechre"
+        )
 
         row = store._conn.execute(
             "SELECT spotify_artist_id, bandcamp_id FROM entity WHERE id = ?",
