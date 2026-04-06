@@ -13,6 +13,7 @@ import re
 import time
 
 import httpx
+import psycopg
 
 from semantic_index.models import (
     WikidataEntity,
@@ -103,12 +104,27 @@ class WikidataClient:
         api_endpoint: str | None = None,
         user_agent: str | None = None,
         batch_size: int = 50,
+        cache_dsn: str | None = None,
     ) -> None:
         self._sparql_endpoint = sparql_endpoint or self._DEFAULT_SPARQL_ENDPOINT
         self._api_endpoint = api_endpoint or self._DEFAULT_API_ENDPOINT
         self._user_agent = user_agent or self._DEFAULT_USER_AGENT
         self._batch_size = batch_size
         self._last_request: float = 0
+        self._cache_dsn = cache_dsn
+        self._cache_conn: psycopg.Connection | None = None
+
+    def _get_cache_conn(self) -> psycopg.Connection | None:
+        """Get or create the wikidata-cache PostgreSQL connection."""
+        if self._cache_dsn is None:
+            return None
+        if self._cache_conn is None or self._cache_conn.closed:
+            try:
+                self._cache_conn = psycopg.connect(self._cache_dsn, autocommit=True)
+            except Exception:
+                logger.warning("Failed to connect to wikidata-cache", exc_info=True)
+                return None
+        return self._cache_conn
 
     def _rate_limit(self) -> None:
         """Sleep to respect Wikidata's rate limit (~1 req/s)."""
@@ -181,8 +197,8 @@ class WikidataClient:
     def lookup_by_discogs_ids(self, discogs_ids: list[int]) -> dict[int, WikidataEntity]:
         """Look up Wikidata entities by Discogs artist ID (P1953).
 
-        Batches the lookup into chunks of ``batch_size`` to avoid SPARQL
-        query timeouts on large input sets.
+        Cache-first: queries the wikidata-cache PostgreSQL if available,
+        then falls back to SPARQL for any IDs not found in the cache.
 
         Args:
             discogs_ids: Discogs artist IDs to look up.
@@ -194,8 +210,49 @@ class WikidataClient:
             return {}
 
         result: dict[int, WikidataEntity] = {}
-        for batch_start in range(0, len(discogs_ids), self._batch_size):
-            batch = discogs_ids[batch_start : batch_start + self._batch_size]
+        remaining_ids = list(discogs_ids)
+
+        # Try cache first
+        conn = self._get_cache_conn()
+        if conn is not None:
+            try:
+                str_ids = [str(did) for did in discogs_ids]
+                rows = conn.execute(
+                    "SELECT e.qid, e.label, e.description, dm.discogs_id "
+                    "FROM discogs_mapping dm "
+                    "JOIN entity e ON dm.qid = e.qid "
+                    "WHERE dm.property = 'P1953' AND dm.discogs_id = ANY(%s)",
+                    (str_ids,),
+                ).fetchall()
+                for qid, label, description, discogs_id_str in rows:
+                    try:
+                        did = int(discogs_id_str)
+                    except (ValueError, TypeError):
+                        continue
+                    result[did] = WikidataEntity(
+                        qid=qid,
+                        name=label or qid,
+                        description=description,
+                        discogs_artist_id=did,
+                    )
+                remaining_ids = [did for did in discogs_ids if did not in result]
+                if remaining_ids:
+                    logger.debug(
+                        "Wikidata cache: %d/%d found, %d remaining for SPARQL",
+                        len(result),
+                        len(discogs_ids),
+                        len(remaining_ids),
+                    )
+            except Exception:
+                logger.warning("Wikidata cache lookup failed", exc_info=True)
+                remaining_ids = list(discogs_ids)
+
+        if not remaining_ids:
+            return result
+
+        # SPARQL fallback for cache misses
+        for batch_start in range(0, len(remaining_ids), self._batch_size):
+            batch = remaining_ids[batch_start : batch_start + self._batch_size]
             values = " ".join(f'"{did}"' for did in batch)
             query = (
                 "SELECT ?item ?itemLabel ?discogsId WHERE {\n"
@@ -284,7 +341,8 @@ class WikidataClient:
     def get_influences(self, qids: list[str]) -> list[WikidataInfluence]:
         """Get influence relationships (P737) for given Wikidata entities.
 
-        Returns edges where "source is influenced by target".
+        Cache-first: queries the wikidata-cache PostgreSQL if available,
+        then falls back to SPARQL for any QIDs not found in the cache.
 
         Args:
             qids: Wikidata QIDs to query for influences (e.g. ``["Q2774"]``).
@@ -297,8 +355,41 @@ class WikidataClient:
             return []
 
         result: list[WikidataInfluence] = []
-        for batch_start in range(0, len(valid_qids), self._batch_size):
-            batch = valid_qids[batch_start : batch_start + self._batch_size]
+        remaining_qids = list(valid_qids)
+
+        # Try cache first
+        conn = self._get_cache_conn()
+        if conn is not None:
+            try:
+                rows = conn.execute(
+                    "SELECT i.source_qid, i.target_qid, COALESCE(e.label, i.target_qid) "
+                    "FROM influence i "
+                    "LEFT JOIN entity e ON i.target_qid = e.qid "
+                    "WHERE i.source_qid = ANY(%s)",
+                    (valid_qids,),
+                ).fetchall()
+                cached_sources: set[str] = set()
+                for source_qid, target_qid, target_name in rows:
+                    result.append(
+                        WikidataInfluence(
+                            source_qid=source_qid,
+                            target_qid=target_qid,
+                            target_name=target_name,
+                        )
+                    )
+                    cached_sources.add(source_qid)
+                # Only query SPARQL for QIDs that had zero cache results
+                remaining_qids = [q for q in valid_qids if q not in cached_sources]
+            except Exception:
+                logger.warning("Wikidata cache get_influences failed", exc_info=True)
+                remaining_qids = list(valid_qids)
+
+        if not remaining_qids:
+            return result
+
+        # SPARQL fallback
+        for batch_start in range(0, len(remaining_qids), self._batch_size):
+            batch = remaining_qids[batch_start : batch_start + self._batch_size]
             values = " ".join(f"wd:{qid}" for qid in batch)
             query = (
                 "SELECT ?source ?target ?targetLabel WHERE {\n"
