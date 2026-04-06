@@ -670,3 +670,113 @@ class TestSearchMusicianByName:
         """Verify the filter constants are available for inspection."""
         assert "Q639669" in MUSICIAN_OCCUPATIONS  # musician
         assert "Q215380" in MUSICAL_GROUP_TYPES  # musical group/band
+
+
+def _make_cache_client(mock_conn: MagicMock) -> WikidataClient:
+    """Create a WikidataClient with a mocked cache connection."""
+    mock_conn.closed = False
+    client = WikidataClient()
+    client._cache_dsn = "mock"
+    client._cache_conn = mock_conn
+    return client
+
+
+class TestCacheFirstLookupByDiscogsIds:
+    """Tests for cache-first Discogs artist ID lookups."""
+
+    def test_cache_hit_skips_sparql(self):
+        """When the cache has the answer, SPARQL is never called."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            ("Q247237", "Autechre", "British electronic music duo", "41"),
+        ]
+
+        client = _make_cache_client(mock_conn)
+
+        with patch("httpx.Client") as http_mock:
+            result = client.lookup_by_discogs_ids([41])
+
+        assert 41 in result
+        assert result[41].qid == "Q247237"
+        assert result[41].name == "Autechre"
+        # SPARQL should not have been called
+        http_mock.assert_not_called()
+
+    def test_cache_miss_falls_back_to_sparql(self):
+        """IDs not in the cache are looked up via SPARQL."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        sparql_resp = MagicMock()
+        sparql_resp.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q334652"),
+                    "itemLabel": _literal("Stereolab"),
+                    "discogsId": _literal("388"),
+                },
+            ]
+        )
+        sparql_resp.status_code = 200
+        mock_http = MagicMock()
+        mock_http.get.return_value = sparql_resp
+
+        client = _make_cache_client(mock_conn)
+
+        with patch("httpx.Client", return_value=mock_http):
+            result = client.lookup_by_discogs_ids([388])
+
+        assert 388 in result
+        assert result[388].qid == "Q334652"
+
+    def test_no_cache_dsn_uses_sparql_only(self):
+        """Without cache_dsn, behaves exactly as before (SPARQL only)."""
+        sparql_resp = MagicMock()
+        sparql_resp.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q247237"),
+                    "itemLabel": _literal("Autechre"),
+                    "discogsId": _literal("41"),
+                },
+            ]
+        )
+        sparql_resp.status_code = 200
+        mock_http = MagicMock()
+        mock_http.get.return_value = sparql_resp
+
+        with patch("httpx.Client", return_value=mock_http):
+            client = WikidataClient()  # no cache_dsn
+            result = client.lookup_by_discogs_ids([41])
+
+        assert 41 in result
+        assert result[41].qid == "Q247237"
+
+
+class TestCacheFirstGetInfluences:
+    """Tests for cache-first influence lookups."""
+
+    def test_cache_hit_returns_influences(self):
+        """Influences from the cache are returned without SPARQL."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            ("Q247237", "Q49835", "Kraftwerk"),
+            ("Q247237", "Q192540", "Aphex Twin"),
+        ]
+
+        client = _make_cache_client(mock_conn)
+
+        with patch("httpx.Client") as http_mock:
+            result = client.get_influences(["Q247237"])
+
+        assert len(result) == 2
+        assert result[0].source_qid == "Q247237"
+        assert result[0].target_qid == "Q49835"
+        assert result[0].target_name == "Kraftwerk"
+        http_mock.assert_not_called()
+
+    def test_empty_qids_returns_empty(self):
+        """Empty input returns empty without any queries."""
+        client = WikidataClient()
+        result = client.get_influences([])
+        assert result == []

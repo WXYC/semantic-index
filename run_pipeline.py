@@ -84,6 +84,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="https://library-metadata-lookup-staging.up.railway.app",
         help="Base URL for library-metadata-lookup API",
     )
+    parser.add_argument(
+        "--wikidata-cache-dsn",
+        default=os.environ.get("DATABASE_URL_WIKIDATA"),
+        help="PostgreSQL DSN for wikidata-cache (default: DATABASE_URL_WIKIDATA env var)",
+    )
     parser.add_argument("--skip-enrichment", action="store_true", help="Skip Discogs enrichment")
     parser.add_argument(
         "--min-jaccard", type=float, default=0.1, help="Minimum Jaccard for shared style edges"
@@ -443,7 +448,7 @@ def run(args: argparse.Namespace) -> None:
         # 5e. Wikidata name search for remaining no_match artists (opt-in)
         if args.wikidata_reconciliation:
             log.info("Running Wikidata name search for no_match artists...")
-            wikidata_client = WikidataClient()
+            wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
             wikidata_report = reconciler.reconcile_wikidata(wikidata_client)
             log.info(
                 "Wikidata reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
@@ -576,7 +581,7 @@ def run(args: argparse.Namespace) -> None:
     # 10b. Label hierarchy from Wikidata (optional, requires entity store + enrichments)
     if args.populate_label_hierarchy and entity_store is not None and enrichments:
         log.info("Populating label hierarchy from Wikidata P749/P355...")
-        wikidata_client = WikidataClient()
+        wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
         lh_report = populate_label_hierarchy(entity_store, enrichments, wikidata_client)
         log.info(
             "  %d labels created, %d matched to Wikidata, %d hierarchy edges",
@@ -595,7 +600,7 @@ def run(args: argparse.Namespace) -> None:
         from semantic_index.wikidata_influence import extract_wikidata_influences
 
         log.info("Querying Wikidata P737 influence relationships...")
-        wikidata_client = WikidataClient()
+        wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
 
         # Collect all QIDs from the entity store
         qid_rows = entity_store._conn.execute(
