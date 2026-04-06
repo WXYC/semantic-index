@@ -36,7 +36,7 @@ MONTH_NAMES = [
 _SYSTEM_PROMPT = (
     "You are a music knowledge assistant for WXYC 89.3 FM, a freeform college radio station. "
     "Given structured data about the relationship between two artists in the station's play "
-    "history, write one concise sentence (under 60 words) explaining their connection in plain "
+    "history, write 2-3 sentences (under 80 words) explaining their connection in plain "
     "English. Be specific — mention shared genres, personnel names, labels, or play patterns "
     "from the data. Do not add information not present in the data."
 )
@@ -85,8 +85,8 @@ def _get_anthropic_client(request: Request):
 
 
 def _build_prompt(
-    source_name: str,
-    target_name: str,
+    source_meta: dict,
+    target_meta: dict,
     relationships: list[dict],
     month: int | None = None,
     dj_name: str | None = None,
@@ -94,8 +94,8 @@ def _build_prompt(
 ) -> str:
     """Build the user message for the LLM prompt."""
     data: dict = {
-        "source": source_name,
-        "target": target_name,
+        "source": source_meta,
+        "target": target_meta,
         "relationships": relationships,
     }
     if month is not None or dj_name is not None:
@@ -109,6 +109,27 @@ def _build_prompt(
         data["facet"] = facet
 
     return json.dumps(data, separators=(",", ":"))
+
+
+def _lookup_artist_metadata(
+    db: sqlite3.Connection, artist_id: int, artist_name: str, genre: str | None, total_plays: int
+) -> dict:
+    """Build an artist metadata dict with genre, total_plays, and Discogs style tags."""
+    styles: list[str] = []
+    try:
+        rows = db.execute(
+            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag",
+            (artist_id,),
+        ).fetchall()
+        styles = [r["style_tag"] for r in rows]
+    except sqlite3.OperationalError:
+        pass  # artist_style table may not exist
+    return {
+        "name": artist_name,
+        "genre": genre,
+        "total_plays": total_plays,
+        "styles": styles,
+    }
 
 
 def _lookup_dj_name(db: sqlite3.Connection, dj_id: int) -> str | None:
@@ -223,13 +244,21 @@ def get_narrative(
         for rel in rels:
             relationships.append({"type": rel.type, **rel.detail})
 
+    # Artist metadata for enriched prompt
+    source_meta = _lookup_artist_metadata(
+        db, source_id, source.canonical_name, source.genre, source.total_plays
+    )
+    target_meta = _lookup_artist_metadata(
+        db, target_id, target.canonical_name, target.genre, target.total_plays
+    )
+
     # Facet context
     dj_name = _lookup_dj_name(db, dj_id) if dj_id else None
     faceted_count = _compute_faceted_pair_count(db, source_id, target_id, month, dj_id)
 
     user_message = _build_prompt(
-        source_name=source.canonical_name,
-        target_name=target.canonical_name,
+        source_meta=source_meta,
+        target_meta=target_meta,
         relationships=relationships,
         month=month,
         dj_name=dj_name,

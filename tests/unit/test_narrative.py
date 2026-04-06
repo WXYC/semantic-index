@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from unittest.mock import MagicMock
@@ -84,6 +85,26 @@ def _build_narrative_fixture_db() -> str:
         shared_personnel_edges=shared_personnel,
         shared_style_edges=shared_styles,
     )
+
+    # Add artist style tags (Discogs-derived)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    name_to_id_for_styles = {
+        r["canonical_name"]: r["id"]
+        for r in conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    }
+    style_data = [
+        (name_to_id_for_styles["Autechre"], "IDM"),
+        (name_to_id_for_styles["Autechre"], "Abstract"),
+        (name_to_id_for_styles["Stereolab"], "Post-Rock"),
+        (name_to_id_for_styles["Stereolab"], "Krautrock"),
+    ]
+    conn.executemany(
+        "INSERT OR IGNORE INTO artist_style (artist_id, style_tag) VALUES (?, ?)",
+        style_data,
+    )
+    conn.commit()
+    conn.close()
 
     # Add facet tables
     conn = sqlite3.connect(path)
@@ -283,3 +304,50 @@ class TestPromptContent:
         messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
         user_message = messages[0]["content"]
         assert "January" in user_message
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_artist_metadata(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Prompt should contain genre, styles, and play counts for both artists."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        user_message = messages[0]["content"]
+        prompt_data = json.loads(user_message)
+
+        # Source artist metadata
+        assert prompt_data["source"]["name"] == "Autechre"
+        assert prompt_data["source"]["genre"] == "Electronic"
+        assert prompt_data["source"]["total_plays"] == 50
+        assert set(prompt_data["source"]["styles"]) == {"IDM", "Abstract"}
+
+        # Target artist metadata
+        assert prompt_data["target"]["name"] == "Stereolab"
+        assert prompt_data["target"]["genre"] == "Rock"
+        assert prompt_data["target"]["total_plays"] == 30
+        assert set(prompt_data["target"]["styles"]) == {"Post-Rock", "Krautrock"}
+
+    @pytest.mark.asyncio
+    async def test_prompt_metadata_graceful_without_styles(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Artists without style tags should have an empty styles list."""
+        ae_id = narrative_artist_ids["Autechre"]
+        cp_id = narrative_artist_ids["Cat Power"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{cp_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        assert prompt_data["target"]["name"] == "Cat Power"
+        assert prompt_data["target"]["styles"] == []
+        assert prompt_data["target"]["total_plays"] == 20
