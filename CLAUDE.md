@@ -28,7 +28,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
-| `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), and name search via wbsearchentities API. |
+| `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), streaming service IDs (P1902 Spotify, P2850 Apple Music, P3283 Bandcamp), and name search via wbsearchentities API. |
 | `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles, entity deduplication by shared Wikidata QID. Creates the artist table from scratch on a fresh database or migrates an existing one. |
 | `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. |
 | `semantic_index/wikidata_influence.py` | Extract directed Wikidata P737 influence edges between reconciled artists. Resolves QIDs to canonical names via entity store. |
@@ -103,6 +103,9 @@ CREATE TABLE entity (
     wikidata_qid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'artist',
+    spotify_artist_id TEXT,
+    apple_music_artist_id TEXT,
+    bandcamp_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -217,6 +220,7 @@ python run_pipeline.py dump.sql --entity-store-path output/wxyc_artist_graph.db 
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--entity-store-path` with reconciled Wikidata QIDs.
 - `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--entity-store-path` and enrichment data.
+- `--fetch-streaming-ids` — Fetch Spotify (P1902), Apple Music (P2850), and Bandcamp (P3283) IDs from Wikidata for entities with QIDs. Requires `--entity-store-path`.
 
 ## Graph API
 
@@ -240,7 +244,7 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/` | D3.js graph explorer (interactive visualization). |
 | `GET` | `/health` | Health check — returns artist count or 503 if database is unreachable. |
 | `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
-| `GET` | `/graph/artists/{id}` | Full artist detail including external IDs (Discogs, MusicBrainz, Wikidata QID) joined from the entity table. Gracefully degrades on old-schema databases. |
+| `GET` | `/graph/artists/{id}` | Full artist detail including external IDs (Discogs, MusicBrainz, Wikidata QID) and streaming service IDs (Spotify, Apple Music, Bandcamp) joined from the entity table. Gracefully degrades on old-schema databases. |
 | `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`, `wikidataInfluence`. Supports optional `month` (1-12) and `dj_id` facet filters for `djTransition` — computes PMI dynamically from play-level data. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 | `GET` | `/graph/entities/{id}/artists` | All artists sharing an entity (alias group). Returns entity metadata and a list of artist summaries. |

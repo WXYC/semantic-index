@@ -739,6 +739,147 @@ class TestCacheFirstLookupByDiscogsIds:
         assert result[41].qid == "Q247237"
 
 
+class TestLookupStreamingIds:
+    """Tests for streaming service ID (P1902/P2850/P3283) lookups."""
+
+    def test_all_three_ids_returned(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q2774"),
+                    "spotifyId": _literal("5bMqBjPbCOWGgWJpbAqdQq"),
+                    "appleMusicId": _literal("15821"),
+                    "bandcampId": _literal("autechre"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q2774"])
+
+        assert "Q2774" in result
+        assert result["Q2774"].spotify_artist_id == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert result["Q2774"].apple_music_artist_id == "15821"
+        assert result["Q2774"].bandcamp_id == "autechre"
+
+    def test_partial_results_spotify_only(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q650826"),
+                    "spotifyId": _literal("7x33x5bJkIeVJoamFCgPGj"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q650826"])
+
+        assert "Q650826" in result
+        assert result["Q650826"].spotify_artist_id == "7x33x5bJkIeVJoamFCgPGj"
+        assert result["Q650826"].apple_music_artist_id is None
+        assert result["Q650826"].bandcamp_id is None
+
+    def test_no_streaming_ids_excluded(self):
+        """QIDs that have none of the three properties are excluded from results."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q12345"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q12345"])
+
+        assert result == {}
+
+    def test_multiple_qids(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q2774"),
+                    "spotifyId": _literal("5bMqBjPbCOWGgWJpbAqdQq"),
+                },
+                {
+                    "item": _uri("Q650826"),
+                    "bandcampId": _literal("stereolab"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q2774", "Q650826"])
+
+        assert len(result) == 2
+        assert result["Q2774"].spotify_artist_id == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert result["Q650826"].bandcamp_id == "stereolab"
+
+    def test_empty_input_returns_empty(self):
+        client = WikidataClient()
+        result = client.lookup_streaming_ids([])
+        assert result == {}
+
+    def test_invalid_qids_skipped(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response(
+            [
+                {
+                    "item": _uri("Q2774"),
+                    "spotifyId": _literal("5bMqBjPbCOWGgWJpbAqdQq"),
+                },
+            ]
+        )
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q2774", "INVALID"])
+
+        assert len(result) == 1
+        assert "Q2774" in result
+
+    def test_sparql_error_returns_empty(self):
+        mock_client = MagicMock()
+        mock_client.get.side_effect = Exception("Timeout")
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient()
+            result = client.lookup_streaming_ids(["Q2774"])
+
+        assert result == {}
+
+    def test_batch_splitting(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = _sparql_response([])
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            client = WikidataClient(batch_size=2)
+            client.lookup_streaming_ids(["Q1", "Q2", "Q3"])
+
+        assert mock_client.get.call_count == 2
+
+
 class TestCacheFirstGetInfluences:
     """Tests for cache-first influence lookups."""
 

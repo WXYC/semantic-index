@@ -917,3 +917,57 @@ class TestReconcileWikidata:
         assert report.attempted == 1
         assert report.errored == 1
         assert report.succeeded == 0
+
+
+class TestReconcileStreamingIds:
+    """Tests for streaming ID reconciliation via Wikidata SPARQL."""
+
+    def test_populates_streaming_ids(self, store: EntityStore):
+        """Entities with QIDs get streaming IDs from Wikidata."""
+        from semantic_index.models import WikidataStreamingIds
+
+        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+        store.upsert_artist("Autechre", entity_id=entity.id)
+
+        wikidata = MagicMock(spec=WikidataClient)
+        wikidata.lookup_streaming_ids.return_value = {
+            "Q2774": WikidataStreamingIds(
+                qid="Q2774",
+                spotify_artist_id="5bMqBjPbCOWGgWJpbAqdQq",
+                apple_music_artist_id=None,
+                bandcamp_id="autechre",
+            ),
+        }
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+        count = reconciler.reconcile_streaming_ids(wikidata)
+
+        assert count == 1
+        row = store._conn.execute(
+            "SELECT spotify_artist_id, bandcamp_id FROM entity WHERE id = ?",
+            (entity.id,),
+        ).fetchone()
+        assert row[0] == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert row[1] == "autechre"
+
+    def test_skips_entities_already_with_ids(self, store: EntityStore):
+        """Entities that already have streaming IDs are not re-queried."""
+        from semantic_index.models import WikidataStreamingIds
+
+        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+        store.update_entity_streaming_ids(entity.id, spotify="existing", apple_music=None, bandcamp=None)
+
+        wikidata = MagicMock(spec=WikidataClient)
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+        count = reconciler.reconcile_streaming_ids(wikidata)
+
+        assert count == 0
+        wikidata.lookup_streaming_ids.assert_not_called()
+
+    def test_no_entities_returns_zero(self, store: EntityStore):
+        """When no entities need streaming IDs, return 0 without querying."""
+        wikidata = MagicMock(spec=WikidataClient)
+        reconciler = ArtistReconciler(store, DiscogsClient(cache_dsn=None, api_base_url=None))
+        count = reconciler.reconcile_streaming_ids(wikidata)
+
+        assert count == 0
+        wikidata.lookup_streaming_ids.assert_not_called()

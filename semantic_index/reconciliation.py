@@ -279,6 +279,45 @@ class ArtistReconciler:
             skipped=skipped,
         )
 
+    def reconcile_streaming_ids(self, wikidata_client: WikidataClient) -> int:
+        """Fetch streaming service IDs from Wikidata for entities that need them.
+
+        Queries Wikidata P1902 (Spotify), P2850 (Apple Music), and P3283
+        (Bandcamp) for entities that have a Wikidata QID but no streaming
+        IDs yet.
+
+        Args:
+            wikidata_client: WikidataClient instance for SPARQL queries.
+
+        Returns:
+            Number of entities updated with at least one streaming ID.
+        """
+        entities = self._store.get_entities_needing_streaming_ids()
+        if not entities:
+            logger.info("No entities need streaming IDs")
+            return 0
+
+        qid_to_entity_id = {qid: eid for eid, qid in entities}
+        qids = list(qid_to_entity_id.keys())
+        logger.info("Looking up streaming IDs for %d entities", len(qids))
+
+        streaming_ids = wikidata_client.lookup_streaming_ids(qids)
+        updated = 0
+        for qid, ids in streaming_ids.items():
+            entity_id = qid_to_entity_id.get(qid)
+            if entity_id is None:
+                continue
+            self._store.update_entity_streaming_ids(
+                entity_id,
+                spotify=ids.spotify_artist_id,
+                apple_music=ids.apple_music_artist_id,
+                bandcamp=ids.bandcamp_id,
+            )
+            updated += 1
+
+        logger.info("Updated streaming IDs for %d/%d entities", updated, len(entities))
+        return updated
+
     @staticmethod
     def _query_with_fallback(
         conn: object, primary_sql: str, fallback_sql: str, params: tuple

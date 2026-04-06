@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS entity (
     wikidata_qid TEXT,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'artist',
+    spotify_artist_id TEXT,
+    apple_music_artist_id TEXT,
+    bandcamp_id TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -103,6 +106,12 @@ CREATE TABLE IF NOT EXISTS reconciliation_log (
 CREATE INDEX IF NOT EXISTS idx_reconciliation_artist ON reconciliation_log(artist_id);
 """
 
+_ENTITY_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_entity_spotify ON entity(spotify_artist_id) WHERE spotify_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_apple_music ON entity(apple_music_artist_id) WHERE apple_music_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_bandcamp ON entity(bandcamp_id) WHERE bandcamp_id IS NOT NULL;
+"""
+
 _ARTIST_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS artist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +163,8 @@ class EntityStore:
         """
         self._migrate_entity_unique_qid()
         self._conn.executescript(_ENTITY_STORE_SCHEMA)
+        self._migrate_entity_table()
+        self._conn.executescript(_ENTITY_INDEXES)
         self._migrate_artist_table()
         if self._has_table("artist"):
             self._conn.executescript(_ARTIST_INDEXES)
@@ -207,6 +218,29 @@ class EntityStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.commit()
         logger.info("Entity table rebuilt without UNIQUE constraint on wikidata_qid")
+
+    # Columns to add to old entity tables that don't have them yet.
+    _NEW_ENTITY_COLUMNS: list[tuple[str, str]] = [
+        ("spotify_artist_id", "TEXT"),
+        ("apple_music_artist_id", "TEXT"),
+        ("bandcamp_id", "TEXT"),
+    ]
+
+    def _migrate_entity_table(self) -> None:
+        """Add new columns to an existing entity table if they are missing.
+
+        Uses the same PRAGMA table_info + ALTER TABLE ADD COLUMN pattern
+        as ``_migrate_artist_table()``. No-op if the entity table already
+        has all columns or does not exist yet (fresh-creation schema handles it).
+        """
+        if not self._has_table("entity"):
+            return
+
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(entity)")}
+        for col_name, col_def in self._NEW_ENTITY_COLUMNS:
+            if col_name not in existing:
+                self._conn.execute(f"ALTER TABLE entity ADD COLUMN {col_name} {col_def}")
+                logger.info("Migrated entity table: added column %s", col_name)
 
     def _has_table(self, name: str) -> bool:
         """Check whether a table exists in the database."""
@@ -615,6 +649,53 @@ class EntityStore:
                  AND (a.entity_id IS NULL OR e.wikidata_qid IS NULL)"""
         ).fetchall()
         return [(row[0], row[1], row[2]) for row in rows]
+
+    def get_entities_needing_streaming_ids(self) -> list[tuple[int, str]]:
+        """Return entities that have a Wikidata QID but no streaming IDs yet.
+
+        An entity "needs streaming IDs" when it has a non-NULL
+        ``wikidata_qid`` AND all three streaming ID columns are NULL.
+
+        Returns:
+            List of (entity_id, wikidata_qid) tuples.
+        """
+        rows = self._conn.execute(
+            """SELECT id, wikidata_qid FROM entity
+               WHERE wikidata_qid IS NOT NULL
+                 AND spotify_artist_id IS NULL
+                 AND apple_music_artist_id IS NULL
+                 AND bandcamp_id IS NULL"""
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def update_entity_streaming_ids(
+        self,
+        entity_id: int,
+        spotify: str | None = None,
+        apple_music: str | None = None,
+        bandcamp: str | None = None,
+    ) -> None:
+        """Update streaming service IDs for an entity using COALESCE semantics.
+
+        Existing non-NULL values are never overwritten with NULL. Only
+        non-NULL arguments replace current values.
+
+        Args:
+            entity_id: The entity row's primary key.
+            spotify: Spotify artist ID (P1902).
+            apple_music: Apple Music artist ID (P2850).
+            bandcamp: Bandcamp profile ID (P3283).
+        """
+        self._conn.execute(
+            """UPDATE entity
+               SET spotify_artist_id = COALESCE(?, spotify_artist_id),
+                   apple_music_artist_id = COALESCE(?, apple_music_artist_id),
+                   bandcamp_id = COALESCE(?, bandcamp_id),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE id = ?""",
+            (spotify, apple_music, bandcamp, entity_id),
+        )
+        self._conn.commit()
 
     def update_reconciliation_status(self, artist_id: int, status: str) -> None:
         """Update the reconciliation status for an artist.

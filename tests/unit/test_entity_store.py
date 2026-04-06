@@ -87,7 +87,11 @@ class TestFreshDatabase:
         store.initialize()
         conn = sqlite3.connect(db_path)
         columns = _get_column_names(conn, "entity")
-        assert columns == {"id", "wikidata_qid", "name", "entity_type", "created_at", "updated_at"}
+        assert columns == {
+            "id", "wikidata_qid", "name", "entity_type",
+            "spotify_artist_id", "apple_music_artist_id", "bandcamp_id",
+            "created_at", "updated_at",
+        }
         conn.close()
         store.close()
 
@@ -439,3 +443,120 @@ class TestContextManager:
 
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+class TestEntityStreamingIds:
+    """Tests for streaming ID columns on the entity table."""
+
+    def test_fresh_db_has_streaming_columns(self, tmp_path):
+        """A fresh database includes streaming ID columns on entity."""
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        columns = _get_column_names(store._conn, "entity")
+        assert "spotify_artist_id" in columns
+        assert "apple_music_artist_id" in columns
+        assert "bandcamp_id" in columns
+        store.close()
+
+    def test_migration_adds_streaming_columns(self, tmp_path):
+        """Migrating an old entity table (without streaming cols) adds them."""
+        db_path = str(tmp_path / "test.db")
+        conn = sqlite3.connect(db_path)
+        # Create old-schema entity table without streaming columns
+        conn.execute(
+            """CREATE TABLE entity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wikidata_qid TEXT,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'artist',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"""
+        )
+        conn.execute("INSERT INTO entity (name, entity_type, wikidata_qid) VALUES ('Autechre', 'artist', 'Q2774')")
+        conn.commit()
+        conn.close()
+
+        store = EntityStore(db_path)
+        store.initialize()
+        columns = _get_column_names(store._conn, "entity")
+        assert "spotify_artist_id" in columns
+        assert "apple_music_artist_id" in columns
+        assert "bandcamp_id" in columns
+
+        # Existing data preserved
+        row = store._conn.execute("SELECT name, wikidata_qid FROM entity WHERE name = 'Autechre'").fetchone()
+        assert row[0] == "Autechre"
+        assert row[1] == "Q2774"
+        store.close()
+
+    def test_streaming_indexes_created(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        indexes = _get_index_names(store._conn)
+        assert "idx_entity_spotify" in indexes
+        assert "idx_entity_apple_music" in indexes
+        assert "idx_entity_bandcamp" in indexes
+        store.close()
+
+    def test_update_entity_streaming_ids(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+
+        store.update_entity_streaming_ids(
+            entity.id,
+            spotify="5bMqBjPbCOWGgWJpbAqdQq",
+            apple_music="15821",
+            bandcamp="autechre",
+        )
+
+        row = store._conn.execute(
+            "SELECT spotify_artist_id, apple_music_artist_id, bandcamp_id FROM entity WHERE id = ?",
+            (entity.id,),
+        ).fetchone()
+        assert row[0] == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert row[1] == "15821"
+        assert row[2] == "autechre"
+        store.close()
+
+    def test_update_entity_streaming_ids_coalesce(self, tmp_path):
+        """COALESCE semantics: don't overwrite non-null with null."""
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+        entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+
+        # First update: set spotify
+        store.update_entity_streaming_ids(entity.id, spotify="abc123", apple_music=None, bandcamp=None)
+        # Second update: set bandcamp but pass None for spotify
+        store.update_entity_streaming_ids(entity.id, spotify=None, apple_music=None, bandcamp="autechre")
+
+        row = store._conn.execute(
+            "SELECT spotify_artist_id, bandcamp_id FROM entity WHERE id = ?",
+            (entity.id,),
+        ).fetchone()
+        assert row[0] == "abc123"  # preserved from first update
+        assert row[1] == "autechre"
+        store.close()
+
+    def test_get_entities_needing_streaming_ids(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        store = EntityStore(db_path)
+        store.initialize()
+
+        # Entity with QID but no streaming IDs -> needs them
+        store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
+        # Entity with QID and spotify -> already has some
+        e2 = store.get_or_create_entity("Stereolab", "artist", wikidata_qid="Q650826")
+        store.update_entity_streaming_ids(e2.id, spotify="xyz", apple_music=None, bandcamp=None)
+        # Entity without QID -> not eligible
+        store.get_or_create_entity("Unknown Band", "artist")
+
+        result = store.get_entities_needing_streaming_ids()
+        assert len(result) == 1
+        assert result[0][1] == "Q2774"  # (entity_id, qid)
+        store.close()
