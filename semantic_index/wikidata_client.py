@@ -235,22 +235,11 @@ class WikidataClient:
                         description=description,
                         discogs_artist_id=did,
                     )
-                remaining_ids = [did for did in discogs_ids if did not in result]
-                if remaining_ids:
-                    logger.debug(
-                        "Wikidata cache: %d/%d found, %d remaining for SPARQL",
-                        len(result),
-                        len(discogs_ids),
-                        len(remaining_ids),
-                    )
+                return result
             except Exception:
                 logger.warning("Wikidata cache lookup failed", exc_info=True)
-                remaining_ids = list(discogs_ids)
 
-        if not remaining_ids:
-            return result
-
-        # SPARQL fallback for cache misses
+        # SPARQL fallback (only when no cache is available)
         for batch_start in range(0, len(remaining_ids), self._batch_size):
             batch = remaining_ids[batch_start : batch_start + self._batch_size]
             values = " ".join(f'"{did}"' for did in batch)
@@ -357,7 +346,7 @@ class WikidataClient:
         result: list[WikidataInfluence] = []
         remaining_qids = list(valid_qids)
 
-        # Try cache first
+        # Try cache — when available, treat as authoritative (no SPARQL fallback)
         conn = self._get_cache_conn()
         if conn is not None:
             try:
@@ -368,7 +357,6 @@ class WikidataClient:
                     "WHERE i.source_qid = ANY(%s)",
                     (valid_qids,),
                 ).fetchall()
-                cached_sources: set[str] = set()
                 for source_qid, target_qid, target_name in rows:
                     result.append(
                         WikidataInfluence(
@@ -377,17 +365,11 @@ class WikidataClient:
                             target_name=target_name,
                         )
                     )
-                    cached_sources.add(source_qid)
-                # Only query SPARQL for QIDs that had zero cache results
-                remaining_qids = [q for q in valid_qids if q not in cached_sources]
+                return result
             except Exception:
                 logger.warning("Wikidata cache get_influences failed", exc_info=True)
-                remaining_qids = list(valid_qids)
 
-        if not remaining_qids:
-            return result
-
-        # SPARQL fallback
+        # SPARQL fallback (only when no cache is available)
         for batch_start in range(0, len(remaining_qids), self._batch_size):
             batch = remaining_qids[batch_start : batch_start + self._batch_size]
             values = " ".join(f"wd:{qid}" for qid in batch)
