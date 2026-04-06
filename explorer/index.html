@@ -10,7 +10,7 @@
   body { font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; background: #0a0a0a; color: #e0e0e0; overflow: hidden; }
 
   #controls {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    position: fixed; top: 0; left: 0; right: 380px; z-index: 10;
     padding: 12px 16px; background: rgba(10,10,10,0.95); border-bottom: 1px solid #333;
     display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   }
@@ -44,23 +44,52 @@
   svg { cursor: grab; }
   svg:active { cursor: grabbing; }
 
-  #narrative-panel {
-    position: fixed; top: 0; right: -400px; width: 380px; height: 100vh;
+  /* Sidebar */
+  #sidebar {
+    position: fixed; top: 0; right: 0; width: 380px; height: 100vh;
     background: rgba(15,15,15,0.97); border-left: 1px solid #333;
-    padding: 60px 20px 20px; z-index: 15;
-    transition: right 0.25s ease-out;
-    overflow-y: auto;
+    display: flex; flex-direction: column; z-index: 15;
   }
-  #narrative-panel.open { right: 0; }
-  #narrative-close {
-    position: absolute; top: 12px; right: 12px;
-    background: none; border: none; color: #888; font-size: 20px; cursor: pointer;
+  .sidebar-header {
+    padding: 16px 20px; border-bottom: 1px solid #333; flex-shrink: 0;
   }
-  #narrative-close:hover { color: #e0e0e0; }
-  .panel-header { font-size: 14px; font-weight: 600; color: #6a9fb5; margin-bottom: 16px; }
-  .panel-header .arrow { margin: 0 8px; color: #555; }
-  .panel-body .loading { color: #666; font-style: italic; display: none; }
-  .panel-body .narrative-text { font-size: 13px; line-height: 1.6; color: #ccc; }
+  .sidebar-header .artist-name {
+    font-size: 16px; font-weight: 600; color: #6a9fb5; display: block;
+  }
+  .sidebar-header .artist-meta {
+    font-size: 11px; color: #888; margin-top: 4px; display: block;
+  }
+  .sidebar-list {
+    flex: 1; overflow-y: auto; padding: 0;
+  }
+  .sidebar-card {
+    padding: 14px 20px; border-bottom: 1px solid #222; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .sidebar-card:hover { background: rgba(106,159,181,0.08); }
+  .sidebar-card.active { background: rgba(106,159,181,0.15); }
+  .sidebar-card .card-header {
+    display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+  }
+  .sidebar-card .neighbor-name {
+    font-size: 13px; font-weight: 600; color: #e0e0e0;
+  }
+  .sidebar-card .weight-badge {
+    font-size: 10px; color: #6a9fb5; background: rgba(106,159,181,0.15);
+    padding: 1px 6px; border-radius: 3px; white-space: nowrap;
+  }
+  .sidebar-card .neighbor-meta {
+    font-size: 11px; color: #666; margin-bottom: 6px;
+  }
+  .sidebar-card .narrative {
+    font-size: 12px; line-height: 1.5; color: #aaa;
+  }
+  .sidebar-card .narrative.loading {
+    color: #555; font-style: italic;
+  }
+  .sidebar-empty {
+    padding: 20px; color: #555; font-size: 12px; text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -116,16 +145,13 @@
   <div class="meta"></div>
 </div>
 
-<div id="narrative-panel">
-  <button id="narrative-close">&times;</button>
-  <div class="panel-header">
-    <span class="source-name"></span>
-    <span class="arrow">&harr;</span>
-    <span class="target-name"></span>
+<div id="sidebar">
+  <div class="sidebar-header">
+    <span class="artist-name">Select an artist</span>
+    <span class="artist-meta"></span>
   </div>
-  <div class="panel-body">
-    <div class="loading">Generating...</div>
-    <div class="narrative-text"></div>
+  <div class="sidebar-list">
+    <div class="sidebar-empty">Search or click an artist to see relationships</div>
   </div>
 </div>
 
@@ -137,6 +163,8 @@ import { parseURL, buildURL, DEFAULTS } from './url-state.js';
 const API_BASE = window.location.hostname === 'localhost' || window.location.protocol === 'file:'
   ? 'http://localhost:8000'
   : window.location.origin;
+
+const SIDEBAR_WIDTH = 380;
 
 const GENRE_COLORS = {
   'Electronic': '#4fc3f7',
@@ -156,7 +184,7 @@ const GENRE_COLORS = {
 };
 const DEFAULT_COLOR = '#555';
 
-const width = window.innerWidth;
+const width = window.innerWidth - SIDEBAR_WIDTH;
 const height = window.innerHeight;
 
 const svg = d3.select('#graph')
@@ -207,6 +235,165 @@ function linkWidth(weight) {
   return Math.max(0.5, Math.min(5, Math.abs(weight) * 0.5));
 }
 
+// --- Sidebar ---
+
+let sidebarGeneration = 0;
+let activeCardId = null;
+
+function populateSidebar(centerArtist, neighbors) {
+  sidebarGeneration++;
+  const gen = sidebarGeneration;
+
+  const header = document.querySelector('.sidebar-header');
+  header.querySelector('.artist-name').textContent = centerArtist.canonical_name;
+  header.querySelector('.artist-meta').textContent =
+    `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
+
+  const list = document.querySelector('.sidebar-list');
+  list.innerHTML = '';
+  activeCardId = null;
+
+  if (!neighbors || neighbors.length === 0) {
+    list.innerHTML = '<div class="sidebar-empty">No neighbors found</div>';
+    return;
+  }
+
+  // Sort by weight descending
+  const sorted = [...neighbors].sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight));
+
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        const card = entry.target;
+        observer.unobserve(card);
+        loadNarrative(card, centerArtist.id, parseInt(card.dataset.neighborId), gen);
+      }
+    }
+  }, { root: list, threshold: 0.1 });
+
+  for (const n of sorted) {
+    const card = document.createElement('div');
+    card.className = 'sidebar-card';
+    card.dataset.neighborId = n.artist.id;
+
+    const weightDisplay = Math.abs(n.weight).toFixed(1);
+
+    card.innerHTML = `
+      <div class="card-header">
+        <span class="neighbor-name">${escapeHtml(n.artist.canonical_name)}</span>
+        <span class="weight-badge">${weightDisplay}</span>
+      </div>
+      <div class="neighbor-meta">${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays</div>
+      <div class="narrative loading">Loading...</div>
+    `;
+
+    // Click card: highlight edge and navigate
+    card.addEventListener('click', () => {
+      highlightEdge(centerArtist.id, n.artist.id);
+      setActiveCard(card);
+    });
+
+    // Hover card: temporarily highlight edge
+    card.addEventListener('mouseenter', () => {
+      highlightEdge(centerArtist.id, n.artist.id);
+    });
+    card.addEventListener('mouseleave', () => {
+      if (activeCardId !== n.artist.id) clearEdgeHighlight();
+    });
+
+    list.appendChild(card);
+    observer.observe(card);
+  }
+
+  // Eager-load top 5
+  const eagerCards = list.querySelectorAll('.sidebar-card');
+  for (let i = 0; i < Math.min(5, eagerCards.length); i++) {
+    observer.unobserve(eagerCards[i]);
+    loadNarrative(eagerCards[i], centerArtist.id, parseInt(eagerCards[i].dataset.neighborId), gen);
+  }
+}
+
+async function loadNarrative(card, sourceId, targetId, gen) {
+  const narrativeEl = card.querySelector('.narrative');
+
+  const params = {};
+  const monthVal = document.getElementById('monthFilter').value;
+  const djVal = document.getElementById('djFilter').value;
+  if (monthVal) params.month = monthVal;
+  if (djVal) params.dj_id = djVal;
+
+  try {
+    const data = await api(`/graph/artists/${sourceId}/explain/${targetId}/narrative`, params);
+    if (gen !== sidebarGeneration) return; // stale
+    if (data && data.narrative) {
+      narrativeEl.textContent = data.narrative;
+      narrativeEl.classList.remove('loading');
+    } else {
+      narrativeEl.textContent = 'Narrative unavailable.';
+      narrativeEl.classList.remove('loading');
+    }
+  } catch {
+    if (gen !== sidebarGeneration) return;
+    narrativeEl.textContent = 'Narrative unavailable.';
+    narrativeEl.classList.remove('loading');
+  }
+}
+
+function setActiveCard(card) {
+  document.querySelectorAll('.sidebar-card.active').forEach(c => c.classList.remove('active'));
+  card.classList.add('active');
+  activeCardId = parseInt(card.dataset.neighborId);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// --- Edge highlighting ---
+
+let highlightedSourceId = null;
+let highlightedTargetId = null;
+
+function highlightEdge(sourceId, targetId) {
+  highlightedSourceId = sourceId;
+  highlightedTargetId = targetId;
+  linkGroup.selectAll('line')
+    .attr('stroke', d => {
+      const sId = d.source.id || d.source;
+      const tId = d.target.id || d.target;
+      const match = (sId === sourceId && tId === targetId) || (sId === targetId && tId === sourceId);
+      return match ? '#6a9fb5' : '#333';
+    })
+    .attr('stroke-opacity', d => {
+      const sId = d.source.id || d.source;
+      const tId = d.target.id || d.target;
+      const match = (sId === sourceId && tId === targetId) || (sId === targetId && tId === sourceId);
+      return match ? 1 : 0.3;
+    })
+    .attr('stroke-width', d => {
+      const sId = d.source.id || d.source;
+      const tId = d.target.id || d.target;
+      const match = (sId === sourceId && tId === targetId) || (sId === targetId && tId === sourceId);
+      return match ? Math.max(2, linkWidth(d.weight) * 1.5) : linkWidth(d.weight);
+    });
+}
+
+function clearEdgeHighlight() {
+  highlightedSourceId = null;
+  highlightedTargetId = null;
+  linkGroup.selectAll('line')
+    .attr('stroke', '#333')
+    .attr('stroke-opacity', 0.6)
+    .attr('stroke-width', d => linkWidth(d.weight));
+}
+
+// --- Graph ---
+
+let currentCenterId = null;
+let currentNeighborData = null;
+
 async function loadNeighborhood(artistId, artistName, depth = 2) {
   setStatus(`Loading ${artistName}...`);
 
@@ -237,6 +424,9 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   } else {
     nodeMap.get(artistId).isCenter = true;
   }
+
+  currentCenterId = artistId;
+  currentNeighborData = data.neighbors;
 
   // Add neighbor nodes and links
   for (const n of data.neighbors) {
@@ -285,6 +475,10 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   setStatus(`${nodes.length} artists, ${links.length} edges`);
   render();
 
+  // Populate sidebar with first-hop neighbors
+  const centerNode = nodeMap.get(artistId);
+  populateSidebar(centerNode, data.neighbors);
+
   // Update URL to reflect current state
   const controls = {
     edge: document.getElementById('edgeType').value,
@@ -318,19 +512,12 @@ function render() {
     .force('center', d3.forceCenter(width / 2, height / 2))
     .force('collision', d3.forceCollide().radius(d => nodeRadius(d.total_plays) + 2));
 
-  // Hit lines (invisible wide targets for edge clicking)
+  // Hit lines (invisible wide targets)
   const hit = hitGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
   hit.exit().remove();
   const hitEnter = hit.enter().append('line')
     .attr('stroke', 'transparent')
-    .attr('stroke-width', 14)
-    .style('cursor', 'pointer')
-    .on('click', (e, d) => {
-      e.stopPropagation();
-      const src = typeof d.source === 'object' ? d.source : nodeMap.get(d.source);
-      const tgt = typeof d.target === 'object' ? d.target : nodeMap.get(d.target);
-      if (src && tgt) openNarrativePanel(src.id, tgt.id, src.canonical_name, tgt.canonical_name);
-    });
+    .attr('stroke-width', 14);
   const hitMerged = hitEnter.merge(hit);
 
   // Links
@@ -419,56 +606,8 @@ function clearGraph() {
   nodeGroup.selectAll('*').remove();
   labelGroup.selectAll('*').remove();
   if (simulation) simulation.stop();
+  clearEdgeHighlight();
 }
-
-// Narrative panel
-let activeNarrativeController = null;
-
-async function openNarrativePanel(sourceId, targetId, sourceName, targetName) {
-  const panel = document.getElementById('narrative-panel');
-  panel.querySelector('.source-name').textContent = sourceName;
-  panel.querySelector('.target-name').textContent = targetName;
-  panel.querySelector('.loading').style.display = 'block';
-  panel.querySelector('.narrative-text').textContent = '';
-  panel.classList.add('open');
-
-  if (activeNarrativeController) activeNarrativeController.abort();
-  activeNarrativeController = new AbortController();
-
-  const params = {};
-  const monthVal = document.getElementById('monthFilter').value;
-  const djVal = document.getElementById('djFilter').value;
-  if (monthVal) params.month = monthVal;
-  if (djVal) params.dj_id = djVal;
-
-  try {
-    const data = await api(
-      `/graph/artists/${sourceId}/explain/${targetId}/narrative`,
-      params,
-      activeNarrativeController.signal
-    );
-    panel.querySelector('.loading').style.display = 'none';
-    if (data && data.narrative) {
-      panel.querySelector('.narrative-text').textContent = data.narrative;
-    } else {
-      panel.querySelector('.narrative-text').textContent = 'Narrative unavailable.';
-    }
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      panel.querySelector('.loading').style.display = 'none';
-      panel.querySelector('.narrative-text').textContent = 'Narrative unavailable.';
-    }
-  }
-}
-
-function closeNarrativePanel() {
-  document.getElementById('narrative-panel').classList.remove('open');
-  if (activeNarrativeController) activeNarrativeController.abort();
-}
-
-document.getElementById('narrative-close').addEventListener('click', closeNarrativePanel);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNarrativePanel(); });
-svg.on('click', () => closeNarrativePanel());
 
 // Search with debounce
 let searchTimeout;
