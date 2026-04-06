@@ -159,18 +159,8 @@
       <option value="50">50</option>
     </select>
   </div>
-  <div>
-    <label>Month</label>
-    <select id="monthFilter">
-      <option value="">All</option>
-    </select>
-  </div>
-  <div>
-    <label>DJ</label>
-    <select id="djFilter">
-      <option value="">All</option>
-    </select>
-  </div>
+  <select id="monthFilter" style="display:none"><option value="">All</option></select>
+  <select id="djFilter" style="display:none"><option value="">All</option></select>
   <span id="status"></span>
 </div>
 
@@ -183,12 +173,12 @@
   <div class="sidebar-header">
     <span class="artist-name">Select an artist</span>
     <span class="artist-meta"></span>
-    <p class="artist-bio clamped" style="display:none"></p>
-    <button class="bio-toggle" style="display:none"></button>
   </div>
   <div class="sidebar-list">
     <div class="streaming-embeds"></div>
     <div class="external-links"></div>
+    <p class="artist-bio clamped" style="display:none"></p>
+    <button class="bio-toggle" style="display:none"></button>
     <div class="sidebar-empty">Search or click an artist to see relationships</div>
   </div>
 </div>
@@ -259,6 +249,15 @@ async function api(path, params = {}, signal) {
   const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) return null;
   return res.json();
+}
+
+const EXCLUDED_ARTISTS = new Set([
+  'various', 'various artists', 'v/a', 'va', 'various artist',
+  'unknown artist', 'unknown', 'no artist',
+]);
+
+function isExcludedArtist(name) {
+  return EXCLUDED_ARTISTS.has(name.toLowerCase().trim());
 }
 
 function getColor(genre) {
@@ -379,7 +378,7 @@ function populateSidebar(centerArtist, neighbors) {
   list.innerHTML = '';
   activeCardId = null;
 
-  // Re-create embed/link containers at the top of the scrollable list
+  // Re-create containers at the top of the scrollable list
   const embedsContainer = document.createElement('div');
   embedsContainer.className = 'streaming-embeds';
   list.appendChild(embedsContainer);
@@ -388,12 +387,15 @@ function populateSidebar(centerArtist, neighbors) {
   extLinksContainer.className = 'external-links';
   list.appendChild(extLinksContainer);
 
-  // Clear bio while loading
-  const bioEl = document.querySelector('.artist-bio');
-  const bioToggle = document.querySelector('.bio-toggle');
-  bioEl.textContent = '';
+  const bioEl = document.createElement('p');
+  bioEl.className = 'artist-bio clamped';
   bioEl.style.display = 'none';
+  list.appendChild(bioEl);
+
+  const bioToggle = document.createElement('button');
+  bioToggle.className = 'bio-toggle';
   bioToggle.style.display = 'none';
+  list.appendChild(bioToggle);
 
   // Fetch full artist detail for streaming IDs and external links
   api(`/graph/artists/${centerArtist.id}`).then(detail => {
@@ -608,6 +610,8 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   }
 
   currentCenterId = artistId;
+  // Filter out various artists / unknown
+  data.neighbors = data.neighbors.filter(n => !isExcludedArtist(n.artist.canonical_name));
   currentNeighborData = data.neighbors;
 
   // Add neighbor nodes and links
@@ -640,6 +644,7 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
       if (!res || !res.neighbors) continue;
       const sourceId = res.artist.id;
       for (const n of res.neighbors) {
+        if (isExcludedArtist(n.artist.canonical_name)) continue;
         if (!nodeMap.has(n.artist.id)) {
           nodes.push(n.artist);
           nodeMap.set(n.artist.id, n.artist);
