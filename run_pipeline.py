@@ -470,15 +470,17 @@ def run(args: argparse.Namespace) -> None:
                 import psycopg as _pg
 
                 wikidata_conn = _pg.connect(args.wikidata_cache_dsn, autocommit=True)
-                # Get all artists with Discogs IDs but no QID
+                # Get all artists with Discogs IDs — use LEFT JOIN since
+                # some artists may not have an entity yet
                 unlinked = entity_store._conn.execute(
                     "SELECT a.id, a.discogs_artist_id, a.entity_id FROM artist a "
-                    "JOIN entity e ON a.entity_id = e.id "
-                    "WHERE a.discogs_artist_id IS NOT NULL AND e.wikidata_qid IS NULL"
+                    "LEFT JOIN entity e ON a.entity_id = e.id "
+                    "WHERE a.discogs_artist_id IS NOT NULL "
+                    "AND (a.entity_id IS NULL OR e.wikidata_qid IS NULL)"
                 ).fetchall()
                 if unlinked:
                     discogs_ids = [str(row[1]) for row in unlinked]
-                    entity_id_by_discogs = {str(row[1]): row[2] for row in unlinked}
+                    artist_by_discogs = {str(row[1]): (row[0], row[2]) for row in unlinked}
                     # Batch lookup in wikidata-cache
                     wk_rows = wikidata_conn.execute(
                         "SELECT dm.discogs_id, dm.qid FROM discogs_mapping dm "
@@ -487,7 +489,10 @@ def run(args: argparse.Namespace) -> None:
                     ).fetchall()
                     qid_assigned = 0
                     for discogs_id_str, qid in wk_rows:
-                        entity_id = entity_id_by_discogs.get(discogs_id_str)
+                        match = artist_by_discogs.get(discogs_id_str)
+                        if match is None:
+                            continue
+                        _artist_id, entity_id = match
                         if entity_id is not None:
                             entity_store._conn.execute(
                                 "UPDATE entity SET wikidata_qid = ?, "
