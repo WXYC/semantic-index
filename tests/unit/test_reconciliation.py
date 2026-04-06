@@ -951,8 +951,6 @@ class TestReconcileStreamingIds:
 
     def test_skips_entities_already_with_ids(self, store: EntityStore):
         """Entities that already have streaming IDs are not re-queried."""
-        from semantic_index.models import WikidataStreamingIds
-
         entity = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
         store.update_entity_streaming_ids(entity.id, spotify="existing", apple_music=None, bandcamp=None)
 
