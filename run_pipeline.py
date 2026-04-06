@@ -89,6 +89,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("DATABASE_URL_WIKIDATA"),
         help="PostgreSQL DSN for wikidata-cache (default: DATABASE_URL_WIKIDATA env var)",
     )
+    parser.add_argument(
+        "--musicbrainz-cache-dsn",
+        default=os.environ.get("DATABASE_URL_MUSICBRAINZ"),
+        help="PostgreSQL DSN for musicbrainz-cache (default: DATABASE_URL_MUSICBRAINZ env var)",
+    )
     parser.add_argument("--skip-enrichment", action="store_true", help="Skip Discogs enrichment")
     parser.add_argument(
         "--min-jaccard", type=float, default=0.1, help="Minimum Jaccard for shared style edges"
@@ -457,6 +462,80 @@ def run(args: argparse.Namespace) -> None:
                 wikidata_report.no_match,
                 wikidata_report.errored,
             )
+
+        # 5e2. Assign Wikidata QIDs from wikidata-cache via Discogs ID bridge
+        if args.wikidata_cache_dsn:
+            log.info("Assigning Wikidata QIDs from wikidata-cache via Discogs IDs...")
+            try:
+                import psycopg as _pg
+
+                wikidata_conn = _pg.connect(args.wikidata_cache_dsn, autocommit=True)
+                # Get all artists with Discogs IDs but no QID
+                unlinked = entity_store._conn.execute(
+                    "SELECT a.id, a.discogs_artist_id, a.entity_id FROM artist a "
+                    "JOIN entity e ON a.entity_id = e.id "
+                    "WHERE a.discogs_artist_id IS NOT NULL AND e.wikidata_qid IS NULL"
+                ).fetchall()
+                if unlinked:
+                    discogs_ids = [str(row[1]) for row in unlinked]
+                    entity_id_by_discogs = {str(row[1]): row[2] for row in unlinked}
+                    # Batch lookup in wikidata-cache
+                    wk_rows = wikidata_conn.execute(
+                        "SELECT dm.discogs_id, dm.qid FROM discogs_mapping dm "
+                        "WHERE dm.property = 'P1953' AND dm.discogs_id = ANY(%s)",
+                        (discogs_ids,),
+                    ).fetchall()
+                    qid_assigned = 0
+                    for discogs_id_str, qid in wk_rows:
+                        entity_id = entity_id_by_discogs.get(discogs_id_str)
+                        if entity_id is not None:
+                            entity_store._conn.execute(
+                                "UPDATE entity SET wikidata_qid = ?, "
+                                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                                "WHERE id = ? AND wikidata_qid IS NULL",
+                                (qid, entity_id),
+                            )
+                            qid_assigned += 1
+                    entity_store._conn.commit()
+                    log.info(
+                        "  %d/%d artists assigned Wikidata QIDs via Discogs ID bridge",
+                        qid_assigned,
+                        len(unlinked),
+                    )
+                else:
+                    log.info("  No artists with Discogs IDs lacking QIDs")
+                wikidata_conn.close()
+            except Exception:
+                log.warning("Wikidata QID assignment failed", exc_info=True)
+
+        # 5e3. MusicBrainz reconciliation via musicbrainz-cache
+        if args.musicbrainz_cache_dsn:
+            from semantic_index.musicbrainz_client import MusicBrainzClient
+
+            log.info("Running MusicBrainz reconciliation...")
+            mb_client = MusicBrainzClient(cache_dsn=args.musicbrainz_cache_dsn)
+            # Get all artists without a MusicBrainz ID
+            unmatched = entity_store._conn.execute(
+                "SELECT id, canonical_name FROM artist WHERE musicbrainz_artist_id IS NULL"
+            ).fetchall()
+            if unmatched:
+                names = [row[1] for row in unmatched]
+                id_by_name = {row[1].lower(): row[0] for row in unmatched}
+                matches = mb_client.batch_lookup(names)
+                mb_matched = 0
+                for lower_name, (mb_id, _mb_name) in matches.items():
+                    artist_id = id_by_name.get(lower_name)
+                    if artist_id is not None:
+                        entity_store._conn.execute(
+                            "UPDATE artist SET musicbrainz_artist_id = ? "
+                            "WHERE id = ? AND musicbrainz_artist_id IS NULL",
+                            (str(mb_id), artist_id),
+                        )
+                        mb_matched += 1
+                entity_store._conn.commit()
+                log.info(
+                    "  MusicBrainz: %d/%d artists matched", mb_matched, len(unmatched)
+                )
 
         # 5f. Entity deduplication by shared QID (runs after all reconciliation)
         dedup_report = entity_store.deduplicate_by_qid()
