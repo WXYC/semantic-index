@@ -533,9 +533,7 @@ def run(args: argparse.Namespace) -> None:
                         )
                         mb_matched += 1
                 entity_store._conn.commit()
-                log.info(
-                    "  MusicBrainz: %d/%d artists matched", mb_matched, len(unmatched)
-                )
+                log.info("  MusicBrainz: %d/%d artists matched", mb_matched, len(unmatched))
 
         # 5f. Entity deduplication by shared QID (runs after all reconciliation)
         dedup_report = entity_store.deduplicate_by_qid()
