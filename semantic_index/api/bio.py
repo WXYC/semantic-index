@@ -20,20 +20,158 @@ from semantic_index.api.schemas import BandcampAlbumResponse, BioResponse
 
 logger = logging.getLogger(__name__)
 
-# Regex patterns for Discogs markup
-_DISCOGS_LINK = re.compile(r"\[([alr])=([^\]]*?)(?:\s*\(\d+\))?\]")
-_DISCOGS_URL = re.compile(r"\[url=[^\]]*\](.*?)\[/url\]", re.DOTALL)
+# Regex patterns for Discogs markup tag classification
+_PAT_ARTIST_NAME = re.compile(r"^a=(.+)$")
+_PAT_ARTIST_ID = re.compile(r"^a(\d+)$")
+_PAT_RELEASE_ID = re.compile(r"^r=?(\d+)$")
+_PAT_MASTER_ID = re.compile(r"^m=?(\d+)$")
+_PAT_LABEL_NAME = re.compile(r"^l=(.+)$")
+_PAT_URL_OPEN = re.compile(r"^url=(.+)$")
+_PAT_CLOSING_TAG = re.compile(r"^/(.+)$")
+_PAT_DISAMBIGUATION = re.compile(r" \(\d+\)$")
 
 
-def strip_discogs_markup(text: str) -> str:
-    """Convert Discogs markup to plain text.
+def parse_discogs_markup(text: str) -> str:
+    """Parse Discogs markup to HTML.
 
-    Handles ``[a=Artist Name]``, ``[a=Artist Name (3)]``,
-    ``[l=Label Name]``, ``[r=Release]``, and ``[url=...]text[/url]``.
+    Converts ``[a=Artist Name]`` to Discogs search links,
+    ``[l=Label]`` to plain text, ``[b]...[/b]`` to ``<b>``,
+    ``[i]...[/i]`` to ``<i>``, ``[u]...[/u]`` to ``<u>``,
+    and ``[url=...]...[/url]`` to ``<a>`` tags.
+
+    Port of ``DiscogsMarkupParser.swift`` from wxyc-ios-64/Shared/Metadata.
     """
-    text = _DISCOGS_URL.sub(r"\1", text)
-    text = _DISCOGS_LINK.sub(r"\2", text)
-    return text
+    tokens = _tokenize(text)
+    return _render(tokens)
+
+
+def _tokenize(text: str) -> list[tuple]:
+    """Tokenize Discogs markup into (type, ...) tuples."""
+    tokens: list[tuple] = []
+    remaining = text
+    while remaining:
+        idx = remaining.find("[")
+        if idx == -1:
+            tokens.append(("text", remaining))
+            break
+        if idx > 0:
+            tokens.append(("text", remaining[:idx]))
+        close = remaining.find("]", idx)
+        if close == -1:
+            tokens.append(("text", remaining[idx:]))
+            break
+        tag = remaining[idx + 1 : close]
+        remaining = remaining[close + 1 :]
+        if not tag:
+            continue
+        token = _classify_tag(tag, remaining)
+        if token is not None:
+            tok, remaining = token
+            tokens.append(tok)
+    return tokens
+
+
+def _find_closing(text: str, tag: str) -> tuple[str, str] | None:
+    """Find [/tag] in text, return (content, rest) or None."""
+    target = f"[/{tag}]"
+    idx = text.find(target)
+    if idx == -1:
+        return None
+    return text[:idx], text[idx + len(target) :]
+
+
+def _classify_tag(tag: str, remaining: str) -> tuple[tuple, str] | None:
+    m = _PAT_ARTIST_NAME.match(tag)
+    if m:
+        name = m.group(1)
+        display = _PAT_DISAMBIGUATION.sub("", name)
+        return ("artist", name, display), remaining
+
+    m = _PAT_ARTIST_ID.match(tag)
+    if m:
+        return ("artist_id", int(m.group(1))), remaining
+
+    m = _PAT_RELEASE_ID.match(tag)
+    if m:
+        return ("release_id", int(m.group(1))), remaining
+
+    m = _PAT_MASTER_ID.match(tag)
+    if m:
+        return ("master_id", int(m.group(1))), remaining
+
+    m = _PAT_LABEL_NAME.match(tag)
+    if m:
+        return ("label", m.group(1)), remaining
+
+    m = _PAT_URL_OPEN.match(tag)
+    if m:
+        result = _find_closing(remaining, "url")
+        if result:
+            content, rest = result
+            return ("url", m.group(1), content), rest
+        return ("text", remaining), ""
+
+    if tag in ("b", "i", "u"):
+        result = _find_closing(remaining, tag)
+        if result:
+            content, rest = result
+            return (tag, content), rest
+        return None
+
+    if _PAT_CLOSING_TAG.match(tag):
+        return None
+
+    return None
+
+
+def _html_escape(text: str) -> str:
+    """Escape HTML special characters."""
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+def _render(tokens: list[tuple]) -> str:
+    """Render tokens to HTML string."""
+    parts: list[str] = []
+    for tok in tokens:
+        kind = tok[0]
+        if kind == "text":
+            parts.append(_html_escape(tok[1]))
+        elif kind == "artist":
+            _name, display = tok[1], tok[2]
+            encoded = _html_escape(_name)
+            parts.append(
+                f'<a href="https://www.discogs.com/search/?q={encoded}&type=artist" '
+                f'target="_blank" rel="noopener">{_html_escape(display)}</a>'
+            )
+        elif kind == "artist_id":
+            # Without a resolver, skip ID-only references
+            pass
+        elif kind == "release_id":
+            aid = tok[1]
+            parts.append(
+                f'<a href="https://www.discogs.com/release/{aid}" target="_blank" rel="noopener">[release]</a>'
+            )
+        elif kind == "master_id":
+            mid = tok[1]
+            parts.append(
+                f'<a href="https://www.discogs.com/master/{mid}" target="_blank" rel="noopener">[master]</a>'
+            )
+        elif kind == "label":
+            parts.append(_html_escape(tok[1]))
+        elif kind == "url":
+            url, content = tok[1], tok[2]
+            parts.append(
+                f'<a href="{_html_escape(url)}" target="_blank" rel="noopener">{_html_escape(content)}</a>'
+            )
+        elif kind == "b":
+            parts.append(f"<b>{_html_escape(tok[1])}</b>")
+        elif kind == "i":
+            parts.append(f"<i>{_html_escape(tok[1])}</i>")
+        elif kind == "u":
+            parts.append(f"<u>{_html_escape(tok[1])}</u>")
+    return "".join(parts)
 
 
 bio_router = APIRouter(prefix="/graph", tags=["graph"])
@@ -136,7 +274,7 @@ def _fetch_discogs_profile(discogs_artist_id: int) -> str | None:
                 "SELECT profile FROM artist WHERE id = %s", (discogs_artist_id,)
             ).fetchone()
             if row and row[0]:
-                result: str = strip_discogs_markup(row[0].strip())
+                result: str = parse_discogs_markup(row[0].strip())
                 return result
     except Exception:
         logger.warning(
