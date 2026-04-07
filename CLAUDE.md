@@ -105,7 +105,7 @@ CREATE TABLE audio_profile (
     primary_genre TEXT,
     primary_genre_probability REAL,
     voice_instrumental_ratio REAL,
-    feature_centroid TEXT,  -- JSON array of 20 floats
+    feature_centroid TEXT,  -- JSON array of 36 floats
     recording_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

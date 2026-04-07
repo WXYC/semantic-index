@@ -53,6 +53,23 @@ MOOD_LABELS = [
     "mood_sad",
 ]
 
+# Ordered labels for the moods_mirex compound mood classifier
+MIREX_LABELS = ["Cluster1", "Cluster2", "Cluster3", "Cluster4", "Cluster5"]
+
+# Ordered labels for the ismir04_rhythm dance rhythm classifier
+RHYTHM_LABELS = [
+    "ChaChaCha",
+    "Jive",
+    "Quickstep",
+    "Rumba-American",
+    "Rumba-International",
+    "Rumba-Misc",
+    "Samba",
+    "Tango",
+    "VienneseWaltz",
+    "Waltz",
+]
+
 
 @dataclass
 class RecordingFeatures:
@@ -81,6 +98,9 @@ class RecordingFeatures:
     genre_probability: float
     genre_vector: list[float]
     mood_vector: list[float]
+    mirex_vector: list[float]  # 5-element MIREX compound mood distribution
+    rhythm_vector: list[float]  # 10-element dance rhythm distribution
+    gender_female: float  # probability of female vocal
     timbre: str
     timbre_probability: float
     tonal: float
@@ -90,24 +110,28 @@ class RecordingFeatures:
     def feature_vector(self) -> list[float]:
         """Build a fixed-length numeric feature vector for similarity computation.
 
-        Layout (20 dimensions):
+        Layout (36 dimensions):
             [0:9]   genre_dortmund probability distribution (9 genres)
-            [9:16]  mood probabilities (7 moods)
-            [16]    danceability probability
-            [17]    timbre (bright=1, dark=0)
-            [18]    tonal probability
-            [19]    voice probability (1=voice, 0=instrumental)
+            [9:16]  mood probabilities (7 binary mood classifiers)
+            [16:21] moods_mirex compound mood distribution (5 clusters)
+            [21:31] ismir04_rhythm dance rhythm distribution (10 rhythms)
+            [31]    danceability probability
+            [32]    timbre (bright=1, dark=0)
+            [33]    tonal probability
+            [34]    voice probability (1=voice, 0=instrumental)
+            [35]    gender (female probability)
 
         Returns:
-            List of 20 floats.
+            List of 36 floats.
         """
         timbre_val = 1.0 if self.timbre == "bright" else 0.0
         voice_val = 1.0 - self.voice_instrumental_probability if self.voice_instrumental == "instrumental" else self.voice_instrumental_probability
-        return self.genre_vector + self.mood_vector + [
+        return self.genre_vector + self.mood_vector + self.mirex_vector + self.rhythm_vector + [
             self.danceability,
             timbre_val,
             self.tonal,
             voice_val,
+            self.gender_female,
         ]
 
 
@@ -132,6 +156,18 @@ def _parse_highlevel(mbid: str, data: dict) -> RecordingFeatures:
         positive_label = mood_key.replace("mood_", "")
         mood_vector.append(mood_data.get(positive_label, 0.0))
 
+    # MIREX compound mood
+    mirex_all = hl.get("moods_mirex", {}).get("all", {})
+    mirex_vector = [mirex_all.get(label, 0.0) for label in MIREX_LABELS]
+
+    # Rhythm
+    rhythm_all = hl.get("ismir04_rhythm", {}).get("all", {})
+    rhythm_vector = [rhythm_all.get(label, 0.0) for label in RHYTHM_LABELS]
+
+    # Gender
+    gender_all = hl.get("gender", {}).get("all", {})
+    gender_female = gender_all.get("female", 0.5)
+
     # Timbre
     timbre = hl["timbre"]["value"]
     timbre_probability = hl["timbre"]["probability"]
@@ -150,6 +186,9 @@ def _parse_highlevel(mbid: str, data: dict) -> RecordingFeatures:
         genre_probability=genre_probability,
         genre_vector=genre_vector,
         mood_vector=mood_vector,
+        mirex_vector=mirex_vector,
+        rhythm_vector=rhythm_vector,
+        gender_female=gender_female,
         timbre=timbre,
         timbre_probability=timbre_probability,
         tonal=tonal,
@@ -342,7 +381,7 @@ class ArtistAudioProfile:
     primary_genre: str
     primary_genre_probability: float
     voice_instrumental_ratio: float  # fraction of recordings that are vocal
-    feature_centroid: list[float]  # averaged 20-element feature vector
+    feature_centroid: list[float]  # averaged 36-element feature vector
 
     @classmethod
     def from_recordings(cls, recordings: list[RecordingFeatures]) -> ArtistAudioProfile:
@@ -370,7 +409,7 @@ class ArtistAudioProfile:
         voice_ratio = vocal_count / n
 
         # Average feature vectors
-        vec_len = 20
+        vec_len = 36
         centroid = [0.0] * vec_len
         for r in recordings:
             vec = r.feature_vector()

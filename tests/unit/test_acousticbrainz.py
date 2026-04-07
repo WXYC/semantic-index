@@ -129,6 +129,21 @@ def _make_highlevel_json(
                 "probability": voice_prob,
                 "value": voice_instrumental,
             },
+            "moods_mirex": {
+                "all": {"Cluster1": 0.2, "Cluster2": 0.3, "Cluster3": 0.15, "Cluster4": 0.25, "Cluster5": 0.1},
+                "probability": 0.3,
+                "value": "Cluster2",
+            },
+            "ismir04_rhythm": {
+                "all": {"ChaChaCha": 0.05, "Jive": 0.05, "Quickstep": 0.05, "Rumba-American": 0.05, "Rumba-International": 0.05, "Rumba-Misc": 0.05, "Samba": 0.1, "Tango": 0.4, "VienneseWaltz": 0.1, "Waltz": 0.1},
+                "probability": 0.4,
+                "value": "Tango",
+            },
+            "gender": {
+                "all": {"female": 0.4, "male": 0.6},
+                "probability": 0.6,
+                "value": "male",
+            },
         }
     }
 
@@ -257,8 +272,8 @@ class TestRecordingFeaturesParsing:
 
         assert features is not None
         vec = features.feature_vector()
-        # 9 genre + 7 mood + 4 scalar (danceability, timbre, tonal, voice_instrumental)
-        assert len(vec) == 20
+        # 9 genre + 7 mood + 5 mirex + 10 rhythm + 5 scalar
+        assert len(vec) == 36
 
 
 # --- Batch lookup ---
@@ -300,8 +315,8 @@ class TestArtistAudioProfile:
         assert profile.avg_danceability == pytest.approx(0.4, abs=0.01)
         # Both recordings are instrumental
         assert profile.voice_instrumental_ratio == pytest.approx(0.0, abs=0.01)
-        # Feature centroid should be length 20
-        assert len(profile.feature_centroid) == 20
+        # Feature centroid should be length 36
+        assert len(profile.feature_centroid) == 36
 
     def test_single_recording_profile(self, ab_data_dir: Path) -> None:
         loader = AcousticBrainzLoader(str(ab_data_dir))
