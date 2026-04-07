@@ -873,6 +873,8 @@ def _query_explain(
             return _explain_cross_reference(db, source_id, target_id)
         case EdgeType.WIKIDATA_INFLUENCE:
             return _explain_wikidata_influence(db, source_id, target_id)
+        case EdgeType.AFFINITY:
+            return []  # affinity is a composite — explain uses individual types
 
 
 def _explain_dj_transition(
