@@ -841,6 +841,7 @@ def run(args: argparse.Namespace) -> None:
         if args.acousticbrainz_dir and args.musicbrainz_cache_dsn:
             from semantic_index.acousticbrainz import (
                 AcousticBrainzLoader,
+                TarAcousticBrainzLoader,
                 build_audio_profiles,
                 compute_acoustic_similarity,
                 store_audio_profiles,
@@ -848,7 +849,6 @@ def run(args: argparse.Namespace) -> None:
             from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
 
             log.info("Building audio profiles from AcousticBrainz...")
-            ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
             mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
 
             # Get MB artist IDs from the graph database
@@ -877,6 +877,16 @@ def run(args: argparse.Namespace) -> None:
                     graph_id = mb_to_graph_id.get(mb_id)
                     if graph_id is not None:
                         artist_recordings[graph_id] = mbids
+
+                # Create loader: use tar-indexed mode if tar files present, else extracted dir
+                ab_path = Path(args.acousticbrainz_dir)
+                tar_files = list(ab_path.glob("*.tar"))
+                if tar_files:
+                    all_wanted = {m for mbids in artist_recordings.values() for m in mbids}
+                    log.info("  Using tar-indexed loader (%d tar files, %d wanted MBIDs)", len(tar_files), len(all_wanted))
+                    ab_loader = TarAcousticBrainzLoader(args.acousticbrainz_dir, wanted_mbids=all_wanted)
+                else:
+                    ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
 
                 # Build profiles
                 profiles = build_audio_profiles(

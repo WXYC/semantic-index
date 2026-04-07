@@ -6,15 +6,23 @@ recording MBID and organized in a directory tree:
 
     highlevel/{first2}/{char3}/{mbid}-{submission}.json
 
+Supports two loading modes:
+- **Extracted**: reads JSON files from an extracted directory tree
+- **Tar-indexed**: scans .tar archives, builds an in-memory MBID index,
+  and reads features directly from the tar without extraction (much faster
+  on network-attached storage where creating millions of small files is slow)
+
 Each JSON file contains classifier outputs (probability distributions) for
 danceability, genre, mood, timbre, tonality, and voice/instrumental.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
+import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -207,6 +215,118 @@ class AcousticBrainzLoader:
             features = self.get_features(mbid)
             if features is not None:
                 results[mbid] = features
+        return results
+
+
+class TarAcousticBrainzLoader:
+    """Load audio features directly from AcousticBrainz tar archives.
+
+    Scans tar files to build an in-memory index of MBID → (tar_path, member_name),
+    then reads features on demand without extracting. This avoids creating millions
+    of small files on disk, which is critical for network-attached storage.
+
+    Only indexes MBIDs present in the ``wanted_mbids`` set (if provided),
+    keeping memory usage proportional to the number of WXYC artists rather
+    than the full 4M-recording archive.
+
+    Args:
+        tar_dir: Directory containing .tar files from the AcousticBrainz dump.
+        wanted_mbids: Optional set of MBIDs to index. If None, indexes everything.
+    """
+
+    def __init__(self, tar_dir: str, wanted_mbids: set[str] | None = None) -> None:
+        self._tar_dir = Path(tar_dir)
+        self._wanted = wanted_mbids
+        # MBID → (tar_path, member_name)
+        self._index: dict[str, tuple[Path, str]] = {}
+        self._build_index()
+
+    def _build_index(self) -> None:
+        """Scan all tar files and index MBID → location."""
+        tar_files = sorted(self._tar_dir.glob("*.tar"))
+        logger.info("Indexing %d tar files in %s...", len(tar_files), self._tar_dir)
+
+        for tar_path in tar_files:
+            try:
+                with tarfile.open(tar_path) as tf:
+                    for member in tf.getmembers():
+                        if not member.isfile() or not member.name.endswith(".json"):
+                            continue
+                        # Extract MBID from path like highlevel/0e/1/0e11...-0.json
+                        filename = member.name.rsplit("/", 1)[-1]
+                        mbid = filename.rsplit("-", 1)[0]
+                        if self._wanted is not None and mbid not in self._wanted:
+                            continue
+                        if mbid not in self._index:
+                            self._index[mbid] = (tar_path, member.name)
+            except (tarfile.TarError, OSError):
+                logger.warning("Failed to index tar: %s", tar_path, exc_info=True)
+
+            logger.info("  %s: indexed, %d MBIDs total", tar_path.name, len(self._index))
+
+        logger.info("Index complete: %d MBIDs across %d tar files", len(self._index), len(tar_files))
+
+    def get_features(self, recording_mbid: str) -> RecordingFeatures | None:
+        """Load features for a single recording MBID from the tar index.
+
+        Args:
+            recording_mbid: MusicBrainz recording UUID string.
+
+        Returns:
+            Parsed RecordingFeatures, or None if not in the index.
+        """
+        entry = self._index.get(recording_mbid)
+        if entry is None:
+            return None
+
+        tar_path, member_name = entry
+        try:
+            with tarfile.open(tar_path) as tf:
+                f = tf.extractfile(member_name)
+                if f is None:
+                    return None
+                data = json.load(f)
+            return _parse_highlevel(recording_mbid, data)
+        except (tarfile.TarError, json.JSONDecodeError, KeyError, OSError):
+            logger.warning("Failed to read %s from %s", member_name, tar_path)
+            return None
+
+    def batch_get_features(self, mbids: list[str]) -> dict[str, RecordingFeatures]:
+        """Load features for multiple recording MBIDs.
+
+        Groups lookups by tar file to minimize archive opens.
+
+        Args:
+            mbids: List of MusicBrainz recording UUID strings.
+
+        Returns:
+            Dict mapping MBID to RecordingFeatures (only for found MBIDs).
+        """
+        # Group by tar file for efficiency
+        by_tar: dict[Path, list[tuple[str, str]]] = {}
+        for mbid in mbids:
+            entry = self._index.get(mbid)
+            if entry is not None:
+                tar_path, member_name = entry
+                by_tar.setdefault(tar_path, []).append((mbid, member_name))
+
+        results: dict[str, RecordingFeatures] = {}
+        for tar_path, items in by_tar.items():
+            try:
+                with tarfile.open(tar_path) as tf:
+                    for mbid, member_name in items:
+                        try:
+                            f = tf.extractfile(member_name)
+                            if f is None:
+                                continue
+                            data = json.load(f)
+                            features = _parse_highlevel(mbid, data)
+                            results[mbid] = features
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+            except (tarfile.TarError, OSError):
+                logger.warning("Failed to open tar: %s", tar_path)
+
         return results
 
 
