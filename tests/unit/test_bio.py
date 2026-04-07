@@ -11,7 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.bio import _generated_summary, strip_discogs_markup
+from semantic_index.api.bio import _generated_summary, parse_discogs_markup
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ArtistStats
 
@@ -76,21 +76,32 @@ async def bio_client(bio_db_path: str) -> AsyncClient:
         yield client
 
 
-class TestStripDiscogsMarkup:
-    def test_artist_link(self):
-        assert strip_discogs_markup("[a=Rob Brown (3)]") == "Rob Brown"
+class TestParseDiscogsMarkup:
+    def test_artist_link_with_disambiguation(self):
+        result = parse_discogs_markup("[a=Rob Brown (3)]")
+        assert "<a " in result
+        assert "Rob Brown</a>" in result  # display name has disambiguation stripped
+        assert "discogs.com" in result
 
     def test_artist_link_no_disambiguation(self):
-        assert strip_discogs_markup("[a=Sean Booth]") == "Sean Booth"
+        result = parse_discogs_markup("[a=Sean Booth]")
+        assert "Sean Booth</a>" in result
 
-    def test_label_link(self):
-        assert strip_discogs_markup("[l=Warp Records]") == "Warp Records"
-
-    def test_release_link(self):
-        assert strip_discogs_markup("[r=Confield]") == "Confield"
+    def test_label_plain_text(self):
+        result = parse_discogs_markup("[l=Warp Records]")
+        assert result == "Warp Records"
+        assert "<a" not in result
 
     def test_url_link(self):
-        assert strip_discogs_markup("[url=http://example.com]Example[/url]") == "Example"
+        result = parse_discogs_markup("[url=http://example.com]Example[/url]")
+        assert '<a href="http://example.com"' in result
+        assert "Example</a>" in result
+
+    def test_bold(self):
+        assert parse_discogs_markup("[b]bold text[/b]") == "<b>bold text</b>"
+
+    def test_italic(self):
+        assert parse_discogs_markup("[i]italic text[/i]") == "<i>italic text</i>"
 
     def test_full_bio(self):
         bio = (
@@ -98,15 +109,21 @@ class TestStripDiscogsMarkup:
             "Greater Manchester, UK by [a=Rob Brown (3)] and [a=Sean Booth]. "
             "They are also heavily involved with the [a=Gescom] collective."
         )
-        result = strip_discogs_markup(bio)
-        assert "[" not in result
-        assert "Rob Brown" in result
-        assert "Sean Booth" in result
-        assert "Gescom" in result
+        result = parse_discogs_markup(bio)
+        assert "Rob Brown</a>" in result
+        assert "Sean Booth</a>" in result
+        assert "Gescom</a>" in result
+        assert "[a=" not in result
+        assert "[/a]" not in result
 
     def test_plain_text_unchanged(self):
         text = "Just a plain bio with no markup."
-        assert strip_discogs_markup(text) == text
+        assert parse_discogs_markup(text) == text
+
+    def test_html_escaping(self):
+        result = parse_discogs_markup("Tom & Jerry <rock>")
+        assert "&amp;" in result
+        assert "&lt;rock&gt;" in result
 
 
 class TestGeneratedSummary:

@@ -105,6 +105,10 @@
     font-size: 12px; line-height: 1.5; color: #aaa; padding: 8px 20px 0;
     white-space: pre-line;
   }
+  .artist-bio a {
+    color: #6a9fb5; text-decoration: none;
+  }
+  .artist-bio a:hover { text-decoration: underline; }
   .artist-bio.clamped {
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
     overflow: hidden;
@@ -409,7 +413,7 @@ function populateSidebar(centerArtist, neighbors) {
     if (gen !== sidebarGeneration) return;
     if (!data || !data.bio) return;
 
-    bioEl.textContent = data.bio;
+    bioEl.innerHTML = data.bio;
     bioEl.classList.add('clamped');
     bioEl.style.display = 'block';
 
