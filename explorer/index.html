@@ -130,6 +130,36 @@
     transition: border-color 0.15s;
   }
 
+  /* About button */
+  #about-btn {
+    background: none; border: 1px solid #444; color: #888; padding: 5px 9px;
+    border-radius: 4px; font-size: 13px; cursor: pointer; line-height: 1;
+    font-family: inherit; font-weight: 600;
+  }
+  #about-btn:hover { color: #e0e0e0; border-color: #6a9fb5; }
+
+  /* About modal */
+  #about-overlay {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.7); justify-content: center; align-items: center;
+  }
+  #about-overlay.open { display: flex; }
+  #about-modal {
+    background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+    max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto;
+    padding: 32px; position: relative; color: #ccc;
+    font-size: 13px; line-height: 1.7;
+  }
+  #about-modal h2 { font-size: 18px; color: #6a9fb5; margin-bottom: 16px; }
+  #about-modal h3 { font-size: 14px; color: #e0e0e0; margin: 20px 0 8px; }
+  #about-modal p { margin-bottom: 12px; }
+  #about-modal a { color: #6a9fb5; }
+  #about-close {
+    position: absolute; top: 12px; right: 16px;
+    background: none; border: none; color: #888; font-size: 20px; cursor: pointer;
+  }
+  #about-close:hover { color: #e0e0e0; }
+
   /* Controls collapse toggle (hidden on desktop) */
   #controls-toggle {
     display: none; background: none; border: 1px solid #444; color: #888;
@@ -169,6 +199,7 @@
   <span class="title">WXYC</span>
   <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
   <button id="random" title="Random artist">&#x1F3B2;</button>
+  <button id="about-btn" title="About">?</button>
   <button id="controls-toggle" title="Toggle controls">&#x2699;</button>
   <div class="controls-collapsible">
     <div>
@@ -223,6 +254,21 @@
   </div>
 </div>
 
+<div id="about-overlay">
+  <div id="about-modal">
+    <button id="about-close">&times;</button>
+    <h2>WXYC Semantic Index</h2>
+    <h3>The Idea</h3>
+    <p>Every time a WXYC DJ follows one song with another, they're making a creative decision &mdash; drawing a line between two artists that says <em>these belong together right now</em>. Over 22 years of freeform radio programming, WXYC DJs have made millions of these decisions, encoding an enormous map of musical relationships that exists nowhere else.</p>
+    <p>The Semantic Index mines this archive to surface those connections. It reveals an underground geography of music &mdash; not based on algorithms or popularity, but on the curatorial instincts of hundreds of DJs who've sat behind the mic at WXYC 89.3 FM, Chapel Hill's freeform radio station.</p>
+    <h3>What It Does</h3>
+    <p>Search for any artist and explore their neighborhood &mdash; the web of artists that WXYC DJs have woven around them through two decades of programming. The connections go beyond genre: you'll find links between artists who share session musicians, record labels, compilation appearances, and stylistic DNA from Discogs metadata.</p>
+    <p>Each connection is weighted by how often and how meaningfully DJs paired those artists together, using a statistical measure called Pointwise Mutual Information (PMI). A high PMI means the pairing is deliberate, not just two popular artists showing up near each other by chance.</p>
+    <p>The result is a living document of WXYC's musical identity &mdash; a freeform station where a DJ might follow Autechre with Prince Jammy, or Duke Ellington with Jessica Pratt. These aren't random juxtapositions; they're the station's collective ear, made visible.</p>
+    <p style="margin-top:24px;font-size:11px;color:#666;"><a href="https://wxyc.org">WXYC 89.3 FM</a> &middot; Chapel Hill, NC &middot; Student-run freeform radio since 1977</p>
+  </div>
+</div>
+
 <svg id="graph"></svg>
 
 <script type="module">
@@ -263,6 +309,17 @@ const svg = d3.select('#graph')
 // Controls toggle for mobile
 document.getElementById('controls-toggle').addEventListener('click', () => {
   document.querySelector('.controls-collapsible').classList.toggle('open');
+});
+
+// About modal
+document.getElementById('about-btn').addEventListener('click', () => {
+  document.getElementById('about-overlay').classList.add('open');
+});
+document.getElementById('about-close').addEventListener('click', () => {
+  document.getElementById('about-overlay').classList.remove('open');
+});
+document.getElementById('about-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) document.getElementById('about-overlay').classList.remove('open');
 });
 
 const g = svg.append('g');
