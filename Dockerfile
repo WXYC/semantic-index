@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir ".[api]"
 COPY semantic_index/ semantic_index/
 COPY explorer/ explorer/
 COPY data/ data/
+COPY start.sh .
 
-ENV DB_PATH=data/wxyc_artist_graph.db
+ENV DB_PATH=/data/wxyc_artist_graph.db
 
-CMD ["python", "-m", "semantic_index.api"]
+CMD ["./start.sh"]
