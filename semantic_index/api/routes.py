@@ -15,6 +15,7 @@ from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
     ArtistDetail,
     ArtistSummary,
+    AudioProfileResponse,
     DjSummary,
     EntityArtists,
     ExplainResponse,
@@ -41,6 +42,7 @@ class EdgeType(StrEnum):
     COMPILATION = "compilation"
     CROSS_REFERENCE = "crossReference"
     WIKIDATA_INFLUENCE = "wikidataInfluence"
+    ACOUSTIC_SIMILARITY = "acousticSimilarity"
 
 
 def _artist_summary(row: sqlite3.Row) -> ArtistSummary:
@@ -132,6 +134,43 @@ def get_artist_detail(
     to NULL values for entity fields.
     """
     return _get_artist_detail(db, artist_id)
+
+
+@router.get("/artists/{artist_id}/audio", response_model=AudioProfileResponse)
+def get_audio_profile(
+    artist_id: int,
+    db: sqlite3.Connection = Depends(get_db),
+) -> AudioProfileResponse:
+    """Return AcousticBrainz-derived audio profile for an artist.
+
+    Returns 404 if the artist has no audio profile (no AcousticBrainz data
+    found for their recordings).
+    """
+    _get_artist_or_404(db, artist_id)
+    try:
+        row = db.execute(
+            "SELECT artist_id, avg_danceability, primary_genre, "
+            "primary_genre_probability, voice_instrumental_ratio, "
+            "feature_centroid, recording_count "
+            "FROM audio_profile WHERE artist_id = ?",
+            (artist_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        raise HTTPException(status_code=404, detail="Audio profiles not available") from None
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No audio profile for this artist")
+
+    centroid = json.loads(row["feature_centroid"]) if row["feature_centroid"] else None
+    return AudioProfileResponse(
+        artist_id=row["artist_id"],
+        avg_danceability=row["avg_danceability"],
+        primary_genre=row["primary_genre"],
+        primary_genre_probability=row["primary_genre_probability"],
+        voice_instrumental_ratio=row["voice_instrumental_ratio"],
+        recording_count=row["recording_count"],
+        feature_centroid=centroid,
+    )
 
 
 @router.get("/artists/{artist_id}/neighbors", response_model=NeighborsResponse)
@@ -304,6 +343,10 @@ def _query_neighbors(
             return _neighbors_cross_reference(db, artist_id, limit)
         case EdgeType.WIKIDATA_INFLUENCE:
             return _neighbors_wikidata_influence(db, artist_id, limit)
+        case EdgeType.ACOUSTIC_SIMILARITY:
+            return _neighbors_symmetric(
+                db, artist_id, limit, "acoustic_similarity", "similarity", ["similarity"]
+            )
 
 
 def _neighbors_dj_transition(
@@ -659,6 +702,18 @@ def _neighbors_affinity(db: sqlite3.Connection, artist_id: int, limit: int) -> l
         )
     )
 
+    # Acoustic similarity
+    edge_queries.append(
+        (
+            "SELECT artist_b_id, 'acousticSimilarity', similarity "
+            "FROM acoustic_similarity WHERE artist_a_id = ? "
+            "UNION ALL "
+            "SELECT artist_a_id, 'acousticSimilarity', similarity "
+            "FROM acoustic_similarity WHERE artist_b_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
     # Collect all edges, keyed by neighbor ID
     neighbor_edges: dict[int, list[tuple[str, float]]] = {}
     for sql, params in edge_queries:
@@ -689,6 +744,7 @@ def _neighbors_affinity(db: sqlite3.Connection, artist_id: int, limit: int) -> l
         "compilation": 1.0,
         "member": 2.0,
         "influence": 1.5,
+        "acousticSimilarity": 2.0,
     }
 
     # Compute composite scores
@@ -878,6 +934,16 @@ def _query_explain(
             return _explain_cross_reference(db, source_id, target_id)
         case EdgeType.WIKIDATA_INFLUENCE:
             return _explain_wikidata_influence(db, source_id, target_id)
+        case EdgeType.ACOUSTIC_SIMILARITY:
+            return _explain_symmetric(
+                db,
+                source_id,
+                target_id,
+                "acousticSimilarity",
+                "acoustic_similarity",
+                "similarity",
+                ["similarity"],
+            )
         case EdgeType.AFFINITY:
             return []  # affinity is a composite — explain uses individual types
 
@@ -911,12 +977,15 @@ def _explain_symmetric(
     detail_cols: list[str],
 ) -> list[Relationship]:
     col_list = ", ".join(detail_cols)
-    row = db.execute(
-        f"SELECT {col_list} FROM {table} "  # noqa: S608
-        f"WHERE (artist_a_id = ? AND artist_b_id = ?) "
-        f"   OR (artist_a_id = ? AND artist_b_id = ?)",
-        (source_id, target_id, target_id, source_id),
-    ).fetchone()
+    try:
+        row = db.execute(
+            f"SELECT {col_list} FROM {table} "  # noqa: S608
+            f"WHERE (artist_a_id = ? AND artist_b_id = ?) "
+            f"   OR (artist_a_id = ? AND artist_b_id = ?)",
+            (source_id, target_id, target_id, source_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return []  # table doesn't exist
     if row is None:
         return []
     detail = {}

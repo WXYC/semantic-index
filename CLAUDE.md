@@ -12,6 +12,7 @@ SQL dump → sql_parser → artist_resolver → adjacency → pmi ────�
                        → node_attributes ────────────────────────────────→
          → discogs_client → discogs_enrichment → discogs_edges ─────────→
          → wikidata_client → wikidata_influence ────────────────────────→
+         → musicbrainz_client → acousticbrainz (feature loader) ───────→ audio_profile + acoustic_similarity
 
 SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
@@ -35,6 +36,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
+| `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features from extracted data dump, aggregate per-artist audio profiles, compute cosine similarity edges. |
+| `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: artist name matching and recording MBID resolution via `mb_artist_recording` materialized view. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
@@ -94,6 +97,24 @@ CREATE TABLE wikidata_influence (
     source_qid TEXT NOT NULL,
     target_qid TEXT NOT NULL,
     PRIMARY KEY (source_id, target_id)
+);
+
+CREATE TABLE audio_profile (
+    artist_id INTEGER PRIMARY KEY REFERENCES artist(id),
+    avg_danceability REAL,
+    primary_genre TEXT,
+    primary_genre_probability REAL,
+    voice_instrumental_ratio REAL,
+    feature_centroid TEXT,  -- JSON array of 20 floats
+    recording_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE acoustic_similarity (
+    artist_a_id INTEGER NOT NULL REFERENCES artist(id),
+    artist_b_id INTEGER NOT NULL REFERENCES artist(id),
+    similarity REAL NOT NULL,
+    PRIMARY KEY (artist_a_id, artist_b_id)
 );
 
 -- Entity store tables (created by EntityStore.initialize())

@@ -112,6 +112,18 @@ class BandcampAlbumResponse(BaseModel):
     cached: bool
 
 
+class AudioProfileResponse(BaseModel):
+    """Response for GET /graph/artists/{id}/audio."""
+
+    artist_id: int
+    avg_danceability: float | None = None
+    primary_genre: str | None = None
+    primary_genre_probability: float | None = None
+    voice_instrumental_ratio: float | None = None
+    recording_count: int = 0
+    feature_centroid: list[float] | None = None
+
+
 class DjSummary(BaseModel):
     """Minimal DJ representation for facet dropdowns."""
 
