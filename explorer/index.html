@@ -51,7 +51,9 @@
     display: flex; flex-direction: column; z-index: 15;
   }
   .sidebar-header {
-    padding: 16px 20px; border-bottom: 1px solid #333; flex-shrink: 0;
+    padding: 12px 20px; border-bottom: 1px solid #333; flex-shrink: 0;
+    display: flex; flex-direction: column; justify-content: center;
+    min-height: 45px; box-sizing: border-box;
   }
   .sidebar-header .artist-name {
     font-size: 16px; font-weight: 600; color: #6a9fb5; display: block;
@@ -127,6 +129,37 @@
     padding: 3px 8px; border: 1px solid #333; border-radius: 3px;
     transition: border-color 0.15s;
   }
+
+  /* Controls collapse toggle (hidden on desktop) */
+  #controls-toggle {
+    display: none; background: none; border: 1px solid #444; color: #888;
+    padding: 5px 8px; border-radius: 4px; font-size: 13px; cursor: pointer; line-height: 1;
+  }
+  #controls-toggle:hover { color: #e0e0e0; border-color: #6a9fb5; }
+  .controls-collapsible { display: contents; }
+
+  /* Mobile layout */
+  @media (max-width: 768px) {
+    body { overflow: auto; }
+
+    #controls {
+      position: sticky; top: 0; right: 0;
+      flex-wrap: wrap; padding: 8px 12px; gap: 8px;
+    }
+    #controls input[type="text"] { width: 140px; font-size: 12px; }
+    #controls-toggle { display: inline-block; }
+    .controls-collapsible { display: none; }
+    .controls-collapsible.open { display: contents; }
+    #status { display: none; }
+
+    #sidebar {
+      position: static; width: 100%; height: auto;
+      border-left: none; border-top: 1px solid #333;
+    }
+    .sidebar-list { overflow-y: visible; }
+
+    svg#graph { width: 100% !important; height: 50vh !important; display: block; }
+  }
   .external-links a:hover { border-color: #6a9fb5; }
 </style>
 </head>
@@ -136,32 +169,35 @@
   <span class="title">WXYC</span>
   <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
   <button id="random" title="Random artist">&#x1F3B2;</button>
-  <div>
-    <label>Edge type</label>
-    <select id="edgeType">
-      <option value="djTransition">DJ Transitions</option>
-      <option value="sharedPersonnel">Shared Personnel</option>
-      <option value="sharedStyle">Shared Style</option>
-      <option value="labelFamily">Label Family</option>
-      <option value="compilation">Compilation</option>
-      <option value="crossReference">Cross-Reference</option>
-    </select>
-  </div>
-  <div>
-    <label>Depth</label>
-    <select id="depth">
-      <option value="1">1 hop</option>
-      <option value="2" selected>2 hops</option>
-    </select>
-  </div>
-  <div>
-    <label>Limit</label>
-    <select id="neighborLimit">
-      <option value="5">5</option>
-      <option value="10" selected>10</option>
-      <option value="20">20</option>
-      <option value="50">50</option>
-    </select>
+  <button id="controls-toggle" title="Toggle controls">&#x2699;</button>
+  <div class="controls-collapsible">
+    <div>
+      <label>Edge type</label>
+      <select id="edgeType">
+        <option value="djTransition">DJ Transitions</option>
+        <option value="sharedPersonnel">Shared Personnel</option>
+        <option value="sharedStyle">Shared Style</option>
+        <option value="labelFamily">Label Family</option>
+        <option value="compilation">Compilation</option>
+        <option value="crossReference">Cross-Reference</option>
+      </select>
+    </div>
+    <div>
+      <label>Depth</label>
+      <select id="depth">
+        <option value="1">1 hop</option>
+        <option value="2" selected>2 hops</option>
+      </select>
+    </div>
+    <div>
+      <label>Limit</label>
+      <select id="neighborLimit">
+        <option value="5">5</option>
+        <option value="10" selected>10</option>
+        <option value="20">20</option>
+        <option value="50">50</option>
+      </select>
+    </div>
   </div>
   <select id="monthFilter" style="display:none"><option value="">All</option></select>
   <select id="djFilter" style="display:none"><option value="">All</option></select>
@@ -216,12 +252,18 @@ const GENRE_COLORS = {
 };
 const DEFAULT_COLOR = '#555';
 
-const width = window.innerWidth - SIDEBAR_WIDTH;
-const height = window.innerHeight;
+const isMobile = window.innerWidth <= 768;
+const width = isMobile ? window.innerWidth : window.innerWidth - SIDEBAR_WIDTH;
+const height = isMobile ? window.innerHeight * 0.5 : window.innerHeight;
 
 const svg = d3.select('#graph')
   .attr('width', width)
   .attr('height', height);
+
+// Controls toggle for mobile
+document.getElementById('controls-toggle').addEventListener('click', () => {
+  document.querySelector('.controls-collapsible').classList.toggle('open');
+});
 
 const g = svg.append('g');
 
