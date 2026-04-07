@@ -274,14 +274,7 @@ def _query_neighbors(
         case EdgeType.DJ_TRANSITION:
             return _neighbors_dj_transition(db, artist_id, limit)
         case EdgeType.SHARED_PERSONNEL:
-            return _neighbors_symmetric(
-                db,
-                artist_id,
-                limit,
-                "shared_personnel",
-                "shared_count",
-                ["shared_count", "shared_names"],
-            )
+            return _neighbors_shared_personnel(db, artist_id, limit)
         case EdgeType.SHARED_STYLE:
             return _neighbors_symmetric(
                 db, artist_id, limit, "shared_style", "jaccard", ["jaccard", "shared_tags"]
@@ -560,6 +553,70 @@ def _neighbors_symmetric(
             detail[col] = val
         weight = float(r[weight_col]) if weight_col else 1.0
         results.append(NeighborEntry(artist=_artist_summary(r), weight=weight, detail=detail))
+    return results
+
+
+def _neighbors_shared_personnel(
+    db: sqlite3.Connection, artist_id: int, limit: int
+) -> list[NeighborEntry]:
+    """Query shared personnel + band membership as a single edge type."""
+    # Try shared_personnel table first, then union with member_of
+    try:
+        rows = db.execute(
+            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            "  e.shared_count AS weight, e.shared_names AS detail, 'personnel' AS source "
+            "FROM shared_personnel e "
+            "JOIN artist a ON a.id = e.artist_b_id "
+            "WHERE e.artist_a_id = ? "
+            "UNION ALL "
+            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            "  e.shared_count, e.shared_names, 'personnel' "
+            "FROM shared_personnel e "
+            "JOIN artist a ON a.id = e.artist_a_id "
+            "WHERE e.artist_b_id = ? "
+            "UNION ALL "
+            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            "  1, '\"member\"', 'member' "
+            "FROM member_of m "
+            "JOIN artist a ON a.id = m.member_id "
+            "WHERE m.group_id = ? "
+            "UNION ALL "
+            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            "  1, '\"member\"', 'member' "
+            "FROM member_of m "
+            "JOIN artist a ON a.id = m.group_id "
+            "WHERE m.member_id = ? "
+            "ORDER BY weight DESC LIMIT ?",
+            (artist_id, artist_id, artist_id, artist_id, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Fallback if member_of table doesn't exist
+        return _neighbors_symmetric(
+            db,
+            artist_id,
+            limit,
+            "shared_personnel",
+            "shared_count",
+            ["shared_count", "shared_names"],
+        )
+
+    seen: set[int] = set()
+    results: list[NeighborEntry] = []
+    for r in rows:
+        if r["id"] in seen:
+            continue
+        seen.add(r["id"])
+        source = r["source"]
+        if source == "member":
+            detail = {"relationship": "member/group"}
+        else:
+            shared_names = r["detail"]
+            if isinstance(shared_names, str) and shared_names.startswith("["):
+                shared_names = json.loads(shared_names)
+            detail = {"shared_count": r["weight"], "shared_names": shared_names}
+        results.append(
+            NeighborEntry(artist=_artist_summary(r), weight=float(r["weight"]), detail=detail)
+        )
     return results
 
 
