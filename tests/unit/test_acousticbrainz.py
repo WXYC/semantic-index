@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from semantic_index.acousticbrainz import (
     AcousticBrainzLoader,
     ArtistAudioProfile,
     RecordingFeatures,
+    TarAcousticBrainzLoader,
     build_audio_profiles,
     cosine_similarity,
     store_audio_profiles,
@@ -193,6 +195,19 @@ def ab_data_dir(tmp_path: Path) -> Path:
         ),
     )
     return tmp_path
+
+
+@pytest.fixture
+def ab_tar_dir(tmp_path: Path, ab_data_dir: Path) -> Path:
+    """Create a tar archive from the mock AcousticBrainz data for tar loader tests."""
+    tar_dir = tmp_path / "tar_dir"
+    tar_dir.mkdir()
+    tar_path = tar_dir / "shard-0.tar"
+    with tarfile.open(tar_path, "w") as tf:
+        for json_file in ab_data_dir.rglob("*.json"):
+            arcname = str(json_file.relative_to(ab_data_dir))
+            tf.add(json_file, arcname=arcname)
+    return tar_dir
 
 
 # --- RecordingFeatures parsing ---
@@ -466,3 +481,49 @@ class TestBuildAudioProfiles:
         assert len(profiles) == 1
         assert 1 in profiles  # 2 recordings
         assert 2 not in profiles  # filtered out
+
+
+# --- Tar loader ---
+
+
+class TestTarAcousticBrainzLoader:
+    """Test loading features directly from tar archives."""
+
+    def test_get_features_from_tar(self, ab_tar_dir: Path) -> None:
+        loader = TarAcousticBrainzLoader(str(ab_tar_dir))
+        features = loader.get_features(MBID_AUTECHRE_1)
+
+        assert features is not None
+        assert features.recording_mbid == MBID_AUTECHRE_1
+        assert features.genre == "electronic"
+
+    def test_missing_mbid_returns_none(self, ab_tar_dir: Path) -> None:
+        loader = TarAcousticBrainzLoader(str(ab_tar_dir))
+        assert loader.get_features(MBID_MISSING) is None
+
+    def test_batch_get_from_tar(self, ab_tar_dir: Path) -> None:
+        loader = TarAcousticBrainzLoader(str(ab_tar_dir))
+        results = loader.batch_get_features([MBID_AUTECHRE_1, MBID_STEREOLAB, MBID_MISSING])
+
+        assert len(results) == 2
+        assert MBID_AUTECHRE_1 in results
+        assert MBID_STEREOLAB in results
+
+    def test_wanted_mbids_filter(self, ab_tar_dir: Path) -> None:
+        """Only index MBIDs in the wanted set."""
+        loader = TarAcousticBrainzLoader(str(ab_tar_dir), wanted_mbids={MBID_AUTECHRE_1})
+
+        assert loader.get_features(MBID_AUTECHRE_1) is not None
+        assert loader.get_features(MBID_STEREOLAB) is None  # not in wanted set
+
+    def test_build_profiles_with_tar_loader(self, ab_tar_dir: Path) -> None:
+        """TarAcousticBrainzLoader works with build_audio_profiles."""
+        loader = TarAcousticBrainzLoader(str(ab_tar_dir))
+        artist_recordings = {
+            1: [MBID_AUTECHRE_1, MBID_AUTECHRE_2],
+            2: [MBID_STEREOLAB],
+        }
+        profiles = build_audio_profiles(loader, artist_recordings, min_recordings=1)
+
+        assert len(profiles) == 2
+        assert profiles[1].recording_count == 2
