@@ -70,3 +70,39 @@ class TestBatchLookup:
         result = client.batch_lookup([])
 
         assert result == {}
+
+
+class TestGetRecordingMbids:
+    """Tests for recording MBID lookup via materialized view."""
+
+    def test_returns_mbids_grouped_by_artist(self):
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            (2914, "a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+            (2914, "a1b2c3d4-e5f6-7890-abcd-ef1234567891"),
+            (19808, "b2c3d4e5-f6a7-8901-bcde-f12345678901"),
+        ]
+
+        client = _make_client(mock_conn)
+        result = client.get_recording_mbids([2914, 19808])
+
+        assert len(result) == 2
+        assert len(result[2914]) == 2
+        assert len(result[19808]) == 1
+        assert "a1b2c3d4-e5f6-7890-abcd-ef1234567890" in result[2914]
+
+    def test_empty_list_returns_empty(self):
+        mock_conn = MagicMock()
+        client = _make_client(mock_conn)
+        result = client.get_recording_mbids([])
+
+        assert result == {}
+
+    def test_no_recordings_returns_empty_for_artist(self):
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        client = _make_client(mock_conn)
+        result = client.get_recording_mbids([99999])
+
+        assert result == {}

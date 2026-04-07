@@ -171,6 +171,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Loads resolved entries from cache, recomputes adjacency pairs, reads artist IDs "
         "from the existing database, and calls export_facet_tables. Skips all other steps.",
     )
+    parser.add_argument(
+        "--acousticbrainz-dir",
+        default=os.environ.get("ACOUSTICBRAINZ_DIR"),
+        help="Path to extracted AcousticBrainz data dump. "
+        "Requires --musicbrainz-cache-dsn for recording MBID resolution.",
+    )
+    parser.add_argument(
+        "--min-recordings",
+        type=int,
+        default=3,
+        help="Minimum recordings per artist for audio profile (default: 3)",
+    )
+    parser.add_argument(
+        "--acoustic-similarity-threshold",
+        type=float,
+        default=0.85,
+        help="Minimum cosine similarity for acoustic similarity edges (default: 0.85)",
+    )
     return parser.parse_args(argv)
 
 
@@ -797,6 +815,8 @@ def run(args: argparse.Namespace) -> None:
     sqlite_path = (
         Path(args.entity_store_path) if entity_store else output_dir / "wxyc_artist_graph.db"
     )
+    audio_profile_count = 0
+    acoustic_edge_count = 0
     if not args.no_sqlite:
         log.info("Exporting SQLite database...")
         export_sqlite(
@@ -814,6 +834,69 @@ def run(args: argparse.Namespace) -> None:
             wikidata_influence_edges=influence_edges,
         )
         log.info("SQLite written to %s", sqlite_path)
+
+        # 13b. AcousticBrainz audio profiles (optional)
+        audio_profile_count = 0
+        acoustic_edge_count = 0
+        if args.acousticbrainz_dir and args.musicbrainz_cache_dsn:
+            from semantic_index.acousticbrainz import (
+                AcousticBrainzLoader,
+                build_audio_profiles,
+                compute_acoustic_similarity,
+                store_audio_profiles,
+            )
+            from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
+
+            log.info("Building audio profiles from AcousticBrainz...")
+            ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
+            mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
+
+            # Get MB artist IDs from the graph database
+            _ab_conn = _sqlite3.connect(str(sqlite_path))
+            mb_rows = _ab_conn.execute(
+                "SELECT id, musicbrainz_artist_id FROM artist "
+                "WHERE musicbrainz_artist_id IS NOT NULL"
+            ).fetchall()
+            _ab_conn.close()
+
+            if mb_rows:
+                # Map graph artist IDs → MB artist IDs
+                graph_id_to_mb = {row[0]: int(row[1]) for row in mb_rows}
+                mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
+                mb_ids = list(graph_id_to_mb.values())
+                log.info("  %d artists with MusicBrainz IDs", len(mb_ids))
+
+                # Resolve MB artists → recording MBIDs
+                mb_recordings = mb_client.get_recording_mbids(mb_ids)
+                total_recordings = sum(len(v) for v in mb_recordings.values())
+                log.info("  %d recording MBIDs across %d artists", total_recordings, len(mb_recordings))
+
+                # Remap to graph artist IDs
+                artist_recordings: dict[int, list[str]] = {}
+                for mb_id, mbids in mb_recordings.items():
+                    graph_id = mb_to_graph_id.get(mb_id)
+                    if graph_id is not None:
+                        artist_recordings[graph_id] = mbids
+
+                # Build profiles
+                profiles = build_audio_profiles(
+                    ab_loader, artist_recordings, min_recordings=args.min_recordings
+                )
+                audio_profile_count = len(profiles)
+                log.info("  %d audio profiles built", audio_profile_count)
+
+                if profiles:
+                    _ab_conn = _sqlite3.connect(str(sqlite_path))
+                    store_audio_profiles(_ab_conn, profiles)
+                    acoustic_edge_count = compute_acoustic_similarity(
+                        _ab_conn, profiles, threshold=args.acoustic_similarity_threshold
+                    )
+                    _ab_conn.close()
+                    log.info("  %d acoustic similarity edges", acoustic_edge_count)
+            else:
+                log.warning("  No artists with MusicBrainz IDs — skipping audio profiles")
+        elif args.acousticbrainz_dir and not args.musicbrainz_cache_dsn:
+            log.warning("--acousticbrainz-dir requires --musicbrainz-cache-dsn for recording lookup")
 
         # 14. Export facet tables for dynamic PMI
         log.info("Exporting facet tables...")
@@ -873,6 +956,9 @@ def run(args: argparse.Namespace) -> None:
         print(f"  Labels created:          {lh_report.labels_created:>12,}")
         print(f"  Labels matched (WD):     {lh_report.labels_matched:>12,}")
         print(f"  Label hierarchy edges:   {lh_report.hierarchy_edges:>12,}")
+    if audio_profile_count > 0:
+        print(f"  Audio profiles:          {audio_profile_count:>12,}")
+        print(f"  Acoustic sim edges:      {acoustic_edge_count:>12,}")
     if dedup_report is not None and dedup_report.groups_found > 0:
         print(f"  Dedup groups:            {dedup_report.groups_found:>12,}")
         print(f"  Entities merged:         {dedup_report.entities_merged:>12,}")
