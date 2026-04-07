@@ -33,6 +33,7 @@ router = APIRouter(prefix="/graph", tags=["graph"])
 class EdgeType(StrEnum):
     """Supported edge types for neighbor queries."""
 
+    AFFINITY = "affinity"
     DJ_TRANSITION = "djTransition"
     SHARED_PERSONNEL = "sharedPersonnel"
     SHARED_STYLE = "sharedStyle"
@@ -271,6 +272,8 @@ def _query_neighbors(
 ) -> list[NeighborEntry]:
     """Query neighbors for a given edge type."""
     match edge_type:
+        case EdgeType.AFFINITY:
+            return _neighbors_affinity(db, artist_id, limit)
         case EdgeType.DJ_TRANSITION:
             return _neighbors_dj_transition(db, artist_id, limit)
         case EdgeType.SHARED_PERSONNEL:
@@ -556,10 +559,184 @@ def _neighbors_symmetric(
     return results
 
 
+def _neighbors_affinity(db: sqlite3.Connection, artist_id: int, limit: int) -> list[NeighborEntry]:
+    """Composite affinity score across all edge types.
+
+    Queries every edge table, normalizes each score to 0-1, and sums
+    across dimensions. Neighbors connected on multiple dimensions rank
+    higher. The detail dict lists which edge types contributed.
+    """
+    # Each subquery returns (neighbor_id, edge_type, raw_score).
+    # We normalize and aggregate in Python for flexibility.
+    edge_queries = []
+
+    # DJ transitions (PMI-based)
+    edge_queries.append(
+        (
+            "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score "
+            "FROM dj_transition WHERE source_id = ? "
+            "UNION ALL "
+            "SELECT source_id, 'djTransition', pmi "
+            "FROM dj_transition WHERE target_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Shared style (Jaccard)
+    edge_queries.append(
+        (
+            "SELECT artist_b_id, 'sharedStyle', jaccard "
+            "FROM shared_style WHERE artist_a_id = ? "
+            "UNION ALL "
+            "SELECT artist_a_id, 'sharedStyle', jaccard "
+            "FROM shared_style WHERE artist_b_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Shared personnel
+    edge_queries.append(
+        (
+            "SELECT artist_b_id, 'sharedPersonnel', shared_count "
+            "FROM shared_personnel WHERE artist_a_id = ? "
+            "UNION ALL "
+            "SELECT artist_a_id, 'sharedPersonnel', shared_count "
+            "FROM shared_personnel WHERE artist_b_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Label family
+    edge_queries.append(
+        (
+            "SELECT artist_b_id, 'labelFamily', 1 "
+            "FROM label_family WHERE artist_a_id = ? "
+            "UNION ALL "
+            "SELECT artist_a_id, 'labelFamily', 1 "
+            "FROM label_family WHERE artist_b_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Compilation
+    edge_queries.append(
+        (
+            "SELECT artist_b_id, 'compilation', compilation_count "
+            "FROM compilation WHERE artist_a_id = ? "
+            "UNION ALL "
+            "SELECT artist_a_id, 'compilation', compilation_count "
+            "FROM compilation WHERE artist_b_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Member of (band membership)
+    edge_queries.append(
+        (
+            "SELECT member_id, 'member', 1 "
+            "FROM member_of WHERE group_id = ? "
+            "UNION ALL "
+            "SELECT group_id, 'member', 1 "
+            "FROM member_of WHERE member_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Wikidata influence
+    edge_queries.append(
+        (
+            "SELECT target_id, 'influence', 1 "
+            "FROM wikidata_influence WHERE source_id = ? "
+            "UNION ALL "
+            "SELECT source_id, 'influence', 1 "
+            "FROM wikidata_influence WHERE target_id = ?",
+            (artist_id, artist_id),
+        )
+    )
+
+    # Collect all edges, keyed by neighbor ID
+    neighbor_edges: dict[int, list[tuple[str, float]]] = {}
+    for sql, params in edge_queries:
+        try:
+            for row in db.execute(sql, params):
+                nid = row[0]
+                etype = row[1]
+                score = float(row[2])
+                neighbor_edges.setdefault(nid, []).append((etype, score))
+        except sqlite3.OperationalError:
+            continue  # table doesn't exist
+
+    if not neighbor_edges:
+        return []
+
+    # Compute per-type max scores for normalization
+    type_maxes: dict[str, float] = {}
+    for edges in neighbor_edges.values():
+        for etype, score in edges:
+            type_maxes[etype] = max(type_maxes.get(etype, 0), score)
+
+    # Dimension weights — DJ transitions are the primary signal
+    dim_weights: dict[str, float] = {
+        "djTransition": 3.0,
+        "sharedStyle": 1.0,
+        "sharedPersonnel": 1.5,
+        "labelFamily": 1.0,
+        "compilation": 1.0,
+        "member": 2.0,
+        "influence": 1.5,
+    }
+
+    # Compute composite scores
+    scored: list[tuple[int, float, list[str]]] = []
+    for nid, edges in neighbor_edges.items():
+        composite = 0.0
+        types = []
+        seen_types: set[str] = set()
+        for etype, score in edges:
+            if etype in seen_types:
+                continue
+            seen_types.add(etype)
+            max_score = type_maxes.get(etype, 1) or 1
+            w = dim_weights.get(etype, 1.0)
+            composite += w * (score / max_score)  # weighted normalized score
+            types.append(etype)
+        scored.append((nid, composite, types))
+
+    # Sort by composite score descending, take top N
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[:limit]
+
+    # Fetch artist details for the top neighbors
+    ids = [nid for nid, _, _ in top]
+    placeholders = ",".join("?" * len(ids))
+    artist_rows = db.execute(
+        f"SELECT id, canonical_name, genre, total_plays FROM artist WHERE id IN ({placeholders})",  # noqa: S608
+        ids,
+    ).fetchall()
+    artist_map = {r["id"]: r for r in artist_rows}
+
+    results: list[NeighborEntry] = []
+    for nid, composite, types in top:
+        r = artist_map.get(nid)
+        if not r:
+            continue
+        results.append(
+            NeighborEntry(
+                artist=_artist_summary(r),
+                weight=round(composite, 3),
+                detail={"dimensions": len(types), "types": types},
+            )
+        )
+    return results
+
+
 def _neighbors_shared_personnel(
     db: sqlite3.Connection, artist_id: int, limit: int
 ) -> list[NeighborEntry]:
-    """Query shared personnel + band membership as a single edge type."""
+    """Query shared personnel + band membership as a single edge type.
+
+    .. seealso:: :func:`_neighbors_affinity` for the composite edge type.
+    """
     # Try shared_personnel table first, then union with member_of
     try:
         rows = db.execute(
