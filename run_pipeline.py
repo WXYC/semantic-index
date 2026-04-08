@@ -885,6 +885,7 @@ def run(args: argparse.Namespace) -> None:
                 # Create loader: use tar-indexed mode if tar files present, else extracted dir
                 ab_path = Path(args.acousticbrainz_dir)
                 tar_files = list(ab_path.glob("*.tar"))
+                preloaded = None
                 if tar_files:
                     all_wanted = {m for mbids in artist_recordings.values() for m in mbids}
                     log.info(
@@ -895,12 +896,18 @@ def run(args: argparse.Namespace) -> None:
                     ab_loader = TarAcousticBrainzLoader(
                         args.acousticbrainz_dir, wanted_mbids=all_wanted
                     )
+                    # Bulk load all features in a single pass per tar (much faster over NAS)
+                    log.info("  Bulk loading features from tar files...")
+                    preloaded = ab_loader.bulk_load_all_features()
                 else:
                     ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
 
                 # Build profiles
                 profiles = build_audio_profiles(
-                    ab_loader, artist_recordings, min_recordings=args.min_recordings
+                    ab_loader,
+                    artist_recordings,
+                    min_recordings=args.min_recordings,
+                    preloaded=preloaded,
                 )
                 audio_profile_count = len(profiles)
                 log.info("  %d audio profiles built", audio_profile_count)

@@ -428,6 +428,59 @@ class TarAcousticBrainzLoader:
 
         return results
 
+    def bulk_load_all_features(self) -> dict[str, RecordingFeatures]:
+        """Load features for ALL indexed MBIDs in a single pass per tar.
+
+        Instead of opening each tar multiple times (once per artist), this
+        method reads each tar file exactly once, extracting every matching
+        recording in one sequential scan. This is orders of magnitude faster
+        over NAS where tar seek overhead dominates.
+
+        Returns:
+            Dict mapping MBID to RecordingFeatures for all indexed recordings.
+        """
+        # Group index by tar file
+        by_tar: dict[str, list[tuple[str, str]]] = {}
+        for mbid, (tar_file, member_name) in self._index.items():
+            by_tar.setdefault(tar_file, []).append((mbid, member_name))
+
+        results: dict[str, RecordingFeatures] = {}
+        total_tars = len(by_tar)
+
+        for i, (tar_file, items) in enumerate(sorted(by_tar.items()), 1):
+            tar_path = self._tar_dir / tar_file
+            member_lookup = {member_name: mbid for mbid, member_name in items}
+            shard_count = 0
+
+            try:
+                with tarfile.open(tar_path) as tf:
+                    for member in tf:
+                        if member.name in member_lookup:
+                            try:
+                                f = tf.extractfile(member)
+                                if f is None:
+                                    continue
+                                data = json.load(f)
+                                mbid = member_lookup[member.name]
+                                results[mbid] = _parse_highlevel(mbid, data)
+                                shard_count += 1
+                            except (json.JSONDecodeError, KeyError):
+                                continue
+            except (tarfile.TarError, OSError):
+                logger.warning("Failed to read tar: %s (skipping)", tar_path)
+
+            logger.info(
+                "  %s: %d features loaded (%d/%d tars, %d total)",
+                tar_file,
+                shard_count,
+                i,
+                total_tars,
+                len(results),
+            )
+
+        logger.info("Bulk load complete: %d features from %d tar files", len(results), total_tars)
+        return results
+
 
 @dataclass
 class ArtistAudioProfile:
@@ -513,9 +566,10 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def build_audio_profiles(
-    loader: AcousticBrainzLoader,
+    loader: AcousticBrainzLoader | TarAcousticBrainzLoader,
     artist_recordings: dict[int, list[str]],
     min_recordings: int = 3,
+    preloaded: dict[str, RecordingFeatures] | None = None,
 ) -> dict[int, ArtistAudioProfile]:
     """Build aggregated audio profiles for artists with AcousticBrainz data.
 
@@ -523,10 +577,15 @@ def build_audio_profiles(
     dump. Only creates profiles for artists with at least ``min_recordings``
     successfully loaded.
 
+    When ``preloaded`` is provided, features are looked up from the dict
+    instead of calling the loader per-artist. Use this with
+    ``TarAcousticBrainzLoader.bulk_load_all_features()`` for best NAS performance.
+
     Args:
-        loader: AcousticBrainzLoader pointed at the extracted dump.
+        loader: AcousticBrainzLoader or TarAcousticBrainzLoader.
         artist_recordings: Mapping of artist ID → list of recording MBIDs.
         min_recordings: Minimum recordings required to create a profile.
+        preloaded: Optional pre-loaded features dict (MBID → RecordingFeatures).
 
     Returns:
         Dict mapping artist ID to ArtistAudioProfile.
@@ -535,8 +594,11 @@ def build_audio_profiles(
     total = len(artist_recordings)
 
     for i, (artist_id, mbids) in enumerate(artist_recordings.items(), 1):
-        features_map = loader.batch_get_features(mbids)
-        recordings = list(features_map.values())
+        if preloaded is not None:
+            recordings = [preloaded[m] for m in mbids if m in preloaded]
+        else:
+            features_map = loader.batch_get_features(mbids)
+            recordings = list(features_map.values())
 
         if len(recordings) < min_recordings:
             continue
