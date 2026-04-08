@@ -35,6 +35,21 @@
     border-radius: 4px; font-family: inherit; font-size: 13px; width: 260px;
   }
   #controls input:focus { outline: none; border-color: #6a9fb5; }
+  .search-wrapper { position: relative; }
+  #search-dropdown {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 30;
+    background: #1a1a1a; border: 1px solid #444; border-top: none;
+    border-radius: 0 0 4px 4px; max-height: 300px; overflow-y: auto;
+    display: none;
+  }
+  #search-dropdown.open { display: block; }
+  .search-option {
+    padding: 6px 10px; cursor: pointer; font-size: 13px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .search-option:hover, .search-option.active { background: rgba(106,159,181,0.15); }
+  .search-option .artist-name { color: #e0e0e0; }
+  .search-option .artist-meta { color: #666; font-size: 11px; }
   #controls select {
     background: #1a1a1a; border: 1px solid #444; color: #e0e0e0; padding: 6px 8px;
     border-radius: 4px; font-family: inherit; font-size: 12px;
@@ -213,7 +228,10 @@
 
 <div id="controls">
   <span class="title">WXYC</span>
-  <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
+  <div class="search-wrapper">
+    <input type="text" id="search" placeholder="Search artist..." autocomplete="off">
+    <div id="search-dropdown"></div>
+  </div>
   <button id="random" title="Random artist">&#x1F3B2;</button>
   <button id="about-btn" title="About">?</button>
   <button id="controls-toggle" title="Toggle controls">&#x2699;</button>
@@ -915,29 +933,96 @@ function clearGraph() {
   clearEdgeHighlight();
 }
 
-// Search with debounce
+// Search autocomplete dropdown
 let searchTimeout;
+let activeIndex = -1;
+let dropdownResults = [];
 const searchInput = document.getElementById('search');
+const dropdown = document.getElementById('search-dropdown');
+
+function selectResult(artist) {
+  dropdown.classList.remove('open');
+  activeIndex = -1;
+  dropdownResults = [];
+  searchInput.value = artist.canonical_name;
+  clearGraph();
+  loadNeighborhood(artist.id, artist.canonical_name, parseInt(document.getElementById('depth').value));
+}
+
+function closeDropdown() {
+  dropdown.classList.remove('open');
+  dropdown.innerHTML = '';
+  activeIndex = -1;
+  dropdownResults = [];
+}
+
+function renderDropdown(results) {
+  if (!results || results.length === 0) { closeDropdown(); return; }
+  dropdownResults = results;
+  activeIndex = -1;
+  dropdown.innerHTML = results.map((r, i) =>
+    `<div class="search-option" data-index="${i}">` +
+      `<span class="artist-name">${r.canonical_name}</span>` +
+      `<span class="artist-meta">${r.genre || ''} · ${r.total_plays} plays</span>` +
+    `</div>`
+  ).join('');
+  dropdown.classList.add('open');
+  dropdown.querySelectorAll('.search-option').forEach((el, i) => {
+    el.addEventListener('mousedown', (e) => { e.preventDefault(); selectResult(results[i]); });
+  });
+}
+
+function updateActiveOption() {
+  dropdown.querySelectorAll('.search-option').forEach((el, i) => {
+    el.classList.toggle('active', i === activeIndex);
+  });
+  if (activeIndex >= 0) {
+    const el = dropdown.querySelector('.search-option.active');
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+}
+
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimeout);
+  const q = searchInput.value.trim();
+  if (q.length < 2) { closeDropdown(); return; }
   searchTimeout = setTimeout(async () => {
-    const q = searchInput.value.trim();
-    if (q.length < 2) return;
-    const data = await api('/graph/artists/search', { q, limit: 1 });
-    if (data && data.results && data.results.length > 0) {
-      const artist = data.results[0];
-      clearGraph();
-      loadNeighborhood(artist.id, artist.canonical_name, parseInt(document.getElementById('depth').value));
-      searchInput.value = artist.canonical_name;
-    }
-  }, 500);
+    const data = await api('/graph/artists/search', { q, limit: 8 });
+    if (data && data.results) renderDropdown(data.results);
+  }, 250);
 });
 
 searchInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
+  const isOpen = dropdown.classList.contains('open') && dropdownResults.length > 0;
+  if (e.key === 'ArrowDown' && isOpen) {
+    e.preventDefault();
+    activeIndex = Math.min(activeIndex + 1, dropdownResults.length - 1);
+    updateActiveOption();
+  } else if (e.key === 'ArrowUp' && isOpen) {
+    e.preventDefault();
+    activeIndex = Math.max(activeIndex - 1, 0);
+    updateActiveOption();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
     clearTimeout(searchTimeout);
-    searchInput.dispatchEvent(new Event('input'));
+    if (isOpen) {
+      const idx = activeIndex >= 0 ? activeIndex : 0;
+      selectResult(dropdownResults[idx]);
+    } else {
+      const q = searchInput.value.trim();
+      if (q.length >= 2) {
+        api('/graph/artists/search', { q, limit: 1 }).then(data => {
+          if (data && data.results && data.results.length > 0) selectResult(data.results[0]);
+        });
+      }
+    }
+  } else if (e.key === 'Escape') {
+    closeDropdown();
   }
+});
+
+searchInput.addEventListener('blur', () => {
+  setTimeout(closeDropdown, 150);
 });
 
 // Re-render when controls change
