@@ -186,8 +186,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--acoustic-similarity-threshold",
         type=float,
-        default=0.85,
-        help="Minimum cosine similarity for acoustic similarity edges (default: 0.85)",
+        default=0.98,
+        help="Minimum cosine similarity for acoustic similarity edges (default: 0.98)",
     )
     return parser.parse_args(argv)
 
