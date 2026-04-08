@@ -871,7 +871,9 @@ def run(args: argparse.Namespace) -> None:
                 # Resolve MB artists → recording MBIDs
                 mb_recordings = mb_client.get_recording_mbids(mb_ids)
                 total_recordings = sum(len(v) for v in mb_recordings.values())
-                log.info("  %d recording MBIDs across %d artists", total_recordings, len(mb_recordings))
+                log.info(
+                    "  %d recording MBIDs across %d artists", total_recordings, len(mb_recordings)
+                )
 
                 # Remap to graph artist IDs
                 artist_recordings: dict[int, list[str]] = {}
@@ -885,8 +887,14 @@ def run(args: argparse.Namespace) -> None:
                 tar_files = list(ab_path.glob("*.tar"))
                 if tar_files:
                     all_wanted = {m for mbids in artist_recordings.values() for m in mbids}
-                    log.info("  Using tar-indexed loader (%d tar files, %d wanted MBIDs)", len(tar_files), len(all_wanted))
-                    ab_loader = TarAcousticBrainzLoader(args.acousticbrainz_dir, wanted_mbids=all_wanted)
+                    log.info(
+                        "  Using tar-indexed loader (%d tar files, %d wanted MBIDs)",
+                        len(tar_files),
+                        len(all_wanted),
+                    )
+                    ab_loader = TarAcousticBrainzLoader(
+                        args.acousticbrainz_dir, wanted_mbids=all_wanted
+                    )
                 else:
                     ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
 
@@ -908,7 +916,9 @@ def run(args: argparse.Namespace) -> None:
             else:
                 log.warning("  No artists with MusicBrainz IDs — skipping audio profiles")
         elif args.acousticbrainz_dir and not args.musicbrainz_cache_dsn:
-            log.warning("--acousticbrainz-dir requires --musicbrainz-cache-dsn for recording lookup")
+            log.warning(
+                "--acousticbrainz-dir requires --musicbrainz-cache-dsn for recording lookup"
+            )
 
         # 14. Export facet tables for dynamic PMI
         log.info("Exporting facet tables...")

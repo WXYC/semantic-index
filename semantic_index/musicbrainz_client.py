@@ -147,7 +147,11 @@ class MusicBrainzClient:
                     result.setdefault(artist_id, []).append(mbid)
 
                 if (i + batch_size) % 5000 == 0:
-                    logger.info("  Recording lookup: %d/%d artist batches", i // batch_size + 1, (len(mb_artist_ids) + batch_size - 1) // batch_size)
+                    logger.info(
+                        "  Recording lookup: %d/%d artist batches",
+                        i // batch_size + 1,
+                        (len(mb_artist_ids) + batch_size - 1) // batch_size,
+                    )
 
             return result
         except Exception:

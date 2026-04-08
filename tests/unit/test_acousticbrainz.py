@@ -109,7 +109,10 @@ def _make_highlevel_json(
                 "value": "sad" if mood_sad > 0.5 else "not_sad",
             },
             "timbre": {
-                "all": {"bright": 1 - timbre_prob if timbre == "dark" else timbre_prob, "dark": timbre_prob if timbre == "dark" else 1 - timbre_prob},
+                "all": {
+                    "bright": 1 - timbre_prob if timbre == "dark" else timbre_prob,
+                    "dark": timbre_prob if timbre == "dark" else 1 - timbre_prob,
+                },
                 "probability": timbre_prob,
                 "value": timbre,
             },
@@ -121,18 +124,37 @@ def _make_highlevel_json(
             "voice_instrumental": {
                 "all": {
                     "voice": 1 - voice_prob if voice_instrumental == "instrumental" else voice_prob,
-                    "instrumental": voice_prob if voice_instrumental == "instrumental" else 1 - voice_prob,
+                    "instrumental": voice_prob
+                    if voice_instrumental == "instrumental"
+                    else 1 - voice_prob,
                 },
                 "probability": voice_prob,
                 "value": voice_instrumental,
             },
             "moods_mirex": {
-                "all": {"Cluster1": 0.2, "Cluster2": 0.3, "Cluster3": 0.15, "Cluster4": 0.25, "Cluster5": 0.1},
+                "all": {
+                    "Cluster1": 0.2,
+                    "Cluster2": 0.3,
+                    "Cluster3": 0.15,
+                    "Cluster4": 0.25,
+                    "Cluster5": 0.1,
+                },
                 "probability": 0.3,
                 "value": "Cluster2",
             },
             "ismir04_rhythm": {
-                "all": {"ChaChaCha": 0.05, "Jive": 0.05, "Quickstep": 0.05, "Rumba-American": 0.05, "Rumba-International": 0.05, "Rumba-Misc": 0.05, "Samba": 0.1, "Tango": 0.4, "VienneseWaltz": 0.1, "Waltz": 0.1},
+                "all": {
+                    "ChaChaCha": 0.05,
+                    "Jive": 0.05,
+                    "Quickstep": 0.05,
+                    "Rumba-American": 0.05,
+                    "Rumba-International": 0.05,
+                    "Rumba-Misc": 0.05,
+                    "Samba": 0.1,
+                    "Tango": 0.4,
+                    "VienneseWaltz": 0.1,
+                    "Waltz": 0.1,
+                },
                 "probability": 0.4,
                 "value": "Tango",
             },
@@ -417,9 +439,7 @@ class TestStoreAudioProfiles:
     def test_store_creates_table(self, ab_data_dir: Path, tmp_path: Path) -> None:
         """store_audio_profiles creates the table if it doesn't exist."""
         conn = sqlite3.connect(str(tmp_path / "empty.db"))
-        conn.execute(
-            "CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT)"
-        )
+        conn.execute("CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT)")
         conn.commit()
 
         loader = AcousticBrainzLoader(str(ab_data_dir))
@@ -429,9 +449,8 @@ class TestStoreAudioProfiles:
         store_audio_profiles(conn, {1: profile})
 
         tables = [
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         ]
         assert "audio_profile" in tables
 
@@ -517,7 +536,9 @@ class TestTarAcousticBrainzLoader:
 
     def test_wanted_mbids_filter(self, ab_tar_dir: Path, tmp_path: Path) -> None:
         """Only index MBIDs in the wanted set."""
-        loader = TarAcousticBrainzLoader(str(ab_tar_dir), wanted_mbids={MBID_AUTECHRE_1}, index_path=str(tmp_path / "idx.db"))
+        loader = TarAcousticBrainzLoader(
+            str(ab_tar_dir), wanted_mbids={MBID_AUTECHRE_1}, index_path=str(tmp_path / "idx.db")
+        )
 
         assert loader.get_features(MBID_AUTECHRE_1) is not None
         assert loader.get_features(MBID_STEREOLAB) is None  # not in wanted set
