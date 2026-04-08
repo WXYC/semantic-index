@@ -66,6 +66,26 @@ def _build_fixture_db() -> str:
             request_ratio=0.0,
             show_count=10,
         ),
+        "Broadcast": ArtistStats(
+            canonical_name="Broadcast",
+            total_plays=25,
+            genre="Electronic",
+            active_first_year=2004,
+            active_last_year=2020,
+            dj_count=8,
+            request_ratio=0.0,
+            show_count=18,
+        ),
+        "Ata Kak": ArtistStats(
+            canonical_name="Ata Kak",
+            total_plays=3,
+            genre="Electronic",
+            active_first_year=2015,
+            active_last_year=2019,
+            dj_count=2,
+            request_ratio=0.0,
+            show_count=2,
+        ),
     }
     pmi_edges = [
         PmiEdge(source="Autechre", target="Stereolab", raw_count=5, pmi=3.0),
@@ -185,6 +205,17 @@ class TestSearch:
         results = resp.json()["results"]
         assert len(results) == 1
         assert results[0]["canonical_name"] == "Cat Power"
+
+    @pytest.mark.asyncio
+    async def test_search_prefix_matches_ranked_first(self, client: AsyncClient) -> None:
+        """Prefix matches should rank above substring matches regardless of play count."""
+        resp = await client.get("/graph/artists/search", params={"q": "at"})
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        names = [r["canonical_name"] for r in results]
+        # Ata Kak (3 plays, prefix) should rank above Cat Power (20 plays, substring)
+        assert names[0] == "Ata Kak"
+        assert "Cat Power" in names
 
     @pytest.mark.asyncio
     async def test_search_limit(self, client: AsyncClient) -> None:

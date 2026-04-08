@@ -84,11 +84,16 @@ def search_artists(
     limit: int = Query(default=10, ge=1, le=100),
     db: sqlite3.Connection = Depends(get_db),
 ) -> SearchResponse:
-    """Case-insensitive artist name search, ordered by total_plays descending."""
+    """Case-insensitive artist name search.
+
+    Prefix matches rank above substring-only matches. Within each group,
+    results are ordered by total_plays descending.
+    """
     rows = db.execute(
         "SELECT id, canonical_name, genre, total_plays FROM artist "
-        "WHERE canonical_name LIKE ? ORDER BY total_plays DESC LIMIT ?",
-        (f"%{q}%", limit),
+        "WHERE canonical_name LIKE ? "
+        "ORDER BY (canonical_name LIKE ?) DESC, total_plays DESC LIMIT ?",
+        (f"%{q}%", f"{q}%", limit),
     ).fetchall()
     return SearchResponse(results=[_artist_summary(r) for r in rows])
 
