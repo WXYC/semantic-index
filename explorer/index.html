@@ -56,6 +56,25 @@
   }
   #controls select:disabled { opacity: 0.4; cursor: not-allowed; }
   #controls label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .slider-control { display: flex; flex-direction: column; gap: 2px; }
+  .slider-control.disabled { opacity: 0.4; pointer-events: none; }
+  .slider-row { display: flex; align-items: center; gap: 6px; }
+  .slider-label { font-size: 10px; color: #666; white-space: nowrap; }
+  .slider-value { font-size: 10px; color: #6a9fb5; min-width: 16px; text-align: center; }
+  #minRawCount {
+    -webkit-appearance: none; appearance: none;
+    width: 100px; height: 4px; background: #333; border-radius: 2px; outline: none;
+  }
+  #minRawCount::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #6a9fb5; cursor: pointer; border: none;
+  }
+  #minRawCount::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #6a9fb5; cursor: pointer; border: none;
+  }
   #random {
     background: none; border: 1px solid #444; color: #888; padding: 5px 8px;
     border-radius: 4px; font-size: 15px; cursor: pointer; line-height: 1;
@@ -262,6 +281,15 @@
         <option value="20">20</option>
         <option value="50">50</option>
       </select>
+    </div>
+    <div class="slider-control" id="rawCountControl">
+      <label>Cool / Hot</label>
+      <div class="slider-row">
+        <span class="slider-label">Cool</span>
+        <input type="range" id="minRawCount" min="1" max="20" value="1" step="1">
+        <span class="slider-label">Hot</span>
+        <span class="slider-value" id="minRawCountValue">1</span>
+      </div>
     </div>
   </div>
   <select id="monthFilter" style="display:none"><option value="">All</option></select>
@@ -721,12 +749,14 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
   const edgeType = document.getElementById('edgeType').value;
   const limit = parseInt(document.getElementById('neighborLimit').value);
 
-  // Build neighbor params, including facets when active
+  // Build neighbor params, including facets and min_raw_count when active
   const neighborParams = { type: edgeType, limit: limit };
   const monthVal = document.getElementById('monthFilter').value;
   const djVal = document.getElementById('djFilter').value;
   if (monthVal) neighborParams.month = monthVal;
   if (djVal) neighborParams.dj_id = djVal;
+  const minRawCount = parseInt(document.getElementById('minRawCount').value);
+  if (minRawCount > 1) neighborParams.min_raw_count = minRawCount;
 
   // Fetch neighbors
   const data = await api(`/graph/artists/${artistId}/neighbors`, neighborParams);
@@ -773,6 +803,7 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     const secondHopParams = { type: edgeType, limit: secondHopLimit };
     if (monthVal) secondHopParams.month = monthVal;
     if (djVal) secondHopParams.dj_id = djVal;
+    if (minRawCount > 1) secondHopParams.min_raw_count = minRawCount;
     const promises = secondHopIds.slice(0, 10).map(id =>
       api(`/graph/artists/${id}/neighbors`, secondHopParams)
     );
@@ -810,6 +841,7 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     limit: document.getElementById('neighborLimit').value,
     month: document.getElementById('monthFilter').value,
     dj: document.getElementById('djFilter').value,
+    minRawCount: document.getElementById('minRawCount').value,
   };
   history.pushState({ artistName }, '', buildURL(artistName, controls));
 }
@@ -1034,10 +1066,27 @@ function reloadCenter() {
   }
 }
 function updateFacetState() {
-  const isDjTransition = document.getElementById('edgeType').value === 'djTransition';
+  const edgeType = document.getElementById('edgeType').value;
+  const isDjTransition = edgeType === 'djTransition';
+  const usesDjData = isDjTransition || edgeType === 'affinity';
   document.getElementById('monthFilter').disabled = !isDjTransition;
   document.getElementById('djFilter').disabled = !isDjTransition;
+  const sliderControl = document.getElementById('rawCountControl');
+  if (usesDjData) {
+    sliderControl.classList.remove('disabled');
+  } else {
+    sliderControl.classList.add('disabled');
+  }
 }
+
+// Slider value display
+const minRawCountSlider = document.getElementById('minRawCount');
+const minRawCountValueDisplay = document.getElementById('minRawCountValue');
+minRawCountSlider.addEventListener('input', () => {
+  minRawCountValueDisplay.textContent = minRawCountSlider.value;
+});
+minRawCountSlider.addEventListener('change', reloadCenter);
+
 document.getElementById('edgeType').addEventListener('change', () => { updateFacetState(); reloadCenter(); });
 document.getElementById('depth').addEventListener('change', reloadCenter);
 document.getElementById('neighborLimit').addEventListener('change', reloadCenter);
@@ -1064,6 +1113,8 @@ window.addEventListener('popstate', async () => {
   document.getElementById('neighborLimit').value = state.limit;
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
+  document.getElementById('minRawCount').value = state.minRawCount;
+  minRawCountValueDisplay.textContent = state.minRawCount;
   updateFacetState();
   if (state.artist != null) {
     clearGraph();
@@ -1116,6 +1167,8 @@ async function loadFacets() {
   document.getElementById('neighborLimit').value = state.limit;
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
+  document.getElementById('minRawCount').value = state.minRawCount;
+  minRawCountValueDisplay.textContent = state.minRawCount;
   updateFacetState();
 
   if (state.artist) {
