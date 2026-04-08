@@ -848,11 +848,13 @@ def run(args: argparse.Namespace) -> None:
             )
             from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
 
+            import sqlite3 as _ab_sqlite3
+
             log.info("Building audio profiles from AcousticBrainz...")
             mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
 
             # Get MB artist IDs from the graph database
-            _ab_conn = _sqlite3.connect(str(sqlite_path))
+            _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
             mb_rows = _ab_conn.execute(
                 "SELECT id, musicbrainz_artist_id FROM artist "
                 "WHERE musicbrainz_artist_id IS NOT NULL"
@@ -896,7 +898,7 @@ def run(args: argparse.Namespace) -> None:
                 log.info("  %d audio profiles built", audio_profile_count)
 
                 if profiles:
-                    _ab_conn = _sqlite3.connect(str(sqlite_path))
+                    _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
                     store_audio_profiles(_ab_conn, profiles)
                     acoustic_edge_count = compute_acoustic_similarity(
                         _ab_conn, profiles, threshold=args.acoustic_similarity_threshold

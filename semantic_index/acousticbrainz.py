@@ -18,12 +18,12 @@ danceability, genre, mood, timbre, tonality, and voice/instrumental.
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import math
+import sqlite3
 import tarfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -576,8 +576,6 @@ def store_audio_profiles(
     Returns:
         Number of profiles stored.
     """
-    import sqlite3 as _sqlite3
-
     conn.executescript(_AUDIO_PROFILE_SCHEMA)
 
     for artist_id, profile in profiles.items():
