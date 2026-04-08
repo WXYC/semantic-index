@@ -125,14 +125,24 @@ class RecordingFeatures:
             List of 36 floats.
         """
         timbre_val = 1.0 if self.timbre == "bright" else 0.0
-        voice_val = 1.0 - self.voice_instrumental_probability if self.voice_instrumental == "instrumental" else self.voice_instrumental_probability
-        return self.genre_vector + self.mood_vector + self.mirex_vector + self.rhythm_vector + [
-            self.danceability,
-            timbre_val,
-            self.tonal,
-            voice_val,
-            self.gender_female,
-        ]
+        voice_val = (
+            1.0 - self.voice_instrumental_probability
+            if self.voice_instrumental == "instrumental"
+            else self.voice_instrumental_probability
+        )
+        return (
+            self.genre_vector
+            + self.mood_vector
+            + self.mirex_vector
+            + self.rhythm_vector
+            + [
+                self.danceability,
+                timbre_val,
+                self.tonal,
+                voice_val,
+                self.gender_female,
+            ]
+        )
 
 
 def _parse_highlevel(mbid: str, data: dict) -> RecordingFeatures:
@@ -333,8 +343,13 @@ class TarAcousticBrainzLoader:
         # Persist to SQLite
         self._index_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self._index_path))
-        conn.execute("CREATE TABLE IF NOT EXISTS ab_index (mbid TEXT PRIMARY KEY, tar_file TEXT NOT NULL, member_name TEXT NOT NULL)")
-        conn.executemany("INSERT OR IGNORE INTO ab_index (mbid, tar_file, member_name) VALUES (?, ?, ?)", all_entries)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ab_index (mbid TEXT PRIMARY KEY, tar_file TEXT NOT NULL, member_name TEXT NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO ab_index (mbid, tar_file, member_name) VALUES (?, ?, ?)",
+            all_entries,
+        )
         conn.commit()
         conn.close()
         logger.info("Index persisted to %s: %d total MBIDs", self._index_path, len(all_entries))
@@ -529,9 +544,19 @@ def build_audio_profiles(
         profiles[artist_id] = ArtistAudioProfile.from_recordings(recordings)
 
         if i % 500 == 0:
-            logger.info("  Audio profiles: %d/%d artists processed, %d profiles built", i, total, len(profiles))
+            logger.info(
+                "  Audio profiles: %d/%d artists processed, %d profiles built",
+                i,
+                total,
+                len(profiles),
+            )
 
-    logger.info("Audio profiles complete: %d/%d artists have profiles (min_recordings=%d)", len(profiles), total, min_recordings)
+    logger.info(
+        "Audio profiles complete: %d/%d artists have profiles (min_recordings=%d)",
+        len(profiles),
+        total,
+        min_recordings,
+    )
     return profiles
 
 
@@ -624,9 +649,7 @@ def compute_acoustic_similarity(
     for i, aid in enumerate(artist_ids):
         for j in range(i + 1, len(artist_ids)):
             bid = artist_ids[j]
-            sim = cosine_similarity(
-                profiles[aid].feature_centroid, profiles[bid].feature_centroid
-            )
+            sim = cosine_similarity(profiles[aid].feature_centroid, profiles[bid].feature_centroid)
             if sim >= threshold:
                 conn.execute(
                     "INSERT OR REPLACE INTO acoustic_similarity "
@@ -636,7 +659,12 @@ def compute_acoustic_similarity(
                 edge_count += 1
 
         if (i + 1) % 100 == 0:
-            logger.info("  Acoustic similarity: %d/%d artists compared, %d edges", i + 1, len(artist_ids), edge_count)
+            logger.info(
+                "  Acoustic similarity: %d/%d artists compared, %d edges",
+                i + 1,
+                len(artist_ids),
+                edge_count,
+            )
 
     conn.commit()
     logger.info("Acoustic similarity complete: %d edges (threshold=%.2f)", edge_count, threshold)
