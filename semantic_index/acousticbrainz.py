@@ -260,9 +260,9 @@ class AcousticBrainzLoader:
 class TarAcousticBrainzLoader:
     """Load audio features directly from AcousticBrainz tar archives.
 
-    Scans tar files to build an in-memory index of MBID → (tar_path, member_name),
-    then reads features on demand without extracting. This avoids creating millions
-    of small files on disk, which is critical for network-attached storage.
+    Scans tar files to build an index of MBID → (tar_filename, member_name),
+    then reads features on demand without extracting. The index is persisted
+    to a local SQLite file so subsequent runs skip the slow NAS scan.
 
     Only indexes MBIDs present in the ``wanted_mbids`` set (if provided),
     keeping memory usage proportional to the number of WXYC artists rather
@@ -271,39 +271,81 @@ class TarAcousticBrainzLoader:
     Args:
         tar_dir: Directory containing .tar files from the AcousticBrainz dump.
         wanted_mbids: Optional set of MBIDs to index. If None, indexes everything.
+        index_path: Path to persist the index SQLite file. Defaults to
+            ``{tar_dir}/ab_index.db``. Stored locally (not on NAS) for speed.
     """
 
-    def __init__(self, tar_dir: str, wanted_mbids: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        tar_dir: str,
+        wanted_mbids: set[str] | None = None,
+        index_path: str | None = None,
+    ) -> None:
         self._tar_dir = Path(tar_dir)
         self._wanted = wanted_mbids
-        # MBID → (tar_path, member_name)
-        self._index: dict[str, tuple[Path, str]] = {}
+        self._index_path = Path(index_path) if index_path else Path("output/ab_index.db")
+        # MBID → (tar_filename, member_name) — loaded from SQLite or built from tar scan
+        self._index: dict[str, tuple[str, str]] = {}
+        self._load_or_build_index()
+
+    def _load_or_build_index(self) -> None:
+        """Load index from SQLite cache, or build it by scanning tars."""
+        import sqlite3
+
+        if self._index_path.exists():
+            conn = sqlite3.connect(str(self._index_path))
+            rows = conn.execute("SELECT mbid, tar_file, member_name FROM ab_index").fetchall()
+            conn.close()
+            for mbid, tar_file, member_name in rows:
+                if self._wanted is None or mbid in self._wanted:
+                    self._index[mbid] = (tar_file, member_name)
+            logger.info("Loaded index from %s: %d MBIDs", self._index_path, len(self._index))
+            return
+
         self._build_index()
 
     def _build_index(self) -> None:
-        """Scan all tar files and index MBID → location."""
+        """Scan all tar files and build a persistent index."""
+        import sqlite3
+
         tar_files = sorted(self._tar_dir.glob("*.tar"))
         logger.info("Indexing %d tar files in %s...", len(tar_files), self._tar_dir)
 
+        # Build full index (all MBIDs) and persist, then filter in memory
+        all_entries: list[tuple[str, str, str]] = []
+
         for tar_path in tar_files:
+            shard_count = 0
             try:
                 with tarfile.open(tar_path) as tf:
-                    for member in tf.getmembers():
+                    for member in tf:
                         if not member.isfile() or not member.name.endswith(".json"):
                             continue
-                        # Extract MBID from path like highlevel/0e/1/0e11...-0.json
                         filename = member.name.rsplit("/", 1)[-1]
                         mbid = filename.rsplit("-", 1)[0]
-                        if self._wanted is not None and mbid not in self._wanted:
-                            continue
-                        if mbid not in self._index:
-                            self._index[mbid] = (tar_path, member.name)
+                        all_entries.append((mbid, tar_path.name, member.name))
+                        shard_count += 1
             except (tarfile.TarError, OSError):
                 logger.warning("Failed to index tar: %s", tar_path, exc_info=True)
 
-            logger.info("  %s: indexed, %d MBIDs total", tar_path.name, len(self._index))
+            logger.info("  %s: %d files indexed", tar_path.name, shard_count)
 
-        logger.info("Index complete: %d MBIDs across %d tar files", len(self._index), len(tar_files))
+        # Persist to SQLite
+        self._index_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self._index_path))
+        conn.execute("CREATE TABLE IF NOT EXISTS ab_index (mbid TEXT PRIMARY KEY, tar_file TEXT NOT NULL, member_name TEXT NOT NULL)")
+        conn.executemany("INSERT OR IGNORE INTO ab_index (mbid, tar_file, member_name) VALUES (?, ?, ?)", all_entries)
+        conn.commit()
+        conn.close()
+        logger.info("Index persisted to %s: %d total MBIDs", self._index_path, len(all_entries))
+
+        # Load into memory with wanted filter
+        for mbid, tar_file, member_name in all_entries:
+            if self._wanted is None or mbid in self._wanted:
+                if mbid not in self._index:
+                    self._index[mbid] = (tar_file, member_name)
+
+        logger.info("Index loaded: %d MBIDs matching wanted set", len(self._index))
 
     def get_features(self, recording_mbid: str) -> RecordingFeatures | None:
         """Load features for a single recording MBID from the tar index.
@@ -318,7 +360,8 @@ class TarAcousticBrainzLoader:
         if entry is None:
             return None
 
-        tar_path, member_name = entry
+        tar_file, member_name = entry
+        tar_path = self._tar_dir / tar_file
         try:
             with tarfile.open(tar_path) as tf:
                 f = tf.extractfile(member_name)
@@ -333,7 +376,8 @@ class TarAcousticBrainzLoader:
     def batch_get_features(self, mbids: list[str]) -> dict[str, RecordingFeatures]:
         """Load features for multiple recording MBIDs.
 
-        Groups lookups by tar file to minimize archive opens.
+        Groups lookups by tar file to minimize archive opens. Resilient to
+        individual tar read failures — skips failed shards and continues.
 
         Args:
             mbids: List of MusicBrainz recording UUID strings.
@@ -342,15 +386,16 @@ class TarAcousticBrainzLoader:
             Dict mapping MBID to RecordingFeatures (only for found MBIDs).
         """
         # Group by tar file for efficiency
-        by_tar: dict[Path, list[tuple[str, str]]] = {}
+        by_tar: dict[str, list[tuple[str, str]]] = {}
         for mbid in mbids:
             entry = self._index.get(mbid)
             if entry is not None:
-                tar_path, member_name = entry
-                by_tar.setdefault(tar_path, []).append((mbid, member_name))
+                tar_file, member_name = entry
+                by_tar.setdefault(tar_file, []).append((mbid, member_name))
 
         results: dict[str, RecordingFeatures] = {}
-        for tar_path, items in by_tar.items():
+        for tar_file, items in by_tar.items():
+            tar_path = self._tar_dir / tar_file
             try:
                 with tarfile.open(tar_path) as tf:
                     for mbid, member_name in items:
@@ -364,7 +409,7 @@ class TarAcousticBrainzLoader:
                         except (json.JSONDecodeError, KeyError):
                             continue
             except (tarfile.TarError, OSError):
-                logger.warning("Failed to open tar: %s", tar_path)
+                logger.warning("Failed to open tar: %s (skipping %d MBIDs)", tar_path, len(items))
 
         return results
 
