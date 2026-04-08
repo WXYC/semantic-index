@@ -1,7 +1,6 @@
 """Tests for AcousticBrainz feature loader."""
 
 import json
-import os
 import sqlite3
 import tarfile
 from pathlib import Path
@@ -11,13 +10,11 @@ import pytest
 from semantic_index.acousticbrainz import (
     AcousticBrainzLoader,
     ArtistAudioProfile,
-    RecordingFeatures,
     TarAcousticBrainzLoader,
     build_audio_profiles,
     cosine_similarity,
     store_audio_profiles,
 )
-
 
 # --- Fixtures ---
 
@@ -348,8 +345,6 @@ class TestAcousticSimilarity:
         loader = AcousticBrainzLoader(str(ab_data_dir))
         f1 = loader.get_features(MBID_AUTECHRE_1)
 
-        from semantic_index.acousticbrainz import ArtistAudioProfile, cosine_similarity
-
         p1 = ArtistAudioProfile.from_recordings([f1])
         assert cosine_similarity(p1.feature_centroid, p1.feature_centroid) == pytest.approx(
             1.0, abs=0.001
@@ -359,8 +354,6 @@ class TestAcousticSimilarity:
         loader = AcousticBrainzLoader(str(ab_data_dir))
         f_autechre = loader.get_features(MBID_AUTECHRE_1)
         f_stereolab = loader.get_features(MBID_STEREOLAB)
-
-        from semantic_index.acousticbrainz import ArtistAudioProfile, cosine_similarity
 
         p_autechre = ArtistAudioProfile.from_recordings([f_autechre])
         p_stereolab = ArtistAudioProfile.from_recordings([f_stereolab])
@@ -374,8 +367,6 @@ class TestAcousticSimilarity:
         f1 = loader.get_features(MBID_AUTECHRE_1)
         f2 = loader.get_features(MBID_AUTECHRE_2)
         f_stereolab = loader.get_features(MBID_STEREOLAB)
-
-        from semantic_index.acousticbrainz import ArtistAudioProfile, cosine_similarity
 
         p_ae = ArtistAudioProfile.from_recordings([f1, f2])
         p_ae1 = ArtistAudioProfile.from_recordings([f1])

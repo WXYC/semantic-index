@@ -839,6 +839,8 @@ def run(args: argparse.Namespace) -> None:
         audio_profile_count = 0
         acoustic_edge_count = 0
         if args.acousticbrainz_dir and args.musicbrainz_cache_dsn:
+            import sqlite3 as _ab_sqlite3
+
             from semantic_index.acousticbrainz import (
                 AcousticBrainzLoader,
                 TarAcousticBrainzLoader,
@@ -847,8 +849,6 @@ def run(args: argparse.Namespace) -> None:
                 store_audio_profiles,
             )
             from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
-
-            import sqlite3 as _ab_sqlite3
 
             log.info("Building audio profiles from AcousticBrainz...")
             mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
