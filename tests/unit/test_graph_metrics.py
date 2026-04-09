@@ -6,8 +6,9 @@ import sqlite3
 import tempfile
 
 from semantic_index.graph_metrics import GraphMetricsReport, _ensure_schema, compute_and_persist
-from semantic_index.models import ArtistStats, PmiEdge
+from semantic_index.models import PmiEdge
 from semantic_index.sqlite_export import export_sqlite
+from tests.conftest import make_artist_stats
 
 
 def _build_fixture_db(*, with_acoustic: bool = True) -> str:
@@ -19,55 +20,15 @@ def _build_fixture_db(*, with_acoustic: bool = True) -> str:
     """
     path = tempfile.mktemp(suffix=".db")
     stats = {
-        "Autechre": ArtistStats(
-            canonical_name="Autechre",
-            total_plays=50,
-            genre="Electronic",
-            dj_count=15,
-            show_count=40,
+        "Autechre": make_artist_stats("Autechre", total_plays=50, genre="Electronic"),
+        "Boards of Canada": make_artist_stats(
+            "Boards of Canada", total_plays=40, genre="Electronic"
         ),
-        "Boards of Canada": ArtistStats(
-            canonical_name="Boards of Canada",
-            total_plays=40,
-            genre="Electronic",
-            dj_count=12,
-            show_count=30,
-        ),
-        "Aphex Twin": ArtistStats(
-            canonical_name="Aphex Twin",
-            total_plays=45,
-            genre="Electronic",
-            dj_count=14,
-            show_count=35,
-        ),
-        "Pavement": ArtistStats(
-            canonical_name="Pavement",
-            total_plays=35,
-            genre="Rock",
-            dj_count=10,
-            show_count=25,
-        ),
-        "Guided by Voices": ArtistStats(
-            canonical_name="Guided by Voices",
-            total_plays=30,
-            genre="Rock",
-            dj_count=8,
-            show_count=20,
-        ),
-        "Yo La Tengo": ArtistStats(
-            canonical_name="Yo La Tengo",
-            total_plays=55,
-            genre="Rock",
-            dj_count=18,
-            show_count=45,
-        ),
-        "Stereolab": ArtistStats(
-            canonical_name="Stereolab",
-            total_plays=38,
-            genre="Rock",
-            dj_count=12,
-            show_count=28,
-        ),
+        "Aphex Twin": make_artist_stats("Aphex Twin", total_plays=45, genre="Electronic"),
+        "Pavement": make_artist_stats("Pavement", total_plays=35, genre="Rock"),
+        "Guided by Voices": make_artist_stats("Guided by Voices", total_plays=30, genre="Rock"),
+        "Yo La Tengo": make_artist_stats("Yo La Tengo", total_plays=55, genre="Rock"),
+        "Stereolab": make_artist_stats("Stereolab", total_plays=38, genre="Rock"),
     }
     pmi_edges = [
         # Dense electronic cluster

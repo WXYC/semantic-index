@@ -6,6 +6,7 @@ Uses WXYC example artists from the canonical data in wxyc-shared.
 from semantic_index.models import (
     AdjacencyPair,
     ArtistEnrichment,
+    ArtistStats,
     CompilationAppearance,
     CrossReferenceEdge,
     DiscogsCredit,
@@ -206,4 +207,26 @@ def make_wikidata_label_hierarchy(
         parent_name=parent_name,
         child_qid=child_qid,
         child_name=child_name,
+    )
+
+
+def make_artist_stats(
+    canonical_name: str = "Autechre",
+    total_plays: int = 50,
+    genre: str | None = "Electronic",
+    active_first_year: int | None = 2004,
+    active_last_year: int | None = 2025,
+    dj_count: int = 15,
+    request_ratio: float = 0.1,
+    show_count: int = 40,
+) -> ArtistStats:
+    return ArtistStats(
+        canonical_name=canonical_name,
+        total_plays=total_plays,
+        genre=genre,
+        active_first_year=active_first_year,
+        active_last_year=active_last_year,
+        dj_count=dj_count,
+        request_ratio=request_ratio,
+        show_count=show_count,
     )
