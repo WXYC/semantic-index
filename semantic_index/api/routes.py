@@ -180,6 +180,7 @@ def get_neighbors(
     limit: int = Query(default=20, ge=1, le=100),
     month: int | None = Query(default=None, ge=1, le=12),
     dj_id: int | None = Query(default=None, ge=1),
+    min_raw_count: int = Query(default=1, ge=1),
     db: sqlite3.Connection = Depends(get_db),
 ) -> NeighborsResponse:
     """Return neighbors of an artist by edge type, ordered by weight descending.
@@ -187,13 +188,22 @@ def get_neighbors(
     When ``month`` or ``dj_id`` are provided and the edge type is ``djTransition``,
     computes PMI dynamically from the play table filtered by the given facets.
     Facet parameters are ignored for other edge types.
+
+    ``min_raw_count`` filters DJ transition edges by minimum raw co-occurrence
+    count. Only applies to ``djTransition`` and ``affinity`` edge types.
+    Low values surface rare "cool" pairings; high values surface well-worn
+    "hot" pairings validated by many DJs over time.
     """
     artist = _get_artist_or_404(db, artist_id)
     has_facets = month is not None or dj_id is not None
     if has_facets and type == EdgeType.DJ_TRANSITION:
-        neighbors = _neighbors_dj_transition_faceted(db, artist_id, limit, month, dj_id)
+        neighbors = _neighbors_dj_transition_faceted(
+            db, artist_id, limit, month, dj_id, min_raw_count=min_raw_count
+        )
+    elif type == EdgeType.AFFINITY:
+        neighbors = _neighbors_affinity(db, artist_id, limit, min_raw_count=min_raw_count)
     else:
-        neighbors = _query_neighbors(db, artist_id, type, limit)
+        neighbors = _query_neighbors(db, artist_id, type, limit, min_raw_count=min_raw_count)
     return NeighborsResponse(artist=artist, edge_type=type.value, neighbors=neighbors)
 
 
@@ -313,13 +323,15 @@ def _query_neighbors(
     artist_id: int,
     edge_type: EdgeType,
     limit: int,
+    *,
+    min_raw_count: int = 1,
 ) -> list[NeighborEntry]:
     """Query neighbors for a given edge type."""
     match edge_type:
         case EdgeType.AFFINITY:
-            return _neighbors_affinity(db, artist_id, limit)
+            return _neighbors_affinity(db, artist_id, limit, min_raw_count=min_raw_count)
         case EdgeType.DJ_TRANSITION:
-            return _neighbors_dj_transition(db, artist_id, limit)
+            return _neighbors_dj_transition(db, artist_id, limit, min_raw_count=min_raw_count)
         case EdgeType.SHARED_PERSONNEL:
             return _neighbors_shared_personnel(db, artist_id, limit)
         case EdgeType.SHARED_STYLE:
@@ -350,22 +362,22 @@ def _query_neighbors(
 
 
 def _neighbors_dj_transition(
-    db: sqlite3.Connection, artist_id: int, limit: int
+    db: sqlite3.Connection, artist_id: int, limit: int, *, min_raw_count: int = 1
 ) -> list[NeighborEntry]:
     rows = db.execute(
         "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
         "  dt.raw_count, dt.pmi "
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.target_id "
-        "WHERE dt.source_id = ? "
+        "WHERE dt.source_id = ? AND dt.raw_count >= ? "
         "UNION ALL "
         "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
         "  dt.raw_count, dt.pmi "
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.source_id "
-        "WHERE dt.target_id = ? "
+        "WHERE dt.target_id = ? AND dt.raw_count >= ? "
         "ORDER BY pmi DESC LIMIT ?",
-        (artist_id, artist_id, limit),
+        (artist_id, min_raw_count, artist_id, min_raw_count, limit),
     ).fetchall()
     return [
         NeighborEntry(
@@ -383,6 +395,8 @@ def _neighbors_dj_transition_faceted(
     limit: int,
     month: int | None = None,
     dj_id: int | None = None,
+    *,
+    min_raw_count: int = 1,
 ) -> list[NeighborEntry]:
     """Compute faceted PMI neighbors dynamically from the play table.
 
@@ -453,6 +467,8 @@ def _neighbors_dj_transition_faceted(
     # Step 4: Compute PMI and filter
     scored: list[tuple[int, int, float]] = []  # (neighbor_id, raw_count, pmi)
     for neighbor_id, raw_count in pair_counts.items():
+        if raw_count < min_raw_count:
+            continue
         neighbor_plays = marginals.get(neighbor_id, 0)
         if neighbor_plays == 0:
             continue
@@ -607,26 +623,31 @@ def _neighbors_symmetric(
     return results
 
 
-def _neighbors_affinity(db: sqlite3.Connection, artist_id: int, limit: int) -> list[NeighborEntry]:
+def _neighbors_affinity(
+    db: sqlite3.Connection, artist_id: int, limit: int, *, min_raw_count: int = 1
+) -> list[NeighborEntry]:
     """Composite affinity score across all edge types.
 
     Queries every edge table, normalizes each score to 0-1, and sums
     across dimensions. Neighbors connected on multiple dimensions rank
     higher. The detail dict lists which edge types contributed.
+
+    ``min_raw_count`` filters DJ transition edges within the affinity
+    computation by minimum raw co-occurrence count.
     """
     # Each subquery returns (neighbor_id, edge_type, raw_score).
     # We normalize and aggregate in Python for flexibility.
-    edge_queries = []
+    edge_queries: list[tuple[str, tuple[int, ...]]] = []
 
-    # DJ transitions (PMI-based)
+    # DJ transitions (PMI-based), filtered by min_raw_count
     edge_queries.append(
         (
             "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score "
-            "FROM dj_transition WHERE source_id = ? "
+            "FROM dj_transition WHERE source_id = ? AND raw_count >= ? "
             "UNION ALL "
             "SELECT source_id, 'djTransition', pmi "
-            "FROM dj_transition WHERE target_id = ?",
-            (artist_id, artist_id),
+            "FROM dj_transition WHERE target_id = ? AND raw_count >= ?",
+            (artist_id, min_raw_count, artist_id, min_raw_count),
         )
     )
 

@@ -352,6 +352,72 @@ class TestNeighbors:
         assert resp.status_code == 200
         assert len(resp.json()["neighbors"]) == 0
 
+    @pytest.mark.asyncio
+    async def test_min_raw_count_default_returns_all(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Default min_raw_count=1 returns all DJ transition neighbors."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(f"/graph/artists/{aid}/neighbors", params={"type": "djTransition"})
+        assert resp.status_code == 200
+        names = [n["artist"]["canonical_name"] for n in resp.json()["neighbors"]]
+        assert "Stereolab" in names  # raw_count=5
+        assert "Cat Power" in names  # raw_count=3
+
+    @pytest.mark.asyncio
+    async def test_min_raw_count_filters_low_count_edges(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """min_raw_count=4 should exclude Cat Power (raw_count=3) but keep Stereolab (raw_count=5)."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors",
+            params={"type": "djTransition", "min_raw_count": 4},
+        )
+        assert resp.status_code == 200
+        names = [n["artist"]["canonical_name"] for n in resp.json()["neighbors"]]
+        assert "Stereolab" in names
+        assert "Cat Power" not in names
+
+    @pytest.mark.asyncio
+    async def test_min_raw_count_filters_all(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """min_raw_count higher than any raw_count returns no neighbors."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors",
+            params={"type": "djTransition", "min_raw_count": 100},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["neighbors"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_min_raw_count_ignored_for_non_dj_edges(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """min_raw_count has no effect on non-djTransition edge types."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors",
+            params={"type": "sharedPersonnel", "min_raw_count": 100},
+        )
+        assert resp.status_code == 200
+        # shared personnel edge still returned (min_raw_count is irrelevant)
+        assert len(resp.json()["neighbors"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_min_raw_count_validation(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """min_raw_count must be >= 1."""
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors",
+            params={"type": "djTransition", "min_raw_count": 0},
+        )
+        assert resp.status_code == 422
+
 
 class TestWikidataInfluenceNeighbors:
     @pytest.mark.asyncio
