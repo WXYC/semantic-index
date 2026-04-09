@@ -637,7 +637,7 @@ def _neighbors_affinity(
     """
     # Each subquery returns (neighbor_id, edge_type, raw_score).
     # We normalize and aggregate in Python for flexibility.
-    edge_queries = []
+    edge_queries: list[tuple[str, tuple[int, ...]]] = []
 
     # DJ transitions (PMI-based), filtered by min_raw_count
     edge_queries.append(
