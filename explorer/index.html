@@ -110,6 +110,10 @@
   .sidebar-header .artist-meta {
     font-size: 11px; color: #888; margin-top: 4px; display: block;
   }
+  .community-pill {
+    display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    padding: 2px 8px; border-radius: 10px; color: #111; margin-top: 4px;
+  }
   .sidebar-list {
     flex: 1; overflow-y: auto; padding: 0;
   }
@@ -467,6 +471,19 @@ async function api(path, params = {}, signal) {
   return res.json();
 }
 
+// Community metadata cache (fetched once on load)
+let communityMap = {};  // id -> { label, size, top_artists }
+api('/graph/communities', { min_size: 1, limit: 500 }).then(data => {
+  if (data && data.communities) {
+    for (const c of data.communities) communityMap[c.id] = c;
+  }
+});
+
+function getCommunityLabel(communityId) {
+  const c = communityMap[communityId];
+  return c ? c.label : null;
+}
+
 const EXCLUDED_ARTISTS = new Set([
   'various', 'various artists', 'v/a', 'va', 'various artist',
   'unknown artist', 'unknown', 'no artist',
@@ -591,8 +608,16 @@ function populateSidebar(centerArtist, neighbors) {
 
   const header = document.querySelector('.sidebar-header');
   header.querySelector('.artist-name').textContent = centerArtist.canonical_name;
-  header.querySelector('.artist-meta').textContent =
-    `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
+  const metaEl = header.querySelector('.artist-meta');
+  const communityLabel = getCommunityLabel(centerArtist.community_id);
+  if (communityLabel != null && centerArtist.community_id != null) {
+    const color = COMMUNITY_PALETTE[centerArtist.community_id % COMMUNITY_PALETTE.length];
+    metaEl.innerHTML =
+      `<span class="community-pill" style="background:${color}">${communityLabel}</span>` +
+      ` · ${centerArtist.total_plays || 0} plays`;
+  } else {
+    metaEl.textContent = `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
+  }
 
   TransitionPlayer.stop();
 
@@ -682,7 +707,14 @@ function populateSidebar(centerArtist, neighbors) {
         <button class="card-play-btn" title="Play transition">&#9654;</button>
         <span class="weight-badge">${weightDisplay}</span>
       </div>
-      <div class="neighbor-meta">${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays</div>
+      <div class="neighbor-meta">${(() => {
+        const cl = getCommunityLabel(n.artist.community_id);
+        if (cl != null && n.artist.community_id != null) {
+          const clr = COMMUNITY_PALETTE[n.artist.community_id % COMMUNITY_PALETTE.length];
+          return `<span class="community-pill" style="background:${clr}">${escapeHtml(cl)}</span> · ${n.artist.total_plays || 0} plays`;
+        }
+        return `${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays`;
+      })()}</div>
       <div class="narrative loading">Loading...</div>
     `;
 
