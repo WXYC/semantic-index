@@ -7,6 +7,7 @@ import logging
 import math
 import sqlite3
 from collections import defaultdict
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -68,6 +69,83 @@ class EdgeType(StrEnum):
     CROSS_REFERENCE = "crossReference"
     WIKIDATA_INFLUENCE = "wikidataInfluence"
     ACOUSTIC_SIMILARITY = "acousticSimilarity"
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeSchema:
+    """Configuration for a symmetric edge type's table and columns."""
+
+    table: str
+    weight_col: str | None
+    detail_cols: list[str]
+    col_a: str = "artist_a_id"
+    col_b: str = "artist_b_id"
+    affinity_score_expr: str | None = None
+    affinity_weight: float = 1.0
+    affinity_type_name: str | None = None
+
+
+EDGE_REGISTRY: dict[EdgeType, EdgeSchema] = {
+    EdgeType.SHARED_STYLE: EdgeSchema(
+        "shared_style",
+        "jaccard",
+        ["jaccard", "shared_tags"],
+        affinity_score_expr="jaccard",
+    ),
+    EdgeType.SHARED_PERSONNEL: EdgeSchema(
+        "shared_personnel",
+        "shared_count",
+        ["shared_count", "shared_names"],
+        affinity_score_expr="shared_count",
+        affinity_weight=1.5,
+    ),
+    EdgeType.LABEL_FAMILY: EdgeSchema(
+        "label_family",
+        None,
+        ["shared_labels"],
+        affinity_score_expr="1",
+    ),
+    EdgeType.COMPILATION: EdgeSchema(
+        "compilation",
+        "compilation_count",
+        ["compilation_count", "compilation_titles"],
+        affinity_score_expr="compilation_count",
+    ),
+    EdgeType.CROSS_REFERENCE: EdgeSchema(
+        "cross_reference",
+        None,
+        ["comment", "source"],
+    ),
+    EdgeType.WIKIDATA_INFLUENCE: EdgeSchema(
+        "wikidata_influence",
+        None,
+        ["source_qid", "target_qid"],
+        col_a="source_id",
+        col_b="target_id",
+        affinity_score_expr="1",
+        affinity_weight=1.5,
+        affinity_type_name="influence",
+    ),
+    EdgeType.ACOUSTIC_SIMILARITY: EdgeSchema(
+        "acoustic_similarity",
+        "similarity",
+        ["similarity"],
+        affinity_score_expr="similarity",
+        affinity_weight=2.0,
+    ),
+}
+
+# member_of is not a user-facing edge type but contributes to affinity scoring
+_MEMBER_OF_AFFINITY = EdgeSchema(
+    "member_of",
+    None,
+    [],
+    col_a="group_id",
+    col_b="member_id",
+    affinity_score_expr="1",
+    affinity_weight=2.0,
+    affinity_type_name="member",
+)
 
 
 def _artist_summary(row: sqlite3.Row) -> ArtistSummary:
@@ -430,49 +508,23 @@ def _query_neighbors(
     heat: float = 0.5,
 ) -> list[NeighborEntry]:
     """Query neighbors for a given edge type."""
-    match edge_type:
-        case EdgeType.AFFINITY:
-            return _neighbors_affinity(db, artist_id, limit, heat=heat)
-        case EdgeType.DJ_TRANSITION:
-            return _neighbors_dj_transition(db, artist_id, limit, heat=heat)
-        case EdgeType.SHARED_PERSONNEL:
-            return _neighbors_shared_personnel(db, artist_id, limit)
-        case EdgeType.SHARED_STYLE:
-            return _neighbors_symmetric(
-                db, artist_id, limit, "shared_style", "jaccard", ["jaccard", "shared_tags"]
-            )
-        case EdgeType.LABEL_FAMILY:
-            return _neighbors_symmetric(
-                db, artist_id, limit, "label_family", None, ["shared_labels"]
-            )
-        case EdgeType.COMPILATION:
-            return _neighbors_symmetric(
-                db,
-                artist_id,
-                limit,
-                "compilation",
-                "compilation_count",
-                ["compilation_count", "compilation_titles"],
-            )
-        case EdgeType.CROSS_REFERENCE:
-            return _neighbors_symmetric(
-                db, artist_id, limit, "cross_reference", None, ["comment", "source"]
-            )
-        case EdgeType.WIKIDATA_INFLUENCE:
-            return _neighbors_symmetric(
-                db,
-                artist_id,
-                limit,
-                "wikidata_influence",
-                None,
-                ["source_qid", "target_qid"],
-                col_a="source_id",
-                col_b="target_id",
-            )
-        case EdgeType.ACOUSTIC_SIMILARITY:
-            return _neighbors_symmetric(
-                db, artist_id, limit, "acoustic_similarity", "similarity", ["similarity"]
-            )
+    if edge_type == EdgeType.AFFINITY:
+        return _neighbors_affinity(db, artist_id, limit, heat=heat)
+    if edge_type == EdgeType.DJ_TRANSITION:
+        return _neighbors_dj_transition(db, artist_id, limit, heat=heat)
+    if edge_type == EdgeType.SHARED_PERSONNEL:
+        return _neighbors_shared_personnel(db, artist_id, limit)
+    schema = EDGE_REGISTRY[edge_type]
+    return _neighbors_symmetric(
+        db,
+        artist_id,
+        limit,
+        schema.table,
+        schema.weight_col,
+        schema.detail_cols,
+        col_a=schema.col_a,
+        col_b=schema.col_b,
+    )
 
 
 def _rank_by_heat(rows: list[sqlite3.Row], heat: float, limit: int) -> list[NeighborEntry]:
@@ -792,17 +844,13 @@ def _neighbors_affinity(
     ``heat`` controls how DJ transition scores are blended within the
     affinity computation (0=raw_count, 1=PMI).
     """
-    # Each symmetric edge table is queried for (neighbor_id, edge_type, score).
-    # Config: (table, edge_type, score_expr, col_a, col_b)
-    symmetric_edges = [
-        ("shared_style", "sharedStyle", "jaccard", "artist_a_id", "artist_b_id"),
-        ("shared_personnel", "sharedPersonnel", "shared_count", "artist_a_id", "artist_b_id"),
-        ("label_family", "labelFamily", "1", "artist_a_id", "artist_b_id"),
-        ("compilation", "compilation", "compilation_count", "artist_a_id", "artist_b_id"),
-        ("member_of", "member", "1", "group_id", "member_id"),
-        ("wikidata_influence", "influence", "1", "source_id", "target_id"),
-        ("acoustic_similarity", "acousticSimilarity", "similarity", "artist_a_id", "artist_b_id"),
+    # Build affinity source list from EDGE_REGISTRY + member_of
+    affinity_sources: list[tuple[str, EdgeSchema]] = [
+        (edge_type.value, schema)
+        for edge_type, schema in EDGE_REGISTRY.items()
+        if schema.affinity_score_expr is not None
     ]
+    affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
 
     edge_queries: list[tuple[str, tuple[int, ...]]] = []
 
@@ -818,15 +866,16 @@ def _neighbors_affinity(
         )
     )
 
-    # Generate queries for all symmetric edge tables
-    for table, etype, score_expr, col_a, col_b in symmetric_edges:
+    # Generate queries from registry
+    for etype_default, source in affinity_sources:
+        etype = source.affinity_type_name or etype_default
         edge_queries.append(
             (
-                f"SELECT {col_b}, '{etype}', {score_expr} "
-                f"FROM {table} WHERE {col_a} = ? "
+                f"SELECT {source.col_b}, '{etype}', {source.affinity_score_expr} "
+                f"FROM {source.table} WHERE {source.col_a} = ? "
                 f"UNION ALL "
-                f"SELECT {col_a}, '{etype}', {score_expr} "
-                f"FROM {table} WHERE {col_b} = ?",
+                f"SELECT {source.col_a}, '{etype}', {source.affinity_score_expr} "
+                f"FROM {source.table} WHERE {source.col_b} = ?",
                 (artist_id, artist_id),
             )
         )
@@ -868,17 +917,10 @@ def _neighbors_affinity(
         for etype, score in edges:
             type_maxes[etype] = max(type_maxes.get(etype, 0), score)
 
-    # Dimension weights — DJ transitions are the primary signal
-    dim_weights: dict[str, float] = {
-        "djTransition": 3.0,
-        "sharedStyle": 1.0,
-        "sharedPersonnel": 1.5,
-        "labelFamily": 1.0,
-        "compilation": 1.0,
-        "member": 2.0,
-        "influence": 1.5,
-        "acousticSimilarity": 2.0,
-    }
+    # Dimension weights derived from registry
+    dim_weights: dict[str, float] = {"djTransition": 3.0}
+    for etype_default, source in affinity_sources:
+        dim_weights[source.affinity_type_name or etype_default] = source.affinity_weight
 
     # Compute composite scores
     scored: list[tuple[int, float, list[str]]] = []
@@ -999,77 +1041,22 @@ def _query_explain(
     edge_type: EdgeType,
 ) -> list[Relationship]:
     """Query a single edge type between two specific artists."""
-    match edge_type:
-        case EdgeType.DJ_TRANSITION:
-            return _explain_dj_transition(db, source_id, target_id)
-        case EdgeType.SHARED_PERSONNEL:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "sharedPersonnel",
-                "shared_personnel",
-                "shared_count",
-                ["shared_count", "shared_names"],
-            )
-        case EdgeType.SHARED_STYLE:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "sharedStyle",
-                "shared_style",
-                "jaccard",
-                ["jaccard", "shared_tags"],
-            )
-        case EdgeType.LABEL_FAMILY:
-            return _explain_symmetric(
-                db, source_id, target_id, "labelFamily", "label_family", None, ["shared_labels"]
-            )
-        case EdgeType.COMPILATION:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "compilation",
-                "compilation",
-                "compilation_count",
-                ["compilation_count", "compilation_titles"],
-            )
-        case EdgeType.CROSS_REFERENCE:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "crossReference",
-                "cross_reference",
-                None,
-                ["comment", "source"],
-            )
-        case EdgeType.WIKIDATA_INFLUENCE:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "wikidataInfluence",
-                "wikidata_influence",
-                None,
-                ["source_qid", "target_qid"],
-                col_a="source_id",
-                col_b="target_id",
-            )
-        case EdgeType.ACOUSTIC_SIMILARITY:
-            return _explain_symmetric(
-                db,
-                source_id,
-                target_id,
-                "acousticSimilarity",
-                "acoustic_similarity",
-                "similarity",
-                ["similarity"],
-            )
-        case EdgeType.AFFINITY:
-            return []  # affinity is a composite — explain uses individual types
+    if edge_type == EdgeType.DJ_TRANSITION:
+        return _explain_dj_transition(db, source_id, target_id)
+    if edge_type == EdgeType.AFFINITY:
+        return []  # affinity is a composite — explain uses individual types
+    schema = EDGE_REGISTRY[edge_type]
+    return _explain_symmetric(
+        db,
+        source_id,
+        target_id,
+        edge_type.value,
+        schema.table,
+        schema.weight_col,
+        schema.detail_cols,
+        col_a=schema.col_a,
+        col_b=schema.col_b,
+    )
 
 
 def _explain_dj_transition(
