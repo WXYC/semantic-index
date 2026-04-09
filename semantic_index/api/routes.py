@@ -8,6 +8,7 @@ import math
 import sqlite3
 from collections import defaultdict
 from enum import StrEnum
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -454,9 +455,20 @@ def _query_neighbors(
                 ["compilation_count", "compilation_titles"],
             )
         case EdgeType.CROSS_REFERENCE:
-            return _neighbors_cross_reference(db, artist_id, limit)
+            return _neighbors_symmetric(
+                db, artist_id, limit, "cross_reference", None, ["comment", "source"]
+            )
         case EdgeType.WIKIDATA_INFLUENCE:
-            return _neighbors_wikidata_influence(db, artist_id, limit)
+            return _neighbors_symmetric(
+                db,
+                artist_id,
+                limit,
+                "wikidata_influence",
+                None,
+                ["source_qid", "target_qid"],
+                col_a="source_id",
+                col_b="target_id",
+            )
         case EdgeType.ACOUSTIC_SIMILARITY:
             return _neighbors_symmetric(
                 db, artist_id, limit, "acoustic_similarity", "similarity", ["similarity"]
@@ -719,6 +731,17 @@ def _get_faceted_totals(
     return total_plays, total_pairs
 
 
+def _parse_detail(row: sqlite3.Row, cols: list[str]) -> dict[str, Any]:
+    """Parse detail columns from a row, deserializing JSON array strings."""
+    detail: dict[str, Any] = {}
+    for col in cols:
+        val = row[col]
+        if isinstance(val, str) and val.startswith("["):
+            val = json.loads(val)
+        detail[col] = val
+    return detail
+
+
 def _neighbors_symmetric(
     db: sqlite3.Connection,
     artist_id: int,
@@ -726,34 +749,35 @@ def _neighbors_symmetric(
     table: str,
     weight_col: str | None,
     detail_cols: list[str],
+    *,
+    col_a: str = "artist_a_id",
+    col_b: str = "artist_b_id",
 ) -> list[NeighborEntry]:
+    """Query symmetric edge neighbors, joining artist for both directions."""
     order = f"{weight_col} DESC" if weight_col else "1"
     acols = _scols("a")
     detail_select = ", ".join(f"e.{c}" for c in detail_cols)
     rows = db.execute(
         f"SELECT {acols}, {detail_select} "  # noqa: S608
         f"FROM {table} e "
-        f"JOIN artist a ON a.id = e.artist_b_id "
-        f"WHERE e.artist_a_id = ? "
+        f"JOIN artist a ON a.id = e.{col_b} "
+        f"WHERE e.{col_a} = ? "
         f"UNION ALL "
         f"SELECT {acols}, {detail_select} "
         f"FROM {table} e "
-        f"JOIN artist a ON a.id = e.artist_a_id "
-        f"WHERE e.artist_b_id = ? "
+        f"JOIN artist a ON a.id = e.{col_a} "
+        f"WHERE e.{col_b} = ? "
         f"ORDER BY {order} LIMIT ?",
         (artist_id, artist_id, limit),
     ).fetchall()
-    results = []
-    for r in rows:
-        detail = {}
-        for col in detail_cols:
-            val = r[col]
-            if isinstance(val, str) and val.startswith("["):
-                val = json.loads(val)
-            detail[col] = val
-        weight = float(r[weight_col]) if weight_col else 1.0
-        results.append(NeighborEntry(artist=_artist_summary(r), weight=weight, detail=detail))
-    return results
+    return [
+        NeighborEntry(
+            artist=_artist_summary(r),
+            weight=float(r[weight_col]) if weight_col else 1.0,
+            detail=_parse_detail(r, detail_cols),
+        )
+        for r in rows
+    ]
 
 
 def _neighbors_affinity(
@@ -768,11 +792,21 @@ def _neighbors_affinity(
     ``heat`` controls how DJ transition scores are blended within the
     affinity computation (0=raw_count, 1=PMI).
     """
-    # Each subquery returns (neighbor_id, edge_type, raw_score).
-    # We normalize and aggregate in Python for flexibility.
+    # Each symmetric edge table is queried for (neighbor_id, edge_type, score).
+    # Config: (table, edge_type, score_expr, col_a, col_b)
+    symmetric_edges = [
+        ("shared_style", "sharedStyle", "jaccard", "artist_a_id", "artist_b_id"),
+        ("shared_personnel", "sharedPersonnel", "shared_count", "artist_a_id", "artist_b_id"),
+        ("label_family", "labelFamily", "1", "artist_a_id", "artist_b_id"),
+        ("compilation", "compilation", "compilation_count", "artist_a_id", "artist_b_id"),
+        ("member_of", "member", "1", "group_id", "member_id"),
+        ("wikidata_influence", "influence", "1", "source_id", "target_id"),
+        ("acoustic_similarity", "acousticSimilarity", "similarity", "artist_a_id", "artist_b_id"),
+    ]
+
     edge_queries: list[tuple[str, tuple[int, ...]]] = []
 
-    # DJ transitions — fetch both raw_count and PMI, blend later
+    # DJ transitions — special case: needs both pmi and raw_count for heat blending
     edge_queries.append(
         (
             "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score, raw_count "
@@ -784,89 +818,18 @@ def _neighbors_affinity(
         )
     )
 
-    # Shared style (Jaccard)
-    edge_queries.append(
-        (
-            "SELECT artist_b_id, 'sharedStyle', jaccard "
-            "FROM shared_style WHERE artist_a_id = ? "
-            "UNION ALL "
-            "SELECT artist_a_id, 'sharedStyle', jaccard "
-            "FROM shared_style WHERE artist_b_id = ?",
-            (artist_id, artist_id),
+    # Generate queries for all symmetric edge tables
+    for table, etype, score_expr, col_a, col_b in symmetric_edges:
+        edge_queries.append(
+            (
+                f"SELECT {col_b}, '{etype}', {score_expr} "
+                f"FROM {table} WHERE {col_a} = ? "
+                f"UNION ALL "
+                f"SELECT {col_a}, '{etype}', {score_expr} "
+                f"FROM {table} WHERE {col_b} = ?",
+                (artist_id, artist_id),
+            )
         )
-    )
-
-    # Shared personnel
-    edge_queries.append(
-        (
-            "SELECT artist_b_id, 'sharedPersonnel', shared_count "
-            "FROM shared_personnel WHERE artist_a_id = ? "
-            "UNION ALL "
-            "SELECT artist_a_id, 'sharedPersonnel', shared_count "
-            "FROM shared_personnel WHERE artist_b_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Label family
-    edge_queries.append(
-        (
-            "SELECT artist_b_id, 'labelFamily', 1 "
-            "FROM label_family WHERE artist_a_id = ? "
-            "UNION ALL "
-            "SELECT artist_a_id, 'labelFamily', 1 "
-            "FROM label_family WHERE artist_b_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Compilation
-    edge_queries.append(
-        (
-            "SELECT artist_b_id, 'compilation', compilation_count "
-            "FROM compilation WHERE artist_a_id = ? "
-            "UNION ALL "
-            "SELECT artist_a_id, 'compilation', compilation_count "
-            "FROM compilation WHERE artist_b_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Member of (band membership)
-    edge_queries.append(
-        (
-            "SELECT member_id, 'member', 1 "
-            "FROM member_of WHERE group_id = ? "
-            "UNION ALL "
-            "SELECT group_id, 'member', 1 "
-            "FROM member_of WHERE member_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Wikidata influence
-    edge_queries.append(
-        (
-            "SELECT target_id, 'influence', 1 "
-            "FROM wikidata_influence WHERE source_id = ? "
-            "UNION ALL "
-            "SELECT source_id, 'influence', 1 "
-            "FROM wikidata_influence WHERE target_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Acoustic similarity
-    edge_queries.append(
-        (
-            "SELECT artist_b_id, 'acousticSimilarity', similarity "
-            "FROM acoustic_similarity WHERE artist_a_id = ? "
-            "UNION ALL "
-            "SELECT artist_a_id, 'acousticSimilarity', similarity "
-            "FROM acoustic_similarity WHERE artist_b_id = ?",
-            (artist_id, artist_id),
-        )
-    )
 
     # Collect all edges, keyed by neighbor ID.
     # DJ transition rows have an extra raw_count column for heat blending.
@@ -1029,33 +992,6 @@ def _neighbors_shared_personnel(
     return results
 
 
-def _neighbors_cross_reference(
-    db: sqlite3.Connection, artist_id: int, limit: int
-) -> list[NeighborEntry]:
-    acols = _scols("a")
-    rows = db.execute(
-        f"SELECT {acols}, cr.comment, cr.source "  # noqa: S608
-        "FROM cross_reference cr "
-        "JOIN artist a ON a.id = cr.artist_b_id "
-        "WHERE cr.artist_a_id = ? "
-        "UNION ALL "
-        f"SELECT {acols}, cr.comment, cr.source "
-        "FROM cross_reference cr "
-        "JOIN artist a ON a.id = cr.artist_a_id "
-        "WHERE cr.artist_b_id = ? "
-        "LIMIT ?",
-        (artist_id, artist_id, limit),
-    ).fetchall()
-    return [
-        NeighborEntry(
-            artist=_artist_summary(r),
-            weight=1.0,
-            detail={"comment": r["comment"], "source": r["source"]},
-        )
-        for r in rows
-    ]
-
-
 def _query_explain(
     db: sqlite3.Connection,
     source_id: int,
@@ -1101,9 +1037,27 @@ def _query_explain(
                 ["compilation_count", "compilation_titles"],
             )
         case EdgeType.CROSS_REFERENCE:
-            return _explain_cross_reference(db, source_id, target_id)
+            return _explain_symmetric(
+                db,
+                source_id,
+                target_id,
+                "crossReference",
+                "cross_reference",
+                None,
+                ["comment", "source"],
+            )
         case EdgeType.WIKIDATA_INFLUENCE:
-            return _explain_wikidata_influence(db, source_id, target_id)
+            return _explain_symmetric(
+                db,
+                source_id,
+                target_id,
+                "wikidataInfluence",
+                "wikidata_influence",
+                None,
+                ["source_qid", "target_qid"],
+                col_a="source_id",
+                col_b="target_id",
+            )
         case EdgeType.ACOUSTIC_SIMILARITY:
             return _explain_symmetric(
                 db,
@@ -1145,91 +1099,22 @@ def _explain_symmetric(
     table: str,
     weight_col: str | None,
     detail_cols: list[str],
+    *,
+    col_a: str = "artist_a_id",
+    col_b: str = "artist_b_id",
 ) -> list[Relationship]:
+    """Query a single symmetric edge between two specific artists."""
     col_list = ", ".join(detail_cols)
     try:
         row = db.execute(
             f"SELECT {col_list} FROM {table} "  # noqa: S608
-            f"WHERE (artist_a_id = ? AND artist_b_id = ?) "
-            f"   OR (artist_a_id = ? AND artist_b_id = ?)",
+            f"WHERE ({col_a} = ? AND {col_b} = ?) "
+            f"   OR ({col_a} = ? AND {col_b} = ?)",
             (source_id, target_id, target_id, source_id),
         ).fetchone()
     except sqlite3.OperationalError:
         return []  # table doesn't exist
     if row is None:
         return []
-    detail = {}
-    for col in detail_cols:
-        val = row[col]
-        if isinstance(val, str) and val.startswith("["):
-            val = json.loads(val)
-        detail[col] = val
     weight = float(row[weight_col]) if weight_col else 1.0
-    return [Relationship(type=type_name, weight=weight, detail=detail)]
-
-
-def _explain_cross_reference(
-    db: sqlite3.Connection, source_id: int, target_id: int
-) -> list[Relationship]:
-    rows = db.execute(
-        "SELECT comment, source FROM cross_reference "
-        "WHERE (artist_a_id = ? AND artist_b_id = ?) "
-        "   OR (artist_a_id = ? AND artist_b_id = ?)",
-        (source_id, target_id, target_id, source_id),
-    ).fetchall()
-    return [
-        Relationship(
-            type="crossReference",
-            weight=1.0,
-            detail={"comment": r["comment"], "source": r["source"]},
-        )
-        for r in rows
-    ]
-
-
-def _neighbors_wikidata_influence(
-    db: sqlite3.Connection, artist_id: int, limit: int
-) -> list[NeighborEntry]:
-    """Query Wikidata influence neighbors in both directions."""
-    acols = _scols("a")
-    rows = db.execute(
-        f"SELECT {acols}, wi.source_qid, wi.target_qid "  # noqa: S608
-        "FROM wikidata_influence wi "
-        "JOIN artist a ON a.id = wi.target_id "
-        "WHERE wi.source_id = ? "
-        "UNION ALL "
-        f"SELECT {acols}, wi.source_qid, wi.target_qid "
-        "FROM wikidata_influence wi "
-        "JOIN artist a ON a.id = wi.source_id "
-        "WHERE wi.target_id = ? "
-        "LIMIT ?",
-        (artist_id, artist_id, limit),
-    ).fetchall()
-    return [
-        NeighborEntry(
-            artist=_artist_summary(r),
-            weight=1.0,
-            detail={"source_qid": r["source_qid"], "target_qid": r["target_qid"]},
-        )
-        for r in rows
-    ]
-
-
-def _explain_wikidata_influence(
-    db: sqlite3.Connection, source_id: int, target_id: int
-) -> list[Relationship]:
-    """Query Wikidata influence edge between two specific artists."""
-    row = db.execute(
-        "SELECT source_qid, target_qid FROM wikidata_influence "
-        "WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
-        (source_id, target_id, target_id, source_id),
-    ).fetchone()
-    if row is None:
-        return []
-    return [
-        Relationship(
-            type="wikidataInfluence",
-            weight=1.0,
-            detail={"source_qid": row["source_qid"], "target_qid": row["target_qid"]},
-        )
-    ]
+    return [Relationship(type=type_name, weight=weight, detail=_parse_detail(row, detail_cols))]
