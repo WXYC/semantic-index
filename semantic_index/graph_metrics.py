@@ -187,13 +187,29 @@ def _build_community_metadata(
             reverse=True,
         )
 
-        # Genre distribution for label
-        genre_counts = Counter(artists.get(m, {}).get("genre") for m in members)
-        genre_counts.pop(None, None)  # Remove None entries
-        top_genres = genre_counts.most_common(5)
+        # Discogs style distribution for label (richer than WXYC genre taxonomy)
+        style_counts: Counter[str] = Counter()
+        for m in members:
+            for s in artist_styles.get(m, []):
+                style_counts[s] += 1
 
-        # Label from dominant genre
-        label = top_genres[0][0] if top_genres else None
+        # Skip overly generic styles that don't differentiate communities
+        generic = {"Experimental", "Abstract"}
+        distinctive = [(s, c) for s, c in style_counts.most_common(10) if s not in generic]
+
+        # Label from top 2 distinctive Discogs styles, falling back to WXYC genre
+        label: str | None = None
+        if len(distinctive) >= 2:
+            label = f"{distinctive[0][0]} / {distinctive[1][0]}"
+        elif distinctive:
+            label = distinctive[0][0]
+        else:
+            genre_counts = Counter(artists.get(m, {}).get("genre") for m in members)
+            genre_counts.pop(None, None)
+            top_genre = genre_counts.most_common(1)
+            label = str(top_genre[0][0]) if top_genre else None
+
+        top_genres = style_counts.most_common(5)
 
         # Top artist names
         top_artists = [artists.get(m, {}).get("name", str(m)) for m in members[:5]]
