@@ -1,6 +1,6 @@
 /** URL state management for the graph explorer. */
 
-export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", minRawCount: "1" };
+export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", minRawCount: "1", color: "genre", size: "plays" };
 
 /**
  * Parse URL search string into graph state.
@@ -17,6 +17,8 @@ export function parseURL(search) {
     month: p.get("month") || DEFAULTS.month,
     dj: p.get("dj") || DEFAULTS.dj,
     minRawCount: p.get("minRawCount") || DEFAULTS.minRawCount,
+    color: p.get("color") || DEFAULTS.color,
+    size: p.get("size") || DEFAULTS.size,
   };
 }
 
@@ -35,6 +37,8 @@ export function buildURL(artistName, controls) {
   if (controls.month && controls.month !== DEFAULTS.month) p.set("month", controls.month);
   if (controls.dj && controls.dj !== DEFAULTS.dj) p.set("dj", controls.dj);
   if (controls.minRawCount && controls.minRawCount !== DEFAULTS.minRawCount) p.set("minRawCount", controls.minRawCount);
+  if (controls.color && controls.color !== DEFAULTS.color) p.set("color", controls.color);
+  if (controls.size && controls.size !== DEFAULTS.size) p.set("size", controls.size);
   const qs = p.toString();
   return qs ? `?${qs}` : "/";
 }

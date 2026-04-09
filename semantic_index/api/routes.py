@@ -16,6 +16,10 @@ from semantic_index.api.schemas import (
     ArtistDetail,
     ArtistSummary,
     AudioProfileResponse,
+    CommunitiesResponse,
+    CommunityDetail,
+    DiscoveryEntry,
+    DiscoveryResponse,
     DjSummary,
     EntityArtists,
     ExplainResponse,
@@ -29,6 +33,26 @@ from semantic_index.api.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/graph", tags=["graph"])
+
+# Cached flag: whether the artist table has graph metrics columns
+_HAS_METRICS: bool | None = None
+
+
+def _init_metrics_flag(db: sqlite3.Connection) -> None:
+    """Check once per process whether graph metrics columns exist."""
+    global _HAS_METRICS
+    if _HAS_METRICS is None:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(artist)")}
+        _HAS_METRICS = "community_id" in cols
+
+
+def _scols(prefix: str = "") -> str:
+    """Return SQL column list for artist summary SELECTs."""
+    p = f"{prefix}." if prefix else ""
+    s = f"{p}id, {p}canonical_name, {p}genre, {p}total_plays"
+    if _HAS_METRICS:
+        s += f", {p}community_id, {p}pagerank"
+    return s
 
 
 class EdgeType(StrEnum):
@@ -46,17 +70,21 @@ class EdgeType(StrEnum):
 
 
 def _artist_summary(row: sqlite3.Row) -> ArtistSummary:
+    keys = row.keys()
     return ArtistSummary(
         id=row["id"],
         canonical_name=row["canonical_name"],
         genre=row["genre"],
         total_plays=row["total_plays"],
+        community_id=row["community_id"] if "community_id" in keys else None,
+        pagerank=row["pagerank"] if "pagerank" in keys else None,
     )
 
 
 def _get_artist_or_404(db: sqlite3.Connection, artist_id: int) -> ArtistSummary:
+    _init_metrics_flag(db)
     row = db.execute(
-        "SELECT id, canonical_name, genre, total_plays FROM artist WHERE id = ?",
+        f"SELECT {_scols()} FROM artist WHERE id = ?",  # noqa: S608
         (artist_id,),
     ).fetchone()
     if row is None:
@@ -69,8 +97,9 @@ def random_artist(
     db: sqlite3.Connection = Depends(get_db),
 ) -> ArtistSummary:
     """Return a random artist that has at least one DJ transition edge."""
+    _init_metrics_flag(db)
     row = db.execute(
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays FROM artist a "
+        f"SELECT {_scols('a')} FROM artist a "  # noqa: S608
         "WHERE a.id IN (SELECT source_id FROM dj_transition "
         "              UNION SELECT target_id FROM dj_transition) "
         "ORDER BY RANDOM() LIMIT 1",
@@ -91,8 +120,9 @@ def search_artists(
     Prefix matches rank above substring-only matches. Within each group,
     results are ordered by total_plays descending.
     """
+    _init_metrics_flag(db)
     rows = db.execute(
-        "SELECT id, canonical_name, genre, total_plays FROM artist "
+        f"SELECT {_scols()} FROM artist "  # noqa: S608
         "WHERE canonical_name LIKE ? "
         "ORDER BY (canonical_name LIKE ?) DESC, total_plays DESC LIMIT ?",
         (f"%{q}%", f"{q}%", limit),
@@ -121,6 +151,78 @@ def get_facets(
         months = []
         djs = []
     return FacetsResponse(months=months, djs=djs)
+
+
+@router.get("/communities", response_model=CommunitiesResponse)
+def get_communities(
+    min_size: int = Query(default=5, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    db: sqlite3.Connection = Depends(get_db),
+) -> CommunitiesResponse:
+    """Return community metadata, filtered by minimum size."""
+    try:
+        rows = db.execute(
+            "SELECT id, size, label, top_genres, top_artists "
+            "FROM community WHERE size >= ? ORDER BY size DESC LIMIT ?",
+            (min_size, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return CommunitiesResponse(communities=[])
+
+    communities = []
+    for r in rows:
+        communities.append(
+            CommunityDetail(
+                id=r["id"],
+                size=r["size"],
+                label=r["label"],
+                top_genres=json.loads(r["top_genres"]) if r["top_genres"] else None,
+                top_artists=json.loads(r["top_artists"]) if r["top_artists"] else None,
+            )
+        )
+    return CommunitiesResponse(communities=communities)
+
+
+@router.get("/discovery", response_model=DiscoveryResponse)
+def get_discovery(
+    limit: int = Query(default=25, ge=1, le=100),
+    community_id: int | None = Query(default=None),
+    genre: str | None = Query(default=None),
+    db: sqlite3.Connection = Depends(get_db),
+) -> DiscoveryResponse:
+    """Return underplayed sonic fits — artists acoustically similar to many but rarely placed by DJs."""
+    _init_metrics_flag(db)
+    try:
+        sql = (
+            f"SELECT {_scols()}, discovery_score, dj_edge_count, acoustic_neighbor_count "  # noqa: S608
+            "FROM artist "
+            "WHERE discovery_score IS NOT NULL AND discovery_score > 0 "
+        )
+        params: list = []
+        if community_id is not None:
+            sql += "AND community_id = ? "
+            params.append(community_id)
+        if genre is not None:
+            sql += "AND genre = ? "
+            params.append(genre)
+        sql += "ORDER BY discovery_score DESC LIMIT ?"
+        params.append(limit)
+
+        rows = db.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return DiscoveryResponse(results=[])
+
+    return DiscoveryResponse(
+        results=[
+            DiscoveryEntry(
+                artist=_artist_summary(r),
+                discovery_score=r["discovery_score"],
+                dj_edge_count=r["dj_edge_count"],
+                acoustic_neighbor_count=r["acoustic_neighbor_count"],
+            )
+            for r in rows
+        ]
+    )
 
 
 @router.get("/artists/{artist_id}", response_model=ArtistDetail)
@@ -238,8 +340,9 @@ def get_entity_artists(
     if entity_row is None:
         raise HTTPException(status_code=404, detail="Entity not found")
 
+    _init_metrics_flag(db)
     artist_rows = db.execute(
-        "SELECT id, canonical_name, genre, total_plays FROM artist WHERE entity_id = ?",
+        f"SELECT {_scols()} FROM artist WHERE entity_id = ?",  # noqa: S608
         (entity_id,),
     ).fetchall()
 
@@ -364,15 +467,14 @@ def _query_neighbors(
 def _neighbors_dj_transition(
     db: sqlite3.Connection, artist_id: int, limit: int, *, min_raw_count: int = 1
 ) -> list[NeighborEntry]:
+    acols = _scols("a")
     rows = db.execute(
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  dt.raw_count, dt.pmi "
+        f"SELECT {acols}, dt.raw_count, dt.pmi "  # noqa: S608
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.target_id "
         "WHERE dt.source_id = ? AND dt.raw_count >= ? "
         "UNION ALL "
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  dt.raw_count, dt.pmi "
+        f"SELECT {acols}, dt.raw_count, dt.pmi "
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.source_id "
         "WHERE dt.target_id = ? AND dt.raw_count >= ? "
@@ -495,7 +597,7 @@ def _neighbors_dj_transition_faceted(
     neighbor_ids = [s[0] for s in scored]
     placeholders = ",".join("?" * len(neighbor_ids))
     artist_rows = db.execute(
-        f"SELECT id, canonical_name, genre, total_plays FROM artist WHERE id IN ({placeholders})",  # noqa: S608
+        f"SELECT {_scols()} FROM artist WHERE id IN ({placeholders})",  # noqa: S608
         neighbor_ids,
     ).fetchall()
     artist_map = {r["id"]: _artist_summary(r) for r in artist_rows}
@@ -595,15 +697,15 @@ def _neighbors_symmetric(
     detail_cols: list[str],
 ) -> list[NeighborEntry]:
     order = f"{weight_col} DESC" if weight_col else "1"
+    acols = _scols("a")
+    detail_select = ", ".join(f"e.{c}" for c in detail_cols)
     rows = db.execute(
-        f"SELECT a.id, a.canonical_name, a.genre, a.total_plays, "  # noqa: S608
-        f"  {', '.join(f'e.{c}' for c in detail_cols)} "
+        f"SELECT {acols}, {detail_select} "  # noqa: S608
         f"FROM {table} e "
         f"JOIN artist a ON a.id = e.artist_b_id "
         f"WHERE e.artist_a_id = ? "
         f"UNION ALL "
-        f"SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        f"  {', '.join(f'e.{c}' for c in detail_cols)} "
+        f"SELECT {acols}, {detail_select} "
         f"FROM {table} e "
         f"JOIN artist a ON a.id = e.artist_a_id "
         f"WHERE e.artist_b_id = ? "
@@ -792,7 +894,7 @@ def _neighbors_affinity(
     ids = [nid for nid, _, _ in top]
     placeholders = ",".join("?" * len(ids))
     artist_rows = db.execute(
-        f"SELECT id, canonical_name, genre, total_plays FROM artist WHERE id IN ({placeholders})",  # noqa: S608
+        f"SELECT {_scols()} FROM artist WHERE id IN ({placeholders})",  # noqa: S608
         ids,
     ).fetchall()
     artist_map = {r["id"]: r for r in artist_rows}
@@ -820,27 +922,28 @@ def _neighbors_shared_personnel(
     .. seealso:: :func:`_neighbors_affinity` for the composite edge type.
     """
     # Try shared_personnel table first, then union with member_of
+    acols = _scols("a")
     try:
         rows = db.execute(
-            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            f"SELECT {acols}, "  # noqa: S608
             "  e.shared_count AS weight, e.shared_names AS detail, 'personnel' AS source "
             "FROM shared_personnel e "
             "JOIN artist a ON a.id = e.artist_b_id "
             "WHERE e.artist_a_id = ? "
             "UNION ALL "
-            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            f"SELECT {acols}, "
             "  e.shared_count, e.shared_names, 'personnel' "
             "FROM shared_personnel e "
             "JOIN artist a ON a.id = e.artist_a_id "
             "WHERE e.artist_b_id = ? "
             "UNION ALL "
-            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            f"SELECT {acols}, "
             "  1, '\"member\"', 'member' "
             "FROM member_of m "
             "JOIN artist a ON a.id = m.member_id "
             "WHERE m.group_id = ? "
             "UNION ALL "
-            "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
+            f"SELECT {acols}, "
             "  1, '\"member\"', 'member' "
             "FROM member_of m "
             "JOIN artist a ON a.id = m.group_id "
@@ -882,15 +985,14 @@ def _neighbors_shared_personnel(
 def _neighbors_cross_reference(
     db: sqlite3.Connection, artist_id: int, limit: int
 ) -> list[NeighborEntry]:
+    acols = _scols("a")
     rows = db.execute(
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  cr.comment, cr.source "
+        f"SELECT {acols}, cr.comment, cr.source "  # noqa: S608
         "FROM cross_reference cr "
         "JOIN artist a ON a.id = cr.artist_b_id "
         "WHERE cr.artist_a_id = ? "
         "UNION ALL "
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  cr.comment, cr.source "
+        f"SELECT {acols}, cr.comment, cr.source "
         "FROM cross_reference cr "
         "JOIN artist a ON a.id = cr.artist_a_id "
         "WHERE cr.artist_b_id = ? "
@@ -1042,15 +1144,14 @@ def _neighbors_wikidata_influence(
     db: sqlite3.Connection, artist_id: int, limit: int
 ) -> list[NeighborEntry]:
     """Query Wikidata influence neighbors in both directions."""
+    acols = _scols("a")
     rows = db.execute(
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  wi.source_qid, wi.target_qid "
+        f"SELECT {acols}, wi.source_qid, wi.target_qid "  # noqa: S608
         "FROM wikidata_influence wi "
         "JOIN artist a ON a.id = wi.target_id "
         "WHERE wi.source_id = ? "
         "UNION ALL "
-        "SELECT a.id, a.canonical_name, a.genre, a.total_plays, "
-        "  wi.source_qid, wi.target_qid "
+        f"SELECT {acols}, wi.source_qid, wi.target_qid "
         "FROM wikidata_influence wi "
         "JOIN artist a ON a.id = wi.source_id "
         "WHERE wi.target_id = ? "

@@ -14,6 +14,8 @@ class ArtistSummary(BaseModel):
     canonical_name: str
     genre: str | None
     total_plays: int
+    community_id: int | None = None
+    pagerank: float | None = None
 
 
 class SearchResponse(BaseModel):
@@ -136,3 +138,34 @@ class FacetsResponse(BaseModel):
 
     months: list[int]
     djs: list[DjSummary]
+
+
+class CommunityDetail(BaseModel):
+    """A single Louvain community with metadata."""
+
+    id: int
+    size: int
+    label: str | None = None
+    top_genres: list[list] | None = None
+    top_artists: list[str] | None = None
+
+
+class CommunitiesResponse(BaseModel):
+    """Response for GET /graph/communities."""
+
+    communities: list[CommunityDetail]
+
+
+class DiscoveryEntry(BaseModel):
+    """An underplayed artist with high acoustic similarity."""
+
+    artist: ArtistSummary
+    discovery_score: float
+    dj_edge_count: int
+    acoustic_neighbor_count: int
+
+
+class DiscoveryResponse(BaseModel):
+    """Response for GET /graph/discovery."""
+
+    results: list[DiscoveryEntry]
