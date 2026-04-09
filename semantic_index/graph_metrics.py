@@ -20,10 +20,9 @@ from dataclasses import dataclass
 import networkx as nx
 from networkx.algorithms.community import louvain_communities
 
-logger = logging.getLogger(__name__)
+from semantic_index.utils import ensure_columns, is_various_artists
 
-# Various Artists filter — same logic as scripts/graph_analysis.py
-_VA_EXACT = {"v/a", "various", "various artists"}
+logger = logging.getLogger(__name__)
 
 # Columns added by this module
 _GRAPH_METRIC_COLUMNS = [
@@ -59,24 +58,9 @@ class GraphMetricsReport:
     largest_community_size: int
 
 
-def _is_various_artists(name: str) -> bool:
-    """Return True for Various Artists / V/A compilation entries."""
-    lower = name.lower().strip()
-    return lower in _VA_EXACT or lower.startswith("various artists")
-
-
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Add graph metric columns to artist table and create community table if needed.
-
-    Uses PRAGMA table_info to detect existing columns, same pattern as
-    entity_store.py _migrate_artist_table().
-    """
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(artist)")}
-    for col_name, col_def in _GRAPH_METRIC_COLUMNS:
-        if col_name not in existing:
-            conn.execute(f"ALTER TABLE artist ADD COLUMN {col_name} {col_def}")
-            logger.info("Added column %s to artist table", col_name)
-
+    """Add graph metric columns to artist table and create community table if needed."""
+    ensure_columns(conn, "artist", _GRAPH_METRIC_COLUMNS)
     conn.executescript(_COMMUNITY_TABLE_SCHEMA)
     conn.commit()
 
@@ -93,7 +77,7 @@ def _build_transition_graph(
     rows = conn.execute("SELECT id, canonical_name, genre, total_plays FROM artist").fetchall()
     artists = {}
     for r in rows:
-        if not _is_various_artists(r[1]):
+        if not is_various_artists(r[1]):
             artists[r[0]] = {"name": r[1], "genre": r[2], "total_plays": r[3]}
 
     valid_ids = set(artists.keys())

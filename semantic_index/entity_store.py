@@ -18,6 +18,7 @@ import sqlite3
 from types import TracebackType
 
 from semantic_index.models import ArtistStats, DeduplicationReport, Entity, ReconciliationEvent
+from semantic_index.utils import ensure_columns
 
 logger = logging.getLogger(__name__)
 
@@ -261,13 +262,7 @@ class EntityStore:
             logger.info("Created artist table with full entity store schema")
             return
 
-        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(artist)")}
-        added = []
-        for col_name, col_def in _NEW_ARTIST_COLUMNS:
-            if col_name not in existing:
-                self._conn.execute(f"ALTER TABLE artist ADD COLUMN {col_name} {col_def}")
-                added.append(col_name)
-                logger.info("Migrated artist table: added column %s", col_name)
+        added = ensure_columns(self._conn, "artist", _NEW_ARTIST_COLUMNS)
 
         # Backfill timestamps for existing rows (ALTER TABLE can't use strftime default)
         if "created_at" in added or "updated_at" in added:
