@@ -98,7 +98,7 @@ def _build_transition_graph(
 
     valid_ids = set(artists.keys())
 
-    graph = nx.DiGraph()
+    graph: nx.DiGraph = nx.DiGraph()
     edges = conn.execute(
         "SELECT source_id, target_id, raw_count, pmi FROM dj_transition WHERE raw_count >= 2"
     ).fetchall()
@@ -129,12 +129,7 @@ def _compute_centrality(
 
     logger.info("Computing PageRank...")
     t0 = time.time()
-    try:
-        pagerank = nx.pagerank(directed, alpha=0.85)
-    except (ImportError, ModuleNotFoundError):
-        from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
-
-        pagerank = _pagerank_python(directed, alpha=0.85)
+    pagerank = nx.pagerank(directed, alpha=0.85)
     logger.info("  done in %.1fs", time.time() - t0)
 
     return betweenness, pagerank
