@@ -75,6 +75,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     parser.add_argument("--no-sqlite", action="store_true", help="Skip SQLite database export")
     parser.add_argument(
+        "--no-graph-metrics",
+        action="store_true",
+        help="Skip graph metrics computation (communities, centrality, discovery scores)",
+    )
+    parser.add_argument(
         "--discogs-cache-dsn",
         default=os.environ.get("DATABASE_URL_DISCOGS"),
         help="PostgreSQL DSN for discogs-cache (default: DATABASE_URL_DISCOGS env var)",
@@ -997,6 +1002,22 @@ def run(args: argparse.Namespace) -> None:
     print(f"  GEXF output:             {gexf_path}")
     if not args.no_sqlite:
         print(f"  SQLite output:           {sqlite_path}")
+
+    # Compute graph metrics (communities, centrality, discovery scores)
+    if not args.no_sqlite and not args.no_graph_metrics:
+        log.info("Computing graph metrics (communities, centrality, discovery scores)...")
+        from semantic_index.graph_metrics import compute_and_persist
+
+        metrics_report = compute_and_persist(str(sqlite_path))
+        log.info(
+            "Graph metrics: %d communities, %d artists scored, largest community %d",
+            metrics_report.community_count,
+            metrics_report.artists_scored,
+            metrics_report.largest_community_size,
+        )
+        print(f"  Communities:             {metrics_report.community_count:>12,}")
+        print(f"  Artists w/ metrics:      {metrics_report.artists_scored:>12,}")
+
     print(f"  Elapsed:                 {elapsed:>11.1f}s")
 
 

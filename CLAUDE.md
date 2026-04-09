@@ -38,13 +38,14 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features from extracted data dump, aggregate per-artist audio profiles, compute cosine similarity edges. |
 | `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: artist name matching and recording MBID resolution via `mb_artist_recording` materialized view. |
+| `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Idempotent post-processing step runnable standalone or as a pipeline step. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse). |
-| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets. |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, DiscoveryResponse). |
+| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata, discovery (underplayed sonic fits). |
 | `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
@@ -71,6 +72,13 @@ CREATE TABLE artist (
     active_first_year INTEGER,
     active_last_year INTEGER,
     dj_count INTEGER NOT NULL DEFAULT 0,
+    -- Added by graph_metrics.py (nullable, only set for artists in the transition graph):
+    community_id INTEGER,          -- Louvain community assignment
+    betweenness REAL,              -- Betweenness centrality
+    pagerank REAL,                 -- PageRank score
+    discovery_score REAL,          -- acoustic_neighbor_count / (dj_edge_count + 1)
+    dj_edge_count INTEGER,         -- Undirected degree in transition graph
+    acoustic_neighbor_count INTEGER, -- Acoustic neighbors at similarity >= 0.95
     request_ratio REAL NOT NULL DEFAULT 0.0,
     show_count INTEGER NOT NULL DEFAULT 0
 );
@@ -115,6 +123,16 @@ CREATE TABLE acoustic_similarity (
     artist_b_id INTEGER NOT NULL REFERENCES artist(id),
     similarity REAL NOT NULL,
     PRIMARY KEY (artist_a_id, artist_b_id)
+);
+
+-- Graph metrics tables (created by graph_metrics.py)
+
+CREATE TABLE community (
+    id INTEGER PRIMARY KEY,
+    size INTEGER NOT NULL,
+    label TEXT,
+    top_genres TEXT,   -- JSON: [["Rock", 150], ["Jazz", 80], ...]
+    top_artists TEXT   -- JSON: ["Yo La Tengo", "The Beatles", ...]
 );
 
 -- Entity store tables (created by EntityStore.initialize())
@@ -270,6 +288,8 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/graph/artists/{id}/explain/{target_id}` | All relationship types between two artists with weights and details. |
 | `GET` | `/graph/entities/{id}/artists` | All artists sharing an entity (alias group). Returns entity metadata and a list of artist summaries. |
 | `GET` | `/graph/facets` | Available facet values (months with data, DJ list) for filtering. Gracefully returns empty lists on databases without facet tables. |
+| `GET` | `/graph/communities?min_size=5&limit=50` | Louvain community metadata (size, label, top genres, top artists). Gracefully returns empty on databases without the `community` table. |
+| `GET` | `/graph/discovery?limit=25&community_id=&genre=` | Underplayed sonic fits: artists with high acoustic similarity but few DJ transitions, ordered by discovery score descending. Optional community/genre filters. Returns empty on databases without graph metrics. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}/narrative?month=&dj_id=` | LLM-generated natural-language explanation of the relationship between two artists. Uses Claude Haiku. Cached in sidecar SQLite DB. Returns 501 when `ANTHROPIC_API_KEY` is not set. |
 
 ### Deployment

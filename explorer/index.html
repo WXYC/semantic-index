@@ -291,6 +291,20 @@
         <span class="slider-value" id="minRawCountValue">1</span>
       </div>
     </div>
+    <div>
+      <label>Color</label>
+      <select id="colorMode">
+        <option value="genre" selected>Genre</option>
+        <option value="community">Community</option>
+      </select>
+    </div>
+    <div>
+      <label>Size</label>
+      <select id="sizeMode">
+        <option value="plays" selected>Plays</option>
+        <option value="centrality">Centrality</option>
+      </select>
+    </div>
   </div>
   <select id="monthFilter" style="display:none"><option value="">All</option></select>
   <select id="djFilter" style="display:none"><option value="">All</option></select>
@@ -360,6 +374,13 @@ const GENRE_COLORS = {
 };
 const DEFAULT_COLOR = '#555';
 
+const COMMUNITY_PALETTE = [
+  '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+  '#8c564b', '#e377c2', '#bcbd22', '#17becf', '#ff9896',
+  '#aec7e8', '#ffbb78', '#98df8a', '#c5b0d5', '#c49c94',
+  '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5', '#7f7f7f',
+];
+
 const isMobile = window.innerWidth <= 768;
 const width = isMobile ? window.innerWidth : window.innerWidth - SIDEBAR_WIDTH;
 const height = isMobile ? window.innerHeight * 0.5 : window.innerHeight;
@@ -425,12 +446,16 @@ function isExcludedArtist(name) {
   return EXCLUDED_ARTISTS.has(name.toLowerCase().trim());
 }
 
-function getColor(genre) {
-  return GENRE_COLORS[genre] || DEFAULT_COLOR;
+function getColor(d) {
+  if (document.getElementById('colorMode').value === 'community' && d.community_id != null)
+    return COMMUNITY_PALETTE[d.community_id % COMMUNITY_PALETTE.length];
+  return GENRE_COLORS[d.genre] || DEFAULT_COLOR;
 }
 
-function nodeRadius(plays) {
-  return Math.max(3, Math.min(20, Math.sqrt(plays || 1) * 0.8));
+function nodeRadius(d) {
+  if (document.getElementById('sizeMode').value === 'centrality' && d.pagerank != null)
+    return Math.max(3, Math.min(20, Math.sqrt(d.pagerank * 100000) * 2));
+  return Math.max(3, Math.min(20, Math.sqrt(d.total_plays || 1) * 0.8));
 }
 
 function linkWidth(weight) {
@@ -842,6 +867,8 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     month: document.getElementById('monthFilter').value,
     dj: document.getElementById('djFilter').value,
     minRawCount: document.getElementById('minRawCount').value,
+    color: document.getElementById('colorMode').value,
+    size: document.getElementById('sizeMode').value,
   };
   history.pushState({ artistName }, '', buildURL(artistName, controls));
 }
@@ -866,7 +893,7 @@ function render() {
     .force('link', d3.forceLink(dedupedLinks).id(d => d.id).distance(80))
     .force('charge', d3.forceManyBody().strength(-200))
     .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(d => nodeRadius(d.total_plays) + 2));
+    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 2));
 
   // Hit lines (invisible wide targets)
   const hit = hitGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
@@ -889,8 +916,8 @@ function render() {
   const node = nodeGroup.selectAll('circle').data(nodes, d => d.id);
   node.exit().remove();
   const nodeEnter = node.enter().append('circle')
-    .attr('r', d => nodeRadius(d.total_plays))
-    .attr('fill', d => getColor(d.genre))
+    .attr('r', d => nodeRadius(d))
+    .attr('fill', d => getColor(d))
     .attr('stroke', d => d.isCenter ? '#fff' : 'none')
     .attr('stroke-width', d => d.isCenter ? 2 : 0)
     .style('cursor', 'pointer')
@@ -903,8 +930,10 @@ function render() {
     .on('mouseover', (e, d) => {
       tooltip.style.display = 'block';
       tooltip.querySelector('.name').textContent = d.canonical_name;
-      tooltip.querySelector('.meta').textContent =
-        `${d.genre || 'Unknown genre'} · ${d.total_plays} plays`;
+      let meta = `${d.genre || 'Unknown genre'} · ${d.total_plays} plays`;
+      if (document.getElementById('colorMode').value === 'community' && d.community_id != null)
+        meta += ` · Community ${d.community_id}`;
+      tooltip.querySelector('.meta').textContent = meta;
     })
     .on('mousemove', (e) => {
       tooltip.style.left = (e.clientX + 12) + 'px';
@@ -929,7 +958,7 @@ function render() {
     .attr('fill', d => d.isCenter ? '#fff' : '#999')
     .attr('font-weight', d => d.isCenter ? 600 : 400)
     .attr('text-anchor', 'middle')
-    .attr('dy', d => -nodeRadius(d.total_plays) - 4)
+    .attr('dy', d => -nodeRadius(d) - 4)
     .style('pointer-events', 'none');
   const labelMerged = labelEnter.merge(label);
 
@@ -949,7 +978,7 @@ function render() {
       .attr('cy', d => d.y);
     labelMerged
       .attr('x', d => d.x)
-      .attr('y', d => d.y - nodeRadius(d.total_plays) - 4);
+      .attr('y', d => d.y - nodeRadius(d) - 4);
   });
 }
 
@@ -1093,6 +1122,19 @@ document.getElementById('neighborLimit').addEventListener('change', reloadCenter
 document.getElementById('monthFilter').addEventListener('change', reloadCenter);
 document.getElementById('djFilter').addEventListener('change', reloadCenter);
 
+// Color/size mode toggles — re-style nodes without reloading data
+document.getElementById('colorMode').addEventListener('change', () => {
+  nodeGroup.selectAll('circle').attr('fill', d => getColor(d));
+});
+document.getElementById('sizeMode').addEventListener('change', () => {
+  nodeGroup.selectAll('circle').attr('r', d => nodeRadius(d));
+  labelGroup.selectAll('text').attr('dy', d => -nodeRadius(d) - 4);
+  if (simulation) {
+    simulation.force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 2));
+    simulation.alpha(0.3).restart();
+  }
+});
+
 // Resolve an artist name via search and load their neighborhood
 async function searchAndLoad(name, depth) {
   const data = await api('/graph/artists/search', { q: name, limit: 1 });
@@ -1114,6 +1156,8 @@ window.addEventListener('popstate', async () => {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.minRawCount;
+  document.getElementById('colorMode').value = state.color;
+  document.getElementById('sizeMode').value = state.size;
   minRawCountValueDisplay.textContent = state.minRawCount;
   updateFacetState();
   if (state.artist != null) {
@@ -1168,6 +1212,8 @@ async function loadFacets() {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.minRawCount;
+  document.getElementById('colorMode').value = state.color;
+  document.getElementById('sizeMode').value = state.size;
   minRawCountValueDisplay.textContent = state.minRawCount;
   updateFacetState();
 
