@@ -282,7 +282,7 @@ def get_neighbors(
     limit: int = Query(default=20, ge=1, le=100),
     month: int | None = Query(default=None, ge=1, le=12),
     dj_id: int | None = Query(default=None, ge=1),
-    min_raw_count: int = Query(default=1, ge=1),
+    heat: float = Query(default=0.5, ge=0.0, le=1.0),
     db: sqlite3.Connection = Depends(get_db),
 ) -> NeighborsResponse:
     """Return neighbors of an artist by edge type, ordered by weight descending.
@@ -291,21 +291,20 @@ def get_neighbors(
     computes PMI dynamically from the play table filtered by the given facets.
     Facet parameters are ignored for other edge types.
 
-    ``min_raw_count`` filters DJ transition edges by minimum raw co-occurrence
-    count. Only applies to ``djTransition`` and ``affinity`` edge types.
-    Low values surface rare "cool" pairings; high values surface well-worn
-    "hot" pairings validated by many DJs over time.
+    ``heat`` controls ranking for DJ transition and affinity edges (0.0–1.0).
+    At 0.0 (cool), neighbors are ranked by raw co-occurrence count — the
+    predictable, well-worn transitions many DJs have validated. At 1.0 (hot),
+    neighbors are ranked by PMI — the rare, surprising pairings. Default 0.5
+    blends both signals equally.
     """
     artist = _get_artist_or_404(db, artist_id)
     has_facets = month is not None or dj_id is not None
     if has_facets and type == EdgeType.DJ_TRANSITION:
-        neighbors = _neighbors_dj_transition_faceted(
-            db, artist_id, limit, month, dj_id, min_raw_count=min_raw_count
-        )
+        neighbors = _neighbors_dj_transition_faceted(db, artist_id, limit, month, dj_id, heat=heat)
     elif type == EdgeType.AFFINITY:
-        neighbors = _neighbors_affinity(db, artist_id, limit, min_raw_count=min_raw_count)
+        neighbors = _neighbors_affinity(db, artist_id, limit, heat=heat)
     else:
-        neighbors = _query_neighbors(db, artist_id, type, limit, min_raw_count=min_raw_count)
+        neighbors = _query_neighbors(db, artist_id, type, limit, heat=heat)
     return NeighborsResponse(artist=artist, edge_type=type.value, neighbors=neighbors)
 
 
@@ -427,14 +426,14 @@ def _query_neighbors(
     edge_type: EdgeType,
     limit: int,
     *,
-    min_raw_count: int = 1,
+    heat: float = 0.5,
 ) -> list[NeighborEntry]:
     """Query neighbors for a given edge type."""
     match edge_type:
         case EdgeType.AFFINITY:
-            return _neighbors_affinity(db, artist_id, limit, min_raw_count=min_raw_count)
+            return _neighbors_affinity(db, artist_id, limit, heat=heat)
         case EdgeType.DJ_TRANSITION:
-            return _neighbors_dj_transition(db, artist_id, limit, min_raw_count=min_raw_count)
+            return _neighbors_dj_transition(db, artist_id, limit, heat=heat)
         case EdgeType.SHARED_PERSONNEL:
             return _neighbors_shared_personnel(db, artist_id, limit)
         case EdgeType.SHARED_STYLE:
@@ -464,31 +463,58 @@ def _query_neighbors(
             )
 
 
+def _rank_by_heat(rows: list[sqlite3.Row], heat: float, limit: int) -> list[NeighborEntry]:
+    """Rank DJ transition rows by blending raw_count and PMI.
+
+    heat=0 sorts by raw_count (cool/predictable), heat=1 sorts by PMI (hot/rare).
+    Normalizes both signals to 0-1 before blending.
+    """
+    max_count = max(r["raw_count"] for r in rows) or 1
+    max_pmi = max(r["pmi"] for r in rows) or 1
+
+    scored = []
+    for r in rows:
+        norm_count = r["raw_count"] / max_count
+        norm_pmi = r["pmi"] / max_pmi
+        score = (1 - heat) * norm_count + heat * norm_pmi
+        scored.append((r, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return [
+        NeighborEntry(
+            artist=_artist_summary(r),
+            weight=score,
+            detail={"raw_count": r["raw_count"], "pmi": r["pmi"]},
+        )
+        for r, score in scored[:limit]
+    ]
+
+
 def _neighbors_dj_transition(
-    db: sqlite3.Connection, artist_id: int, limit: int, *, min_raw_count: int = 1
+    db: sqlite3.Connection, artist_id: int, limit: int, *, heat: float = 0.5
 ) -> list[NeighborEntry]:
+    """Return DJ transition neighbors ranked by a cool/hot blend.
+
+    heat=0.0 ranks by raw_count (predictable, well-worn transitions).
+    heat=1.0 ranks by PMI (rare, surprising pairings).
+    """
     acols = _scols("a")
     rows = db.execute(
         f"SELECT {acols}, dt.raw_count, dt.pmi "  # noqa: S608
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.target_id "
-        "WHERE dt.source_id = ? AND dt.raw_count >= ? "
+        "WHERE dt.source_id = ? "
         "UNION ALL "
         f"SELECT {acols}, dt.raw_count, dt.pmi "
         "FROM dj_transition dt "
         "JOIN artist a ON a.id = dt.source_id "
-        "WHERE dt.target_id = ? AND dt.raw_count >= ? "
-        "ORDER BY pmi DESC LIMIT ?",
-        (artist_id, min_raw_count, artist_id, min_raw_count, limit),
+        "WHERE dt.target_id = ?",
+        (artist_id, artist_id),
     ).fetchall()
-    return [
-        NeighborEntry(
-            artist=_artist_summary(r),
-            weight=r["pmi"],
-            detail={"raw_count": r["raw_count"], "pmi": r["pmi"]},
-        )
-        for r in rows
-    ]
+    if not rows:
+        return []
+    return _rank_by_heat(rows, heat, limit)
 
 
 def _neighbors_dj_transition_faceted(
@@ -498,7 +524,7 @@ def _neighbors_dj_transition_faceted(
     month: int | None = None,
     dj_id: int | None = None,
     *,
-    min_raw_count: int = 1,
+    heat: float = 0.5,
 ) -> list[NeighborEntry]:
     """Compute faceted PMI neighbors dynamically from the play table.
 
@@ -566,11 +592,9 @@ def _neighbors_dj_transition_faceted(
     if center_plays == 0:
         return []
 
-    # Step 4: Compute PMI and filter
-    scored: list[tuple[int, int, float]] = []  # (neighbor_id, raw_count, pmi)
+    # Step 4: Compute PMI
+    candidates: list[tuple[int, int, float]] = []  # (neighbor_id, raw_count, pmi)
     for neighbor_id, raw_count in pair_counts.items():
-        if raw_count < min_raw_count:
-            continue
         neighbor_plays = marginals.get(neighbor_id, 0)
         if neighbor_plays == 0:
             continue
@@ -585,13 +609,20 @@ def _neighbors_dj_transition_faceted(
 
         pmi = math.log2(p_pair / denominator)
         if pmi > 0:
-            scored.append((neighbor_id, raw_count, pmi))
+            candidates.append((neighbor_id, raw_count, pmi))
 
-    scored.sort(key=lambda x: x[2], reverse=True)
-    scored = scored[:limit]
-
-    if not scored:
+    if not candidates:
         return []
+
+    # Step 4b: Rank by heat blend (cool=raw_count, hot=PMI)
+    max_count = max(c[1] for c in candidates) or 1
+    max_pmi = max(c[2] for c in candidates) or 1
+    scored = [
+        (nid, rc, p, (1 - heat) * (rc / max_count) + heat * (p / max_pmi))
+        for nid, rc, p in candidates
+    ]
+    scored.sort(key=lambda x: x[3], reverse=True)
+    scored = scored[:limit]
 
     # Step 5: Build response (look up artist summaries)
     neighbor_ids = [s[0] for s in scored]
@@ -605,10 +636,10 @@ def _neighbors_dj_transition_faceted(
     return [
         NeighborEntry(
             artist=artist_map[nid],
-            weight=pmi,
+            weight=blend_score,
             detail={"raw_count": raw_count, "pmi": round(pmi, 4)},
         )
-        for nid, raw_count, pmi in scored
+        for nid, raw_count, pmi, blend_score in scored
         if nid in artist_map
     ]
 
@@ -726,7 +757,7 @@ def _neighbors_symmetric(
 
 
 def _neighbors_affinity(
-    db: sqlite3.Connection, artist_id: int, limit: int, *, min_raw_count: int = 1
+    db: sqlite3.Connection, artist_id: int, limit: int, *, heat: float = 0.5
 ) -> list[NeighborEntry]:
     """Composite affinity score across all edge types.
 
@@ -734,22 +765,22 @@ def _neighbors_affinity(
     across dimensions. Neighbors connected on multiple dimensions rank
     higher. The detail dict lists which edge types contributed.
 
-    ``min_raw_count`` filters DJ transition edges within the affinity
-    computation by minimum raw co-occurrence count.
+    ``heat`` controls how DJ transition scores are blended within the
+    affinity computation (0=raw_count, 1=PMI).
     """
     # Each subquery returns (neighbor_id, edge_type, raw_score).
     # We normalize and aggregate in Python for flexibility.
     edge_queries: list[tuple[str, tuple[int, ...]]] = []
 
-    # DJ transitions (PMI-based), filtered by min_raw_count
+    # DJ transitions — fetch both raw_count and PMI, blend later
     edge_queries.append(
         (
-            "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score "
-            "FROM dj_transition WHERE source_id = ? AND raw_count >= ? "
+            "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score, raw_count "
+            "FROM dj_transition WHERE source_id = ? "
             "UNION ALL "
-            "SELECT source_id, 'djTransition', pmi "
-            "FROM dj_transition WHERE target_id = ? AND raw_count >= ?",
-            (artist_id, min_raw_count, artist_id, min_raw_count),
+            "SELECT source_id, 'djTransition', pmi, raw_count "
+            "FROM dj_transition WHERE target_id = ?",
+            (artist_id, artist_id),
         )
     )
 
@@ -837,17 +868,33 @@ def _neighbors_affinity(
         )
     )
 
-    # Collect all edges, keyed by neighbor ID
+    # Collect all edges, keyed by neighbor ID.
+    # DJ transition rows have an extra raw_count column for heat blending.
     neighbor_edges: dict[int, list[tuple[str, float]]] = {}
+    dj_raw: dict[int, tuple[float, float]] = {}  # nid -> (pmi, raw_count)
     for sql, params in edge_queries:
         try:
             for row in db.execute(sql, params):
                 nid = row[0]
                 etype = row[1]
                 score = float(row[2])
+                if etype == "djTransition":
+                    raw_count = float(row[3])
+                    dj_raw[nid] = (score, raw_count)
                 neighbor_edges.setdefault(nid, []).append((etype, score))
         except sqlite3.OperationalError:
             continue  # table doesn't exist
+
+    # Apply heat blend to DJ transition scores
+    if dj_raw:
+        max_pmi = max(p for p, _ in dj_raw.values()) or 1
+        max_rc = max(rc for _, rc in dj_raw.values()) or 1
+        for nid, (pmi, rc) in dj_raw.items():
+            blended = (1 - heat) * (rc / max_rc) + heat * (pmi / max_pmi)
+            edges = neighbor_edges[nid]
+            neighbor_edges[nid] = [
+                (etype, blended if etype == "djTransition" else score) for etype, score in edges
+            ]
 
     if not neighbor_edges:
         return []

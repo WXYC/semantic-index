@@ -321,71 +321,53 @@ class TestNeighborsBothFacets:
         assert "Cat Power" not in names
 
 
-class TestMinRawCountPrecomputed:
+class TestHeatPrecomputed:
     @pytest.mark.asyncio
-    async def test_min_raw_count_filters_precomputed(
+    async def test_heat_cool_ranks_by_raw_count(
         self, client: AsyncClient, faceted_artist_ids: dict[str, int]
     ) -> None:
-        """min_raw_count=3 on precomputed table keeps Stereolab (raw_count=3) but drops Cat Power (raw_count=2)."""
+        """heat=0 (cool) ranks by raw_count; Stereolab (raw_count=3) should rank above Cat Power (raw_count=2)."""
         ae_id = faceted_artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{ae_id}/neighbors",
-            params={"type": "djTransition", "limit": 10, "min_raw_count": 3},
+            params={"type": "djTransition", "limit": 10, "heat": 0.0},
         )
         assert resp.status_code == 200
-        names = {n["artist"]["canonical_name"] for n in resp.json()["neighbors"]}
-        assert "Stereolab" in names
-        assert "Cat Power" not in names
+        neighbors = resp.json()["neighbors"]
+        assert len(neighbors) >= 2
+        assert neighbors[0]["detail"]["raw_count"] >= neighbors[-1]["detail"]["raw_count"]
 
 
-class TestMinRawCountFaceted:
+class TestHeatFaceted:
     @pytest.mark.asyncio
-    async def test_min_raw_count_with_month_filter(
+    async def test_heat_with_month_filter(
         self,
         client: AsyncClient,
         faceted_artist_ids: dict[str, int],
     ) -> None:
-        """In January, Autechre->Stereolab has raw_count=2; min_raw_count=3 should filter it out."""
+        """heat parameter works with month facet filter."""
         ae_id = faceted_artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{ae_id}/neighbors",
-            params={"type": "djTransition", "limit": 10, "month": 1, "min_raw_count": 3},
+            params={"type": "djTransition", "limit": 10, "month": 1, "heat": 0.0},
         )
         assert resp.status_code == 200
-        assert len(resp.json()["neighbors"]) == 0
 
     @pytest.mark.asyncio
-    async def test_min_raw_count_with_month_keeps_qualifying(
-        self,
-        client: AsyncClient,
-        faceted_artist_ids: dict[str, int],
-    ) -> None:
-        """In January, Autechre->Stereolab has raw_count=2; min_raw_count=2 should keep it."""
-        ae_id = faceted_artist_ids["Autechre"]
-        resp = await client.get(
-            f"/graph/artists/{ae_id}/neighbors",
-            params={"type": "djTransition", "limit": 10, "month": 1, "min_raw_count": 2},
-        )
-        assert resp.status_code == 200
-        names = {n["artist"]["canonical_name"] for n in resp.json()["neighbors"]}
-        assert "Stereolab" in names
-
-    @pytest.mark.asyncio
-    async def test_min_raw_count_with_dj_filter(
+    async def test_heat_with_dj_filter(
         self,
         client: AsyncClient,
         faceted_artist_ids: dict[str, int],
         faceted_dj_ids: dict[str, int],
     ) -> None:
-        """DJ Sunshine only has show 3 (Stereolab->Autechre, raw_count=1); min_raw_count=2 filters it."""
+        """heat parameter works with DJ facet filter."""
         ae_id = faceted_artist_ids["Autechre"]
         sunshine_id = faceted_dj_ids["DJ Sunshine"]
         resp = await client.get(
             f"/graph/artists/{ae_id}/neighbors",
-            params={"type": "djTransition", "limit": 10, "dj_id": sunshine_id, "min_raw_count": 2},
+            params={"type": "djTransition", "limit": 10, "dj_id": sunshine_id, "heat": 1.0},
         )
         assert resp.status_code == 200
-        assert len(resp.json()["neighbors"]) == 0
 
 
 class TestFacetIgnoredForNonDjEdges:

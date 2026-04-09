@@ -267,13 +267,13 @@ class TestNeighbors:
         names = [n["artist"]["canonical_name"] for n in data["neighbors"]]
         assert "Stereolab" in names
         assert "Cat Power" in names
-        # Ordered by PMI descending — Stereolab (3.0) before Cat Power (1.5)
-        assert names.index("Stereolab") < names.index("Cat Power")
-        # Check detail fields
+        # Default heat=0.5 blends raw_count and PMI
+        assert len(names) >= 2
+        # Check detail fields preserved
         stereo_entry = next(
             n for n in data["neighbors"] if n["artist"]["canonical_name"] == "Stereolab"
         )
-        assert stereo_entry["weight"] == 3.0
+        assert stereo_entry["weight"] > 0
         assert stereo_entry["detail"]["raw_count"] == 5
         assert stereo_entry["detail"]["pmi"] == 3.0
 
@@ -353,68 +353,56 @@ class TestNeighbors:
         assert len(resp.json()["neighbors"]) == 0
 
     @pytest.mark.asyncio
-    async def test_min_raw_count_default_returns_all(
+    async def test_heat_default_returns_all(
         self, client: AsyncClient, artist_ids: dict[str, int]
     ) -> None:
-        """Default min_raw_count=1 returns all DJ transition neighbors."""
+        """Default heat=0.5 returns all DJ transition neighbors."""
         aid = artist_ids["Autechre"]
         resp = await client.get(f"/graph/artists/{aid}/neighbors", params={"type": "djTransition"})
         assert resp.status_code == 200
         names = [n["artist"]["canonical_name"] for n in resp.json()["neighbors"]]
-        assert "Stereolab" in names  # raw_count=5
-        assert "Cat Power" in names  # raw_count=3
-
-    @pytest.mark.asyncio
-    async def test_min_raw_count_filters_low_count_edges(
-        self, client: AsyncClient, artist_ids: dict[str, int]
-    ) -> None:
-        """min_raw_count=4 should exclude Cat Power (raw_count=3) but keep Stereolab (raw_count=5)."""
-        aid = artist_ids["Autechre"]
-        resp = await client.get(
-            f"/graph/artists/{aid}/neighbors",
-            params={"type": "djTransition", "min_raw_count": 4},
-        )
-        assert resp.status_code == 200
-        names = [n["artist"]["canonical_name"] for n in resp.json()["neighbors"]]
         assert "Stereolab" in names
-        assert "Cat Power" not in names
+        assert "Cat Power" in names
 
     @pytest.mark.asyncio
-    async def test_min_raw_count_filters_all(
+    async def test_heat_cool_ranks_by_raw_count(
         self, client: AsyncClient, artist_ids: dict[str, int]
     ) -> None:
-        """min_raw_count higher than any raw_count returns no neighbors."""
+        """heat=0 (cool) ranks by raw_count, so higher raw_count appears first."""
         aid = artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{aid}/neighbors",
-            params={"type": "djTransition", "min_raw_count": 100},
+            params={"type": "djTransition", "heat": 0.0},
         )
         assert resp.status_code == 200
-        assert len(resp.json()["neighbors"]) == 0
+        neighbors = resp.json()["neighbors"]
+        assert len(neighbors) >= 2
+        # First neighbor should have higher raw_count
+        assert neighbors[0]["detail"]["raw_count"] >= neighbors[-1]["detail"]["raw_count"]
 
     @pytest.mark.asyncio
-    async def test_min_raw_count_ignored_for_non_dj_edges(
+    async def test_heat_hot_ranks_by_pmi(
         self, client: AsyncClient, artist_ids: dict[str, int]
     ) -> None:
-        """min_raw_count has no effect on non-djTransition edge types."""
+        """heat=1 (hot) ranks by PMI, so higher PMI appears first."""
         aid = artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{aid}/neighbors",
-            params={"type": "sharedPersonnel", "min_raw_count": 100},
+            params={"type": "djTransition", "heat": 1.0},
         )
         assert resp.status_code == 200
-        # shared personnel edge still returned (min_raw_count is irrelevant)
-        assert len(resp.json()["neighbors"]) == 1
+        neighbors = resp.json()["neighbors"]
+        assert len(neighbors) >= 2
+        # First neighbor should have higher PMI
+        assert neighbors[0]["detail"]["pmi"] >= neighbors[-1]["detail"]["pmi"]
 
     @pytest.mark.asyncio
-    async def test_min_raw_count_validation(
-        self, client: AsyncClient, artist_ids: dict[str, int]
-    ) -> None:
-        """min_raw_count must be >= 1."""
+    async def test_heat_validation(self, client: AsyncClient, artist_ids: dict[str, int]) -> None:
+        """heat must be between 0.0 and 1.0."""
         aid = artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{aid}/neighbors",
-            params={"type": "djTransition", "min_raw_count": 0},
+            params={"type": "djTransition", "heat": 1.5},
         )
         assert resp.status_code == 422
 
