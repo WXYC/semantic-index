@@ -44,9 +44,10 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, DiscoveryResponse). |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, DiscoveryResponse, PreviewResponse). |
 | `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata, discovery (underplayed sonic fits). |
 | `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
+| `semantic_index/api/preview.py` | Audio preview URL endpoint with multi-source fallback (iTunes lookup, Spotify, Bandcamp, Deezer, iTunes search). Caches results in a sidecar SQLite database. Powers the in-card transition player in the graph explorer. |
 | `run_pipeline.py` | CLI entry point wiring the pipeline. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -291,6 +292,7 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/graph/communities?min_size=5&limit=50` | Louvain community metadata (size, label, top genres, top artists). Gracefully returns empty on databases without the `community` table. |
 | `GET` | `/graph/discovery?limit=25&community_id=&genre=` | Underplayed sonic fits: artists with high acoustic similarity but few DJ transitions, ordered by discovery score descending. Optional community/genre filters. Returns empty on databases without graph metrics. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}/narrative?month=&dj_id=` | LLM-generated natural-language explanation of the relationship between two artists. Uses Claude Haiku. Cached in sidecar SQLite DB. Returns 501 when `ANTHROPIC_API_KEY` is not set. |
+| `GET` | `/graph/artists/{id}/preview` | Audio preview URL for an artist. Multi-source fallback: iTunes lookup (by Apple Music ID) -> Spotify top tracks (by Spotify ID, requires credentials) -> Bandcamp (by bandcamp_id, scrapes track stream) -> Deezer search (by name) -> iTunes search (by name). Cached in sidecar `.preview-cache.db`. |
 
 ### Deployment
 
@@ -305,6 +307,7 @@ Configuration via environment variables:
 - `HOST` — bind address (default: `0.0.0.0`)
 - `PORT` — port (default: `8000`, set automatically by Railway)
 - `ANTHROPIC_API_KEY` — Anthropic API key for narrative generation (optional; narrative endpoint returns 501 when not set)
+- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify API credentials for preview URL lookups (optional; Spotify tier in the preview fallback chain is skipped when not set)
 
 ## Data
 

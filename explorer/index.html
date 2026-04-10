@@ -240,6 +240,53 @@
     svg#graph { width: 100% !important; height: 50vh !important; display: block; }
   }
   .external-links a:hover { border-color: #6a9fb5; }
+
+  /* Transition player */
+  .card-play-btn {
+    background: none; border: none; color: #555; cursor: pointer;
+    font-size: 10px; padding: 0 2px; line-height: 1; transition: color 0.15s;
+  }
+  .card-play-btn:hover { color: #6a9fb5; }
+  .card-play-btn.loading { color: #444; cursor: wait; }
+  .card-play-btn.playing { color: #6a9fb5; }
+  .card-play-btn.disabled { color: #333; cursor: not-allowed; }
+
+  .card-player {
+    margin: 8px 0 4px; padding: 8px 10px;
+    background: rgba(106,159,181,0.06); border-radius: 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-player .tp-play-pause {
+    background: none; border: none; color: #6a9fb5; cursor: pointer;
+    font-size: 12px; padding: 0; line-height: 1; flex-shrink: 0;
+    width: 16px; text-align: center;
+  }
+  .card-player .tp-play-pause:hover { color: #8cc4d8; }
+  .card-player .tp-track {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;
+  }
+  .card-player .tp-names {
+    font-size: 10px; color: #666; display: flex; align-items: center; gap: 4px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .card-player .tp-names .tp-a,
+  .card-player .tp-names .tp-b {
+    overflow: hidden; text-overflow: ellipsis; transition: color 0.3s;
+  }
+  .card-player .tp-names .tp-active { color: #e0e0e0; }
+  .card-player .tp-names .tp-arrow { color: #444; flex-shrink: 0; }
+  .card-player .tp-bar-container {
+    position: relative; height: 4px; background: #222; border-radius: 2px;
+    cursor: pointer; overflow: hidden;
+  }
+  .card-player .tp-bar-fill {
+    position: absolute; top: 0; left: 0; height: 100%; border-radius: 2px;
+    background: linear-gradient(to right, #6a9fb5, #6a9fb5 42%, #9b6ab5 58%, #9b6ab5);
+    width: 0%; transition: width 0.1s linear;
+  }
+  .card-player .tp-time {
+    font-size: 9px; color: #555; flex-shrink: 0; min-width: 28px; text-align: right;
+  }
 </style>
 </head>
 <body>
@@ -547,6 +594,8 @@ function populateSidebar(centerArtist, neighbors) {
   header.querySelector('.artist-meta').textContent =
     `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
 
+  TransitionPlayer.stop();
+
   const list = document.querySelector('.sidebar-list');
   list.innerHTML = '';
   activeCardId = null;
@@ -630,11 +679,27 @@ function populateSidebar(centerArtist, neighbors) {
       <div class="card-header">
         <span class="neighbor-name">${escapeHtml(n.artist.canonical_name)}</span>
         <a class="navigate-link" title="Go to ${escapeHtml(n.artist.canonical_name)}">&rarr;</a>
+        <button class="card-play-btn" title="Play transition">&#9654;</button>
         <span class="weight-badge">${weightDisplay}</span>
       </div>
       <div class="neighbor-meta">${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays</div>
       <div class="narrative loading">Loading...</div>
     `;
+
+    // Click play button: play/stop transition audio
+    card.querySelector('.card-play-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      if (btn.classList.contains('playing')) {
+        TransitionPlayer.stop();
+      } else {
+        TransitionPlayer.playTransition(
+          centerArtist.id, centerArtist.canonical_name,
+          n.artist.id, n.artist.canonical_name,
+          card
+        );
+      }
+    });
 
     // Click navigate arrow: load this artist's neighborhood
     card.querySelector('.navigate-link').addEventListener('click', (e) => {
@@ -707,6 +772,323 @@ function escapeHtml(str) {
   div.textContent = str;
   return div.innerHTML;
 }
+
+// --- Transition Player ---
+
+const TransitionPlayer = (() => {
+  let audioCtx = null;
+  let sourceA = null, sourceB = null;
+  let gainA = null, gainB = null;
+  let bufferA = null, bufferB = null;
+  let startTime = 0;
+  let playing = false;
+  let paused = false;
+  let pauseOffset = 0;
+  let animFrame = null;
+  let activeCard = null;
+  let activePlayerEl = null;
+
+  const SOLO_A = 12;       // seconds of artist A solo
+  const FADE = 4;           // crossfade duration
+  const SOLO_B = 12;        // seconds of artist B solo
+  const TOTAL = SOLO_A + FADE + SOLO_B;  // 28s
+  const CLIP_OFFSET = 5;    // skip first 5s of each 30s preview
+
+  function ensureContext() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function stop() {
+    if (sourceA) { try { sourceA.stop(); } catch {} sourceA = null; }
+    if (sourceB) { try { sourceB.stop(); } catch {} sourceB = null; }
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+    playing = false;
+    paused = false;
+    pauseOffset = 0;
+
+    // Reset UI
+    if (activeCard) {
+      const btn = activeCard.querySelector('.card-play-btn');
+      if (btn) { btn.textContent = '\u25B6'; btn.classList.remove('playing'); }
+    }
+    if (activePlayerEl) {
+      activePlayerEl.remove();
+      activePlayerEl = null;
+    }
+    activeCard = null;
+  }
+
+  function createPlayerEl(card, nameA, nameB) {
+    // Remove any existing player in this card
+    const existing = card.querySelector('.card-player');
+    if (existing) existing.remove();
+
+    const el = document.createElement('div');
+    el.className = 'card-player';
+    el.innerHTML = `
+      <button class="tp-play-pause" title="Pause">&#9646;&#9646;</button>
+      <div class="tp-track">
+        <div class="tp-names">
+          <span class="tp-a tp-active">${escapeHtml(nameA)}</span>
+          <span class="tp-arrow">&rarr;</span>
+          <span class="tp-b">${escapeHtml(nameB)}</span>
+        </div>
+        <div class="tp-bar-container">
+          <div class="tp-bar-fill"></div>
+        </div>
+      </div>
+      <span class="tp-time">0:00</span>
+    `;
+
+    // Insert after neighbor-meta, before narrative
+    const meta = card.querySelector('.neighbor-meta');
+    if (meta && meta.nextSibling) {
+      card.insertBefore(el, meta.nextSibling);
+    } else {
+      card.appendChild(el);
+    }
+
+    // Play/pause button
+    el.querySelector('.tp-play-pause').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (playing && !paused) {
+        pause();
+      } else if (paused) {
+        resume();
+      }
+    });
+
+    // Click on progress bar to seek
+    el.querySelector('.tp-bar-container').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      seek(pct * TOTAL);
+    });
+
+    return el;
+  }
+
+  function updateUI(elapsed) {
+    if (!activePlayerEl) return;
+    const pct = Math.min(100, (elapsed / TOTAL) * 100);
+    const fill = activePlayerEl.querySelector('.tp-bar-fill');
+    if (fill) fill.style.width = pct + '%';
+
+    const secs = Math.floor(elapsed);
+    const timeEl = activePlayerEl.querySelector('.tp-time');
+    if (timeEl) timeEl.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+
+    // Highlight active artist name
+    const nameA = activePlayerEl.querySelector('.tp-a');
+    const nameB = activePlayerEl.querySelector('.tp-b');
+    if (nameA && nameB) {
+      if (elapsed < SOLO_A) {
+        nameA.classList.add('tp-active');
+        nameB.classList.remove('tp-active');
+      } else if (elapsed < SOLO_A + FADE) {
+        nameA.classList.add('tp-active');
+        nameB.classList.add('tp-active');
+      } else {
+        nameA.classList.remove('tp-active');
+        nameB.classList.add('tp-active');
+      }
+    }
+  }
+
+  function tick() {
+    if (!playing || paused) return;
+    const elapsed = audioCtx.currentTime - startTime;
+    if (elapsed >= TOTAL) {
+      updateUI(TOTAL);
+      stop();
+      return;
+    }
+    updateUI(elapsed);
+    animFrame = requestAnimationFrame(tick);
+  }
+
+  function schedulePlayback(offset = 0) {
+    ensureContext();
+    const now = audioCtx.currentTime;
+    startTime = now - offset;
+
+    // Source A: plays from offset to SOLO_A + FADE (or whatever remains)
+    const aStart = CLIP_OFFSET + offset;
+    const aDuration = Math.max(0, SOLO_A + FADE - offset);
+    if (aDuration > 0 && bufferA) {
+      sourceA = audioCtx.createBufferSource();
+      sourceA.buffer = bufferA;
+      gainA = audioCtx.createGain();
+      sourceA.connect(gainA);
+      gainA.connect(audioCtx.destination);
+
+      // Gain envelope for A: full volume, then fade out during crossfade
+      const fadeStart = Math.max(0, SOLO_A - offset);
+      gainA.gain.setValueAtTime(1.0, now);
+      if (offset < SOLO_A) {
+        gainA.gain.setValueAtTime(1.0, now + fadeStart);
+        gainA.gain.linearRampToValueAtTime(0.0, now + fadeStart + FADE);
+      } else {
+        // Already in fade zone
+        const fadeElapsed = offset - SOLO_A;
+        const currentGain = 1.0 - (fadeElapsed / FADE);
+        gainA.gain.setValueAtTime(Math.max(0, currentGain), now);
+        gainA.gain.linearRampToValueAtTime(0.0, now + (FADE - fadeElapsed));
+      }
+
+      sourceA.start(now, aStart, aDuration);
+    }
+
+    // Source B: starts at SOLO_A, plays through SOLO_A + FADE + SOLO_B
+    const bStartOffset = Math.max(0, SOLO_A - offset);
+    const bClipOffset = offset > SOLO_A ? CLIP_OFFSET + (offset - SOLO_A) : CLIP_OFFSET;
+    const bDuration = Math.max(0, TOTAL - Math.max(offset, SOLO_A));
+    if (bDuration > 0 && bufferB) {
+      sourceB = audioCtx.createBufferSource();
+      sourceB.buffer = bufferB;
+      gainB = audioCtx.createGain();
+      sourceB.connect(gainB);
+      gainB.connect(audioCtx.destination);
+
+      // Gain envelope for B: fade in during crossfade, then full volume
+      if (offset < SOLO_A) {
+        gainB.gain.setValueAtTime(0.0, now + bStartOffset);
+        gainB.gain.linearRampToValueAtTime(1.0, now + bStartOffset + FADE);
+      } else if (offset < SOLO_A + FADE) {
+        const fadeElapsed = offset - SOLO_A;
+        const currentGain = fadeElapsed / FADE;
+        gainB.gain.setValueAtTime(currentGain, now);
+        gainB.gain.linearRampToValueAtTime(1.0, now + (FADE - fadeElapsed));
+      } else {
+        gainB.gain.setValueAtTime(1.0, now);
+      }
+
+      sourceB.start(now + bStartOffset, bClipOffset, bDuration);
+    }
+  }
+
+  function pause() {
+    if (!playing || paused) return;
+    paused = true;
+    pauseOffset = audioCtx.currentTime - startTime;
+    if (sourceA) { try { sourceA.stop(); } catch {} sourceA = null; }
+    if (sourceB) { try { sourceB.stop(); } catch {} sourceB = null; }
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+
+    if (activePlayerEl) {
+      const btn = activePlayerEl.querySelector('.tp-play-pause');
+      if (btn) btn.innerHTML = '&#9654;';
+    }
+  }
+
+  function resume() {
+    if (!paused) return;
+    paused = false;
+    schedulePlayback(pauseOffset);
+    playing = true;
+
+    if (activePlayerEl) {
+      const btn = activePlayerEl.querySelector('.tp-play-pause');
+      if (btn) btn.innerHTML = '&#9646;&#9646;';
+    }
+    animFrame = requestAnimationFrame(tick);
+  }
+
+  function seek(time) {
+    if (!bufferA && !bufferB) return;
+    const wasPlaying = playing && !paused;
+    if (sourceA) { try { sourceA.stop(); } catch {} sourceA = null; }
+    if (sourceB) { try { sourceB.stop(); } catch {} sourceB = null; }
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+
+    pauseOffset = Math.max(0, Math.min(time, TOTAL));
+    if (wasPlaying) {
+      paused = false;
+      schedulePlayback(pauseOffset);
+      playing = true;
+      animFrame = requestAnimationFrame(tick);
+    } else {
+      paused = true;
+      updateUI(pauseOffset);
+    }
+  }
+
+  async function playTransition(sourceId, sourceName, targetId, targetName, card) {
+    // Stop any current playback
+    stop();
+
+    const btn = card.querySelector('.card-play-btn');
+    btn.classList.add('loading');
+    btn.textContent = '...';
+
+    activeCard = card;
+
+    try {
+      // Fetch preview URLs for both artists in parallel
+      const [previewA, previewB] = await Promise.all([
+        api(`/graph/artists/${sourceId}/preview`),
+        api(`/graph/artists/${targetId}/preview`),
+      ]);
+
+      const urlA = previewA?.preview_url;
+      const urlB = previewB?.preview_url;
+
+      if (!urlA && !urlB) {
+        btn.classList.remove('loading');
+        btn.classList.add('disabled');
+        btn.textContent = '\u25B6';
+        btn.title = 'No previews available';
+        activeCard = null;
+        return;
+      }
+
+      ensureContext();
+
+      // Fetch and decode audio in parallel
+      const [decA, decB] = await Promise.all([
+        urlA ? fetch(urlA).then(r => r.arrayBuffer()).then(b => audioCtx.decodeAudioData(b)).catch(() => null) : Promise.resolve(null),
+        urlB ? fetch(urlB).then(r => r.arrayBuffer()).then(b => audioCtx.decodeAudioData(b)).catch(() => null) : Promise.resolve(null),
+      ]);
+
+      bufferA = decA;
+      bufferB = decB;
+
+      if (!bufferA && !bufferB) {
+        btn.classList.remove('loading');
+        btn.classList.add('disabled');
+        btn.textContent = '\u25B6';
+        btn.title = 'Audio decode failed';
+        activeCard = null;
+        return;
+      }
+
+      // Set up UI
+      btn.classList.remove('loading');
+      btn.classList.add('playing');
+      btn.textContent = '\u25A0';
+
+      const dispA = previewA?.track_name ? `${sourceName} — ${previewA.track_name}` : sourceName;
+      const dispB = previewB?.track_name ? `${targetName} — ${previewB.track_name}` : targetName;
+      activePlayerEl = createPlayerEl(card, dispA, dispB);
+
+      // Start playback
+      schedulePlayback(0);
+      playing = true;
+      paused = false;
+      animFrame = requestAnimationFrame(tick);
+
+    } catch (err) {
+      console.warn('Transition playback failed:', err);
+      btn.classList.remove('loading');
+      btn.textContent = '\u25B6';
+      activeCard = null;
+    }
+  }
+
+  return { playTransition, stop };
+})();
 
 // --- Edge highlighting ---
 

@@ -169,3 +169,19 @@ class DiscoveryResponse(BaseModel):
     """Response for GET /graph/discovery."""
 
     results: list[DiscoveryEntry]
+
+
+class PreviewResponse(BaseModel):
+    """Response for GET /graph/artists/{id}/preview.
+
+    Returns a preview audio URL for an artist, sourced from iTunes, Spotify,
+    Bandcamp, or Deezer with multi-source fallback. Cached in a sidecar database.
+    """
+
+    artist_id: int
+    preview_url: str | None = None
+    track_name: str | None = None
+    artist_name: str | None = None
+    artwork_url: str | None = None
+    source: str  # 'itunes_lookup' | 'spotify' | 'bandcamp' | 'deezer' | 'itunes_search' | 'none'
+    cached: bool
