@@ -29,19 +29,19 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
-| `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), streaming service IDs (P1902 Spotify, P2850 Apple Music, P3283 Bandcamp), and name search via wbsearchentities API. |
-| `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles, entity deduplication by shared Wikidata QID. Creates the artist table from scratch on a fresh database or migrates an existing one. |
-| `semantic_index/lml_identity.py` | Import pre-resolved identities from LML's `entity.identity` PG table into the local SQLite entity store. Used by `--entity-source=lml`. Bridge module for ETL pipeline unification. |
-| `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. |
-| `semantic_index/wikidata_influence.py` | Extract directed Wikidata P737 influence edges between reconciled artists. Resolves QIDs to canonical names via entity store. |
+| `semantic_index/wikidata_client.py` | Wikidata SPARQL client: influence relationships (P737), label hierarchy (P749/P355), and label-to-QID bridging via P1902. Identity resolution methods (Discogs artist ID lookup, name search, streaming IDs) have been moved to LML. |
+| `semantic_index/pipeline_db.py` | Pipeline SQLite database manager: schema creation/migration, artist CRUD with COALESCE upsert, bulk stats, style persistence, entity deduplication by shared Wikidata QID. Successor to the deleted `entity_store.py`. |
+| `semantic_index/label_store.py` | Label CRUD operations: get_or_create_label, update_label_qid, insert_label_hierarchy. Extracted from the deleted `entity_store.py` for use by `label_hierarchy.py`. |
+| `semantic_index/lml_identity.py` | Import pre-resolved identities from LML's `entity.identity` PG table into the local pipeline database. |
+| `semantic_index/wikidata_influence.py` | Extract directed Wikidata P737 influence edges between reconciled artists. Resolves QIDs to canonical names via the pipeline database. |
 | `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features from extracted data dump, aggregate per-artist audio profiles, compute cosine similarity edges. |
-| `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: artist name matching and recording MBID resolution via `mb_artist_recording` materialized view. |
+| `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: recording MBID resolution via `mb_artist_recording` materialized view. Identity resolution methods (lookup_by_name, batch_lookup) have been moved to LML. |
 | `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Idempotent post-processing step runnable standalone or as a pipeline step. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
-| `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
+| `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional PipelineDB integration for persistent artist identities. |
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
@@ -248,21 +248,18 @@ Output: `output/wxyc_artist_pmi.gexf` (Gephi graph) + `output/wxyc_artist_graph.
 
 Use `--no-sqlite` to skip the SQLite export.
 
-### Entity store mode
+### Pipeline DB mode
 
-Pass `--entity-store-path` to enable the entity store pipeline: artists are managed by the entity store (with persistent reconciliation state) rather than created fresh on each run. The entity store database becomes the SQLite output.
+Pass `--db-path` to enable the pipeline database: artists are managed with persistent identity resolution from LML rather than created fresh on each run. The pipeline database becomes the SQLite output.
 
 ```bash
-python run_pipeline.py dump.sql --entity-store-path output/wxyc_artist_graph.db --discogs-cache-dsn postgresql://...
+python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --discogs-cache-dsn postgresql://...
 ```
 
-- `--entity-store-path PATH` — Path to entity store SQLite database. Creates it if needed.
-- `--entity-source {local,lml}` — Identity source for reconciliation. `local` (default) runs local reconciliation via entity_store.py + reconciliation.py. `lml` reads pre-resolved identities from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`). Both paths coexist during the transition to centralized identity resolution. When `lml` is set, local reconciliation steps (reconcile_batch, reconcile_members, reconcile_wikidata) are skipped.
-- `--skip-reconciliation` — Skip Discogs reconciliation step (only applies to `--entity-source=local`).
+- `--db-path PATH` — Path to pipeline SQLite database. Creates it if needed. Identity resolution is read from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`).
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
-- `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--entity-store-path` with reconciled Wikidata QIDs.
-- `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--entity-store-path` and enrichment data.
-- `--fetch-streaming-ids` — Fetch Spotify (P1902), Apple Music (P2850), and Bandcamp (P3283) IDs from Wikidata for entities with QIDs. Requires `--entity-store-path`.
+- `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--db-path` with reconciled Wikidata QIDs.
+- `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--db-path` and enrichment data.
 
 ## Graph API
 

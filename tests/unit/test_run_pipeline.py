@@ -1,4 +1,4 @@
-"""Tests for run_pipeline CLI argument parsing and entity store integration."""
+"""Tests for run_pipeline CLI argument parsing and facet-only integration."""
 
 import pickle
 import sqlite3
@@ -10,21 +10,13 @@ from semantic_index.models import FlowsheetEntry, ResolvedEntry
 
 
 class TestParseArgs:
-    def test_entity_store_path_default(self):
+    def test_db_path_default(self):
         args = parse_args(["dump.sql"])
-        assert args.entity_store_path is None
+        assert args.db_path is None
 
-    def test_entity_store_path_flag(self):
-        args = parse_args(["dump.sql", "--entity-store-path", "/tmp/store.db"])
-        assert args.entity_store_path == "/tmp/store.db"
-
-    def test_skip_reconciliation_default(self):
-        args = parse_args(["dump.sql"])
-        assert args.skip_reconciliation is False
-
-    def test_skip_reconciliation_flag(self):
-        args = parse_args(["dump.sql", "--skip-reconciliation"])
-        assert args.skip_reconciliation is True
+    def test_db_path_flag(self):
+        args = parse_args(["dump.sql", "--db-path", "/tmp/store.db"])
+        assert args.db_path == "/tmp/store.db"
 
     def test_compute_discogs_edges_default(self):
         args = parse_args(["dump.sql"])
@@ -61,6 +53,17 @@ class TestParseArgs:
     def test_facet_only_flag(self):
         args = parse_args(["dump.sql", "--facet-only", "--cache-dir", "/tmp/cache"])
         assert args.facet_only is True
+
+    def test_deleted_flags_removed(self):
+        """Verify deleted flags no longer exist in the parser."""
+        with pytest.raises(SystemExit):
+            parse_args(["dump.sql", "--entity-store-path", "/tmp/store.db"])
+        with pytest.raises(SystemExit):
+            parse_args(["dump.sql", "--skip-reconciliation"])
+        with pytest.raises(SystemExit):
+            parse_args(["dump.sql", "--fetch-streaming-ids"])
+        with pytest.raises(SystemExit):
+            parse_args(["dump.sql", "--entity-source", "local"])
 
 
 def _make_resolved_entry(
@@ -162,13 +165,11 @@ class TestFacetOnly:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
 
-        # Build the cache with the correct key
         dump_stat = dump.stat()
         cache_key = f"{dump_stat.st_size}_{int(dump_stat.st_mtime)}"
         cache_path = cache_dir / f"resolved_{cache_key}.pkl"
         _build_cache(cache_path, [])
 
-        # No database exists at the default output path
         with pytest.raises(SystemExit):
             main(
                 [
@@ -190,7 +191,6 @@ class TestFacetOnly:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        # Set up test data
         artists = {"Autechre": 1, "Stereolab": 2, "Cat Power": 3}
         entries = [
             _make_resolved_entry(100, "Autechre", show_id=1, sequence=1),
@@ -200,17 +200,14 @@ class TestFacetOnly:
         show_to_dj = {1: 42}
         show_dj_names = {1: "DJ Test"}
 
-        # Write cache
         dump_stat = dump.stat()
         cache_key = f"{dump_stat.st_size}_{int(dump_stat.st_mtime)}"
         cache_path = cache_dir / f"resolved_{cache_key}.pkl"
         _build_cache(cache_path, entries, show_to_dj, show_dj_names)
 
-        # Create target database
         db_path = output_dir / "wxyc_artist_graph.db"
         _create_db_with_artists(db_path, artists)
 
-        # Run facet-only mode
         main(
             [
                 str(dump),
@@ -222,26 +219,22 @@ class TestFacetOnly:
             ]
         )
 
-        # Verify facet tables were created
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
 
-        # play table should have 3 rows
         play_count = conn.execute("SELECT COUNT(*) FROM play").fetchone()[0]
         assert play_count == 3
 
-        # dj table should have 1 row
         dj_count = conn.execute("SELECT COUNT(*) FROM dj").fetchone()[0]
         assert dj_count == 1
 
-        # artist_month_count should have entries
         amc = conn.execute("SELECT COUNT(*) FROM artist_month_count").fetchone()[0]
         assert amc > 0
 
         conn.close()
 
-    def test_facet_only_with_entity_store_path(self, tmp_path):
-        """--facet-only with --entity-store-path should use that as the target DB."""
+    def test_facet_only_with_db_path(self, tmp_path):
+        """--facet-only with --db-path should use that as the target DB."""
         dump = tmp_path / "dump.sql"
         dump.write_text("-- empty dump")
         cache_dir = tmp_path / "cache"
@@ -258,9 +251,8 @@ class TestFacetOnly:
         cache_path = cache_dir / f"resolved_{cache_key}.pkl"
         _build_cache(cache_path, entries, {1: 10}, {1: "DJ Entity"})
 
-        # Create the entity-store DB
-        entity_db = tmp_path / "entity_store.db"
-        _create_db_with_artists(entity_db, artists)
+        pipeline_db = tmp_path / "pipeline.db"
+        _create_db_with_artists(pipeline_db, artists)
 
         main(
             [
@@ -268,12 +260,12 @@ class TestFacetOnly:
                 "--facet-only",
                 "--cache-dir",
                 str(cache_dir),
-                "--entity-store-path",
-                str(entity_db),
+                "--db-path",
+                str(pipeline_db),
             ]
         )
 
-        conn = sqlite3.connect(str(entity_db))
+        conn = sqlite3.connect(str(pipeline_db))
         play_count = conn.execute("SELECT COUNT(*) FROM play").fetchone()[0]
         assert play_count == 2
         conn.close()

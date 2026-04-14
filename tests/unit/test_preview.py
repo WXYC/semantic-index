@@ -12,8 +12,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.entity_store import EntityStore
 from semantic_index.models import ArtistStats
+from semantic_index.pipeline_db import PipelineDB
 
 # -- iTunes mock responses --
 
@@ -76,22 +76,33 @@ BANDCAMP_PAGE_NO_TRACKS = """
 """
 
 
+def _create_entity(db: PipelineDB, name: str, qid: str, **streaming_ids: str) -> int:
+    """Create an entity row and optionally set streaming IDs."""
+    cur = db._conn.execute(
+        "INSERT INTO entity (name, entity_type, wikidata_qid) VALUES (?, 'artist', ?)",
+        (name, qid),
+    )
+    entity_id = cur.lastrowid
+    if streaming_ids:
+        updates = ", ".join(f"{k} = ?" for k in streaming_ids)
+        db._conn.execute(
+            f"UPDATE entity SET {updates} WHERE id = ?",
+            (*streaming_ids.values(), entity_id),
+        )
+    db._conn.commit()
+    return entity_id  # type: ignore[return-value]
+
+
 def _build_preview_fixture_db() -> str:
-    """Create a fixture database with entity store tables and streaming IDs."""
+    """Create a fixture database with entity tables and streaming IDs."""
     path = tempfile.mktemp(suffix=".db")
-    store = EntityStore(path)
-    store.initialize()
+    db = PipelineDB(path)
+    db.initialize()
 
     # Autechre: has Apple Music ID
-    entity_ae = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
-    store.update_entity_streaming_ids(entity_ae.id, apple_music="15821237")
-    store.upsert_artist(
-        "Autechre",
-        genre="Electronic",
-        discogs_artist_id=12,
-        entity_id=entity_ae.id,
-    )
-    store.update_artist_stats(
+    entity_ae = _create_entity(db, "Autechre", "Q2774", apple_music_artist_id="15821237")
+    db.upsert_artist("Autechre", genre="Electronic", discogs_artist_id=12, entity_id=entity_ae)
+    db.update_artist_stats(
         "Autechre",
         ArtistStats(
             canonical_name="Autechre",
@@ -106,13 +117,9 @@ def _build_preview_fixture_db() -> str:
     )
 
     # Stereolab: no streaming IDs (will test fallbacks)
-    entity_sl = store.get_or_create_entity("Stereolab", "artist", wikidata_qid="Q498895")
-    store.upsert_artist(
-        "Stereolab",
-        genre="Rock",
-        entity_id=entity_sl.id,
-    )
-    store.update_artist_stats(
+    entity_sl = _create_entity(db, "Stereolab", "Q498895")
+    db.upsert_artist("Stereolab", genre="Rock", entity_id=entity_sl)
+    db.update_artist_stats(
         "Stereolab",
         ArtistStats(
             canonical_name="Stereolab",
@@ -127,14 +134,9 @@ def _build_preview_fixture_db() -> str:
     )
 
     # Cat Power: has Bandcamp ID (will test Bandcamp fallback)
-    entity_cp = store.get_or_create_entity("Cat Power", "artist", wikidata_qid="Q228899")
-    store.update_entity_streaming_ids(entity_cp.id, bandcamp="catpower")
-    store.upsert_artist(
-        "Cat Power",
-        genre="Rock",
-        entity_id=entity_cp.id,
-    )
-    store.update_artist_stats(
+    entity_cp = _create_entity(db, "Cat Power", "Q228899", bandcamp_id="catpower")
+    db.upsert_artist("Cat Power", genre="Rock", entity_id=entity_cp)
+    db.update_artist_stats(
         "Cat Power",
         ArtistStats(
             canonical_name="Cat Power",
@@ -148,7 +150,7 @@ def _build_preview_fixture_db() -> str:
         ),
     )
 
-    store.close()
+    db.close()
     return path
 
 

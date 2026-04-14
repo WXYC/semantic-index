@@ -226,53 +226,19 @@ class Entity(BaseModel):
     entity_type: str = "artist"
 
 
-class ReconciliationEvent(BaseModel):
-    """A single reconciliation lookup result from an external knowledge base."""
-
-    source: str  # 'discogs', 'musicbrainz', 'wikidata'
-    external_id: str
-    confidence: float | None = None
-    method: str  # 'exact', 'fuzzy', 'api_search', 'cache_lookup'
-
-
-class ReconciliationReport(BaseModel):
-    """Summary of a reconciliation batch run."""
-
-    total: int  # Total artists in the input set
-    attempted: int  # Artists where reconciliation was attempted (status was 'unreconciled')
-    succeeded: int  # Attempts that found at least one external match
-    no_match: int  # Attempts where the lookup returned no result
-    errored: int  # Attempts that failed due to an exception
-    skipped: int  # Artists already in 'partial' or 'reconciled' status
-
-
 # --- Wikidata models ---
 
 
 class WikidataEntity(BaseModel):
     """A Wikidata entity with optional Discogs artist ID.
 
-    Returned by SPARQL lookups (P1953 Discogs ID) and name search
-    (wbsearchentities API).
+    Returned by SPARQL lookups (P1902 Discogs label ID).
     """
 
     qid: str  # e.g. "Q2774"
     name: str  # rdfs:label
     description: str | None = None
-    discogs_artist_id: int | None = None  # P1953
-
-
-class WikidataStreamingIds(BaseModel):
-    """Streaming service IDs from Wikidata for a single entity.
-
-    Fetched via SPARQL OPTIONAL queries for P1902 (Spotify artist ID),
-    P2850 (Apple Music artist ID), and P3283 (Bandcamp profile ID).
-    """
-
-    qid: str
-    spotify_artist_id: str | None = None  # P1902
-    apple_music_artist_id: str | None = None  # P2850
-    bandcamp_id: str | None = None  # P3283
+    discogs_artist_id: int | None = None
 
 
 class WikidataInfluence(BaseModel):
