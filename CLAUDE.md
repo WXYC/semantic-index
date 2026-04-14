@@ -31,6 +31,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. Uses `wxyc_etl.schema` constants for all discogs-cache table names. |
 | `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), streaming service IDs (P1902 Spotify, P2850 Apple Music, P3283 Bandcamp), and name search via wbsearchentities API. |
 | `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles, entity deduplication by shared Wikidata QID. Creates the artist table from scratch on a fresh database or migrates an existing one. |
+| `semantic_index/lml_identity.py` | Import pre-resolved identities from LML's `entity.identity` PG table into the local SQLite entity store. Used by `--entity-source=lml`. Bridge module for ETL pipeline unification. |
 | `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. |
 | `semantic_index/wikidata_influence.py` | Extract directed Wikidata P737 influence edges between reconciled artists. Resolves QIDs to canonical names via entity store. |
 | `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
@@ -267,7 +268,8 @@ python run_pipeline.py dump.sql --entity-store-path output/wxyc_artist_graph.db 
 ```
 
 - `--entity-store-path PATH` — Path to entity store SQLite database. Creates it if needed.
-- `--skip-reconciliation` — Skip Discogs reconciliation step.
+- `--entity-source {local,lml}` — Identity source for reconciliation. `local` (default) runs local reconciliation via entity_store.py + reconciliation.py. `lml` reads pre-resolved identities from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`). Both paths coexist during the transition to centralized identity resolution. When `lml` is set, local reconciliation steps (reconcile_batch, reconcile_members, reconcile_wikidata) are skipped.
+- `--skip-reconciliation` — Skip Discogs reconciliation step (only applies to `--entity-source=local`).
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--entity-store-path` with reconciled Wikidata QIDs.
 - `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--entity-store-path` and enrichment data.
