@@ -36,3 +36,4 @@ coverage.json
 .cache/
 *.db-shm
 *.db-wal
+.claude/worktrees/

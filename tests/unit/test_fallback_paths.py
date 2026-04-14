@@ -22,10 +22,10 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from semantic_index.discogs_client import DiscogsClient
 from semantic_index.entity_store import EntityStore
 from semantic_index.reconciliation import ArtistReconciler
+
+from semantic_index.discogs_client import DiscogsClient
 
 # ---------------------------------------------------------------------------
 # Fixture data: representative WXYC artists

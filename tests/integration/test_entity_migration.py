@@ -11,7 +11,6 @@ import sqlite3
 from unittest.mock import patch
 
 import pytest
-
 from semantic_index.entity_store import EntityStore
 
 pytestmark = pytest.mark.integration

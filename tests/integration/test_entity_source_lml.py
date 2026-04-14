@@ -150,6 +150,7 @@ class TestLmlEntitySourcePipeline:
     def _set_up_entity_store(self, fixture_dump):
         """Parse fixture dump, resolve artists, seed entity store, run LML import."""
         from semantic_index.entity_store import EntityStore
+
         from semantic_index.lml_identity import import_lml_identities
 
         all_names = _parse_fixture_and_resolve(fixture_dump)
