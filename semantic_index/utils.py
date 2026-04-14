@@ -7,17 +7,6 @@ import sqlite3
 
 logger = logging.getLogger(__name__)
 
-# ---- Various Artists filtering ----
-
-_VA_EXACT = {"v/a", "various", "various artists"}
-
-
-def is_various_artists(name: str) -> bool:
-    """Return True for Various Artists / V/A compilation entries."""
-    lower = name.lower().strip()
-    return lower in _VA_EXACT or lower.startswith("various artists")
-
-
 # ---- Schema migration ----
 
 

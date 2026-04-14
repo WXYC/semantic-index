@@ -15,6 +15,7 @@ dependencies = [
     "rapidfuzz>=3.0.0",
     "psycopg[binary]>=3.1",
     "httpx>=0.25",
+    "wxyc-etl>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ target-version = ['py312']
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["scripts/", ".claude/"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "C4"]
@@ -66,6 +68,11 @@ warn_return_any = true
 warn_unused_configs = true
 check_untyped_defs = true
 strict_optional = true
+
+[[tool.mypy.overrides]]
+module = "wxyc_etl.*"
+ignore_missing_imports = true
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 markers = [

@@ -30,6 +30,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from wxyc_etl.schema import (  # type: ignore[import-untyped]
+    RELEASE_ARTIST_TABLE,
+    RELEASE_STYLE_TABLE,
+)
+
 from semantic_index.discogs_client import DiscogsClient
 from semantic_index.entity_store import EntityStore
 from semantic_index.models import ReconciliationReport
@@ -396,10 +401,10 @@ class ArtistReconciler:
         # Fetch styles by discogs_artist_id
         matched_ids = list({did for did, _ in matches.values()})
         style_rows = conn.execute(
-            "SELECT DISTINCT ra.artist_id, rs.style "
-            "FROM release_style rs "
-            "JOIN release_artist ra ON rs.release_id = ra.release_id "
-            "WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
+            f"SELECT DISTINCT ra.artist_id, rs.style "  # noqa: S608
+            f"FROM {RELEASE_STYLE_TABLE} rs "
+            f"JOIN {RELEASE_ARTIST_TABLE} ra ON rs.release_id = ra.release_id "
+            f"WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
             (matched_ids,),
         ).fetchall()
 
@@ -440,9 +445,9 @@ class ArtistReconciler:
         rows = self._query_with_fallback(
             conn,
             "SELECT artist_name, discogs_artist_id FROM artist_discogs_id WHERE artist_name = ANY(%s)",
-            "SELECT DISTINCT lower(ra.artist_name), ra.artist_id "
-            "FROM release_artist ra "
-            "WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
+            f"SELECT DISTINCT lower(ra.artist_name), ra.artist_id "  # noqa: S608
+            f"FROM {RELEASE_ARTIST_TABLE} ra "
+            f"WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
             (lower_names,),
         )
 
@@ -460,10 +465,10 @@ class ArtistReconciler:
         style_rows = self._query_with_fallback(
             conn,
             "SELECT artist_name, style FROM artist_style_summary WHERE artist_name = ANY(%s)",
-            "SELECT DISTINCT lower(ra.artist_name), rs.style "
-            "FROM release_style rs "
-            "JOIN release_artist ra ON rs.release_id = ra.release_id "
-            "WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
+            f"SELECT DISTINCT lower(ra.artist_name), rs.style "  # noqa: S608
+            f"FROM {RELEASE_STYLE_TABLE} rs "
+            f"JOIN {RELEASE_ARTIST_TABLE} ra ON rs.release_id = ra.release_id "
+            f"WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
             (matched_lower,),
         )
 
@@ -535,10 +540,10 @@ class ArtistReconciler:
         # 3. Fetch styles by artist_id for matched artists
         matched_ids = list(set(matches.values()))
         style_rows = conn.execute(
-            "SELECT DISTINCT ra.artist_id, rs.style "
-            "FROM release_style rs "
-            "JOIN release_artist ra ON rs.release_id = ra.release_id "
-            "WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
+            f"SELECT DISTINCT ra.artist_id, rs.style "  # noqa: S608
+            f"FROM {RELEASE_STYLE_TABLE} rs "
+            f"JOIN {RELEASE_ARTIST_TABLE} ra ON rs.release_id = ra.release_id "
+            f"WHERE ra.extra = 0 AND ra.artist_id = ANY(%s)",
             (matched_ids,),
         ).fetchall()
 

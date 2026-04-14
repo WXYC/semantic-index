@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from rapidfuzz import process as rfprocess
 from rapidfuzz.distance import JaroWinkler
+from wxyc_etl.text import normalize_artist_name, split_artist_name  # type: ignore[import-untyped]
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
 
@@ -47,10 +48,11 @@ _BRACKET_RE = re.compile(r"\s*\[.*?\]\s*$")
 def _normalize(name: str) -> str:
     """Normalize an artist name for matching.
 
-    Strips leading 'the ', normalizes '&' → 'and', removes trailing
-    bracketed disambiguators like '[Scotland]'.
+    Uses wxyc_etl.text.normalize_artist_name for NFKD decomposition, diacritics
+    stripping, lowercasing, and trimming. Then applies semantic-index-specific
+    transforms: bracket removal, leading 'the ' strip, '&' -> 'and'.
     """
-    s = name.strip().lower()
+    s = normalize_artist_name(name)
     s = _BRACKET_RE.sub("", s)
     if s.startswith("the "):
         s = s[4:]
@@ -61,20 +63,30 @@ def _normalize(name: str) -> str:
 def _normalized_forms(name: str) -> list[str]:
     """Generate all normalized forms of a catalog name for index matching.
 
-    Returns the base normalized form plus alias parts from ' / ' and ' aka '
-    separators. E.g., "J Dilla / Jay Dee" → ["j dilla / jay dee", "j dilla", "jay dee"].
+    Returns the base normalized form plus alias parts from context-free splitting
+    (via wxyc_etl.text.split_artist_name for `, `, ` / `, and ` + ` separators)
+    and ` aka ` separators. E.g., "J Dilla / Jay Dee" -> ["j dilla / jay dee",
+    "j dilla", "jay dee"].
     """
     base = _normalize(name)
     forms = [base]
 
+    # Use wxyc_etl split_artist_name for `, `, ` / `, and ` + ` separators
+    parts = split_artist_name(name)
+    if parts is not None:
+        for part in parts:
+            normalized_part = _normalize(part)
+            if normalized_part and normalized_part != base:
+                forms.append(normalized_part)
+
+    # Also handle ` aka ` separator (not covered by split_artist_name)
     lowered = name.strip().lower()
-    for sep in (" / ", " aka "):
-        if sep in lowered:
-            parts = lowered.split(sep)
-            for part in parts:
-                normalized_part = _normalize(part)
-                if normalized_part and normalized_part != base:
-                    forms.append(normalized_part)
+    if " aka " in lowered:
+        aka_parts = lowered.split(" aka ")
+        for part in aka_parts:
+            normalized_part = _normalize(part)
+            if normalized_part and normalized_part != base and normalized_part not in forms:
+                forms.append(normalized_part)
 
     return forms
 
