@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from collections import Counter
 from dataclasses import dataclass
 
+import anthropic
 import networkx as nx
 from networkx.algorithms.community import louvain_communities
 from wxyc_etl.text import is_compilation_artist  # type: ignore[import-untyped]
@@ -227,6 +229,117 @@ def _build_community_metadata(
     return metadata
 
 
+# Hand-curated overrides keyed by frozenset of top 3 anchor artists (stable
+# across re-runs since community IDs are arbitrary but anchor artists are not).
+COMMUNITY_LABEL_OVERRIDES: dict[frozenset[str], str] = {}
+
+_LABEL_SYSTEM_PROMPT = (
+    "You name musical neighborhoods for a college radio station's artist map. "
+    "Given a cluster of artists and their Discogs style tags, produce a short "
+    "evocative label (2-4 words) that a music fan would recognize as a distinct "
+    "scene or sound. Don't use generic terms like 'Experimental' or 'Alternative'. "
+    "Examples: Deep Soul & Funk, Ambient Drone, Classic Country, IDM & Glitch, "
+    "Post-Punk Revival, Freeform Jazz. "
+    "Respond with ONLY the label, no explanation or formatting."
+)
+
+_EVAL_SYSTEM_PROMPT = (
+    "You are evaluating two candidate labels for a musical neighborhood. "
+    "Pick the one that better captures this cluster's identity — specific enough "
+    "to distinguish it from other neighborhoods, evocative enough that a music "
+    "fan would immediately understand the vibe. Respond with ONLY the chosen label, "
+    "nothing else."
+)
+
+
+def _generate_community_labels(
+    communities_meta: list[dict],
+    min_size: int = 100,
+    api_key: str | None = None,
+) -> None:
+    """Generate LLM labels for communities above min_size. Modifies meta in place.
+
+    When api_key is None, returns immediately (Discogs-derived labels are kept).
+    Each community is processed independently — LLM failures for one community
+    don't affect others.
+    """
+    if not api_key:
+        return
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    for meta in communities_meta:
+        if meta["size"] < min_size:
+            continue
+
+        top_artists = json.loads(meta["top_artists"])
+        anchor_key = frozenset(top_artists[:3])
+
+        # Check hand-curated overrides first
+        if anchor_key in COMMUNITY_LABEL_OVERRIDES:
+            meta["label"] = COMMUNITY_LABEL_OVERRIDES[anchor_key]
+            continue
+
+        top_styles = json.loads(meta["top_genres"])
+        auto_label = meta["label"]
+
+        # Generate candidate label
+        user_msg = json.dumps(
+            {
+                "top_artists": top_artists,
+                "top_styles": [s[0] for s in top_styles[:8]],
+                "size": meta["size"],
+            }
+        )
+        try:
+            gen_resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=20,
+                system=_LABEL_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            gen_block = gen_resp.content[0]
+            assert hasattr(gen_block, "text")
+            raw = gen_block.text.strip()
+            # Take only the first line, strip markdown/quotes
+            generated = raw.split("\n")[0].strip().strip('"').strip("*").strip("#").strip()
+
+            # Evaluate: pick best between generated and auto
+            eval_msg = (
+                f"Cluster artists: {', '.join(top_artists)}\n"
+                f"Option A: {generated}\n"
+                f"Option B: {auto_label}\n"
+                f"Which label better captures this neighborhood?"
+            )
+            eval_resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=20,
+                system=_EVAL_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": eval_msg}],
+            )
+            eval_block = eval_resp.content[0]
+            assert hasattr(eval_block, "text")
+            raw_eval = eval_block.text.strip()
+            chosen = raw_eval.split("\n")[0].strip().strip('"').strip("*").strip("#").strip()
+
+            if auto_label and auto_label.lower() in chosen.lower():
+                meta["label"] = auto_label
+            else:
+                meta["label"] = generated
+
+            logger.info(
+                "  Community %d (%d artists): %s",
+                meta["id"],
+                meta["size"],
+                meta["label"],
+            )
+        except Exception:
+            logger.warning(
+                "LLM label generation failed for community %d, keeping Discogs label",
+                meta["id"],
+            )
+
+
 def _persist(
     conn: sqlite3.Connection,
     node_community: dict[int, int],
@@ -266,8 +379,14 @@ def _persist(
     conn.commit()
 
 
-def compute_and_persist(db_path: str, *, seed: int = 42, bc_k: int = 2000) -> GraphMetricsReport:
-    """Compute graph metrics and persist to the SQLite database. Idempotent."""
+def compute_and_persist(
+    db_path: str, *, seed: int = 42, bc_k: int = 2000, api_key: str | None = None
+) -> GraphMetricsReport:
+    """Compute graph metrics and persist to the SQLite database. Idempotent.
+
+    When api_key is provided, generates LLM labels for large communities using
+    Claude Haiku. When None, Discogs-derived labels are used.
+    """
     conn = sqlite3.connect(db_path)
 
     logger.info("Ensuring graph metrics schema...")
@@ -303,6 +422,10 @@ def compute_and_persist(db_path: str, *, seed: int = 42, bc_k: int = 2000) -> Gr
     logger.info("Building community metadata...")
     communities_meta = _build_community_metadata(communities, artists, conn)
 
+    if api_key:
+        logger.info("Generating LLM community labels...")
+        _generate_community_labels(communities_meta, min_size=100, api_key=api_key)
+
     logger.info("Persisting results...")
     _persist(conn, node_community, communities_meta, betweenness, pagerank, discovery)
 
@@ -335,7 +458,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    report = compute_and_persist(args.db_path)
+    report = compute_and_persist(args.db_path, api_key=os.environ.get("ANTHROPIC_API_KEY"))
     print(
         f"Communities: {report.community_count}, "
         f"Artists scored: {report.artists_scored}, "

@@ -339,6 +339,13 @@
         <span class="slider-label">Hot</span>
       </div>
     </div>
+    <div class="slider-control">
+      <div class="slider-row">
+        <span class="slider-label">Fewer</span>
+        <input type="range" id="neighborhoodCutoff" min="1" max="10" value="3" step="0.5">
+        <span class="slider-label">More</span>
+      </div>
+    </div>
     <input type="hidden" id="colorMode" value="community">
     <input type="hidden" id="sizeMode" value="centrality">
   </div>
@@ -471,12 +478,33 @@ async function api(path, params = {}, signal) {
   return res.json();
 }
 
-// Community metadata cache (fetched once on load)
-let communityMap = {};  // id -> { label, size, top_artists }
-api('/graph/communities', { min_size: 1, limit: 500 }).then(data => {
+// Community metadata cache
+let communityMap = {};
+let totalGraphArtists = 0;
+
+async function fetchCommunities() {
+  const pct = parseFloat(document.getElementById('neighborhoodCutoff').value);
+  const minSize = Math.max(1, Math.round(totalGraphArtists * pct / 100));
+  const data = await api('/graph/communities', { min_size: minSize, limit: 500 });
+  communityMap = {};
   if (data && data.communities) {
+    if (data.total_artists) totalGraphArtists = data.total_artists;
     for (const c of data.communities) communityMap[c.id] = c;
   }
+}
+
+// Bootstrap: fetch all to get total_artists, then re-fetch with slider percentage
+api('/graph/communities', { min_size: 1, limit: 500 }).then(data => {
+  if (data) {
+    totalGraphArtists = data.total_artists || 0;
+    fetchCommunities();
+  }
+});
+
+document.getElementById('neighborhoodCutoff').addEventListener('change', async () => {
+  await fetchCommunities();
+  nodeGroup.selectAll('circle').attr('fill', d => getColor(d));
+  reloadCenter();
 });
 
 function getCommunityLabel(communityId) {
@@ -1264,6 +1292,7 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     month: document.getElementById('monthFilter').value,
     dj: document.getElementById('djFilter').value,
     heat: document.getElementById('minRawCount').value,
+    neighborhoods: document.getElementById('neighborhoodCutoff').value,
   };
   history.pushState({ artistName }, '', buildURL(artistName, controls));
 }
@@ -1534,6 +1563,8 @@ window.addEventListener('popstate', async () => {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
+  document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
+  fetchCommunities();
 
   updateFacetState();
   if (state.artist != null) {
@@ -1588,6 +1619,8 @@ async function loadFacets() {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
+  document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
+  fetchCommunities();
 
   updateFacetState();
 

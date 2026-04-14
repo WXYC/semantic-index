@@ -1,11 +1,10 @@
 /** URL state management for the graph explorer. */
 
-export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", heat: "0.5" };
+export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", heat: "0.5", neighborhoods: "3" };
 
 /**
  * Parse URL search string into graph state.
  * @param {string} search - URL search string (e.g. "?artist=Autechre&edge=sharedStyle")
- * @returns {{ artist: string|null, edge: string, depth: string, limit: string, month: string, dj: string, heat: string }}
  */
 export function parseURL(search) {
   const p = new URLSearchParams(search);
@@ -17,13 +16,14 @@ export function parseURL(search) {
     month: p.get("month") || DEFAULTS.month,
     dj: p.get("dj") || DEFAULTS.dj,
     heat: p.get("heat") || DEFAULTS.heat,
+    neighborhoods: p.get("neighborhoods") || DEFAULTS.neighborhoods,
   };
 }
 
 /**
  * Build a URL query string from graph state. Only includes non-default values.
  * @param {string|null} artistName
- * @param {{ edge: string, depth: string, limit: string, month: string, dj: string, heat: string }} controls
+ * @param {object} controls
  * @returns {string} URL path with query string, e.g. "?artist=Autechre&edge=sharedStyle"
  */
 export function buildURL(artistName, controls) {
@@ -35,6 +35,7 @@ export function buildURL(artistName, controls) {
   if (controls.month && controls.month !== DEFAULTS.month) p.set("month", controls.month);
   if (controls.dj && controls.dj !== DEFAULTS.dj) p.set("dj", controls.dj);
   if (controls.heat && controls.heat !== DEFAULTS.heat) p.set("heat", controls.heat);
+  if (controls.neighborhoods && controls.neighborhoods !== DEFAULTS.neighborhoods) p.set("neighborhoods", controls.neighborhoods);
   const qs = p.toString();
   return qs ? `?${qs}` : "/";
 }

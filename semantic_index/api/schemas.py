@@ -154,6 +154,7 @@ class CommunitiesResponse(BaseModel):
     """Response for GET /graph/communities."""
 
     communities: list[CommunityDetail]
+    total_artists: int = 0
 
 
 class DiscoveryEntry(BaseModel):
