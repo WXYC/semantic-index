@@ -1,21 +1,34 @@
 """Parse MySQL dump files into Python tuples.
 
-Uses a Rust extension (sql_parser_rs) for ~1000x faster parsing when available,
+Uses a Rust extension (wxyc_etl.parser) for ~1000x faster parsing when available,
 with a pure-Python fallback for environments where the Rust extension isn't built.
 """
 
 import logging
+import os
 import re
 from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
-try:
-    import sql_parser_rs as _rust  # type: ignore[import-untyped,import-not-found]
+_HAS_RUST = False
+if not os.environ.get("WXYC_ETL_NO_RUST"):
+    try:
+        from wxyc_etl.parser import iter_table_rows as _rust_iter  # type: ignore[import-not-found]
+        from wxyc_etl.parser import load_table_rows as _rust_load  # type: ignore[import-not-found]
 
-    _HAS_RUST = True
-except ImportError:
-    _HAS_RUST = False
+        _HAS_RUST = True
+    except ImportError:
+        try:
+            import sql_parser_rs as _rust  # type: ignore[import-untyped,import-not-found]
+
+            _rust_iter = _rust.iter_table_rows
+            _rust_load = _rust.load_table_rows
+            _HAS_RUST = True
+        except ImportError:
+            pass
+
+if not _HAS_RUST:
     logger.info("Rust SQL parser not available, using pure-Python fallback")
 
 
@@ -110,7 +123,7 @@ def iter_table_rows(path: str, table_name: str) -> Iterator[tuple]:
     pure-Python line-by-line parsing.
     """
     if _HAS_RUST:
-        yield from _rust.iter_table_rows(path, table_name)
+        yield from _rust_iter(path, table_name)
     else:
         pattern = re.compile(r"INSERT INTO `" + re.escape(table_name) + r"`")
         with open(path, encoding="latin-1") as f:
@@ -125,5 +138,5 @@ def load_table_rows(path: str, table_name: str) -> list[tuple]:
     Uses the Rust extension when available (~1000x faster).
     """
     if _HAS_RUST:
-        return _rust.load_table_rows(path, table_name)  # type: ignore[no-any-return]
+        return _rust_load(path, table_name)  # type: ignore[no-any-return]
     return list(iter_table_rows(path, table_name))
