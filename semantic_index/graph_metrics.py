@@ -19,8 +19,9 @@ from dataclasses import dataclass
 
 import networkx as nx
 from networkx.algorithms.community import louvain_communities
+from wxyc_etl.text import is_compilation_artist  # type: ignore[import-untyped]
 
-from semantic_index.utils import ensure_columns, is_various_artists
+from semantic_index.utils import ensure_columns
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ def _build_transition_graph(
     rows = conn.execute("SELECT id, canonical_name, genre, total_plays FROM artist").fetchall()
     artists = {}
     for r in rows:
-        if not is_various_artists(r[1]):
+        if not is_compilation_artist(r[1]):
             artists[r[0]] = {"name": r[1], "genre": r[2], "total_plays": r[3]}
 
     valid_ids = set(artists.keys())

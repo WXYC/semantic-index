@@ -12,6 +12,14 @@ import time
 
 import httpx
 import psycopg
+from wxyc_etl.schema import (  # type: ignore[import-untyped]
+    RELEASE_ARTIST_TABLE,
+    RELEASE_LABEL_TABLE,
+    RELEASE_STYLE_TABLE,
+    RELEASE_TABLE,
+    RELEASE_TRACK_ARTIST_TABLE,
+    RELEASE_TRACK_TABLE,
+)
 
 from semantic_index.models import (
     CompilationEdge,
@@ -117,11 +125,11 @@ class DiscogsClient:
         try:
             # Try primary artist credits first
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT release_id
-                FROM release_artist
+                FROM {RELEASE_ARTIST_TABLE}
                 WHERE lower(artist_name) = lower(%s) AND extra = 0
-                """,
+                """,  # noqa: S608
                 (artist_name,),
             ).fetchall()
             if rows:
@@ -129,11 +137,11 @@ class DiscogsClient:
 
             # Fall back to per-track credits
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT release_id
-                FROM release_track_artist
+                FROM {RELEASE_TRACK_ARTIST_TABLE}
                 WHERE lower(artist_name) = lower(%s)
-                """,
+                """,  # noqa: S608
                 (artist_name,),
             ).fetchall()
             return [row[0] for row in rows]
@@ -254,7 +262,7 @@ class DiscogsClient:
         result: dict[str, dict] = {}
 
         rows = execute(
-            "SELECT ra.artist_name, ra.release_id FROM release_artist ra WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",
+            f"SELECT ra.artist_name, ra.release_id FROM {RELEASE_ARTIST_TABLE} ra WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",  # noqa: S608
             (batch,),
         ).fetchall()
 
@@ -267,7 +275,7 @@ class DiscogsClient:
             return {}
 
         style_rows = execute(
-            "SELECT release_id, style FROM release_style WHERE release_id = ANY(%s)",
+            f"SELECT release_id, style FROM {RELEASE_STYLE_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
         ).fetchall()
         release_styles: dict[int, list[str]] = {}
@@ -275,7 +283,7 @@ class DiscogsClient:
             release_styles.setdefault(rid, []).append(style)
 
         extra_rows = execute(
-            "SELECT release_id, artist_name, role FROM release_artist WHERE extra = 1 AND release_id = ANY(%s)",
+            f"SELECT release_id, artist_name, role FROM {RELEASE_ARTIST_TABLE} WHERE extra = 1 AND release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
         ).fetchall()
         release_extras: dict[int, list[tuple[str, str | None]]] = {}
@@ -283,7 +291,7 @@ class DiscogsClient:
             release_extras.setdefault(rid, []).append((name, role))
 
         label_rows = execute(
-            "SELECT release_id, label_id, label_name FROM release_label WHERE release_id = ANY(%s)",
+            f"SELECT release_id, label_id, label_name FROM {RELEASE_LABEL_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
         ).fetchall()
         release_labels: dict[int, list[tuple[int | None, str]]] = {}
@@ -291,7 +299,7 @@ class DiscogsClient:
             release_labels.setdefault(rid, []).append((label_id, label_name))
 
         track_artist_rows = execute(
-            "SELECT release_id, artist_name FROM release_track_artist WHERE release_id = ANY(%s)",
+            f"SELECT release_id, artist_name FROM {RELEASE_TRACK_ARTIST_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
         ).fetchall()
         release_track_artists: dict[int, list[str]] = {}
@@ -335,25 +343,25 @@ class DiscogsClient:
 
             # Styles (from release_style table)
             style_rows = conn.execute(
-                f"SELECT DISTINCT style FROM release_style WHERE release_id IN ({placeholder})",  # noqa: S608
+                f"SELECT DISTINCT style FROM {RELEASE_STYLE_TABLE} WHERE release_id IN ({placeholder})",  # noqa: S608
                 ids_tuple,
             ).fetchall()
 
             # Extra artists (personnel credits)
             extra_rows = conn.execute(
-                f"SELECT DISTINCT artist_name, role FROM release_artist WHERE release_id IN ({placeholder}) AND extra = 1",  # noqa: S608
+                f"SELECT DISTINCT artist_name, role FROM {RELEASE_ARTIST_TABLE} WHERE release_id IN ({placeholder}) AND extra = 1",  # noqa: S608
                 ids_tuple,
             ).fetchall()
 
             # Labels
             label_rows = conn.execute(
-                f"SELECT DISTINCT label_id, label_name FROM release_label WHERE release_id IN ({placeholder})",  # noqa: S608
+                f"SELECT DISTINCT label_id, label_name FROM {RELEASE_LABEL_TABLE} WHERE release_id IN ({placeholder})",  # noqa: S608
                 ids_tuple,
             ).fetchall()
 
             # Track artists (for compilation detection)
             track_artist_rows = conn.execute(
-                f"SELECT release_id, artist_name FROM release_track_artist WHERE release_id IN ({placeholder})",  # noqa: S608
+                f"SELECT release_id, artist_name FROM {RELEASE_TRACK_ARTIST_TABLE} WHERE release_id IN ({placeholder})",  # noqa: S608
                 ids_tuple,
             ).fetchall()
 
@@ -380,12 +388,12 @@ class DiscogsClient:
         try:
             # Try primary artist credits
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT ra.artist_id, ra.artist_name
-                FROM release_artist ra
+                FROM {RELEASE_ARTIST_TABLE} ra
                 WHERE ra.extra = 0 AND lower(ra.artist_name) = lower(%s)
                 LIMIT 1
-                """,
+                """,  # noqa: S608
                 (name,),
             ).fetchall()
             if rows:
@@ -396,12 +404,12 @@ class DiscogsClient:
 
             # Fall back to per-track credits
             rows = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT rta.artist_name
-                FROM release_track_artist rta
+                FROM {RELEASE_TRACK_ARTIST_TABLE} rta
                 WHERE lower(rta.artist_name) = lower(%s)
                 LIMIT 1
-                """,
+                """,  # noqa: S608
                 (name,),
             ).fetchall()
             if rows:
@@ -454,7 +462,7 @@ class DiscogsClient:
         try:
             # Release header
             row = conn.execute(
-                "SELECT id, title, release_year FROM release WHERE id = %s",
+                f"SELECT id, title, release_year FROM {RELEASE_TABLE} WHERE id = %s",  # noqa: S608
                 (release_id,),
             ).fetchone()
             if row is None:
@@ -465,22 +473,22 @@ class DiscogsClient:
 
             # Child tables
             artist_rows = conn.execute(
-                "SELECT artist_id, artist_name, extra, role FROM release_artist WHERE release_id = %s",
+                f"SELECT artist_id, artist_name, extra, role FROM {RELEASE_ARTIST_TABLE} WHERE release_id = %s",  # noqa: S608
                 (release_id,),
             ).fetchall()
 
             label_rows = conn.execute(
-                "SELECT label_id, label_name, catno FROM release_label WHERE release_id = %s",
+                f"SELECT label_id, label_name, catno FROM {RELEASE_LABEL_TABLE} WHERE release_id = %s",  # noqa: S608
                 (release_id,),
             ).fetchall()
 
             track_rows = conn.execute(
-                "SELECT position, title, sequence FROM release_track WHERE release_id = %s ORDER BY sequence",
+                f"SELECT position, title, sequence FROM {RELEASE_TRACK_TABLE} WHERE release_id = %s ORDER BY sequence",  # noqa: S608
                 (release_id,),
             ).fetchall()
 
             track_artist_rows = conn.execute(
-                "SELECT release_id, artist_name FROM release_track_artist WHERE release_id = %s",
+                f"SELECT release_id, artist_name FROM {RELEASE_TRACK_ARTIST_TABLE} WHERE release_id = %s",  # noqa: S608
                 (release_id,),
             ).fetchall()
 

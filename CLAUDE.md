@@ -23,12 +23,12 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 |--------|---------------|
 | `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Uses `wxyc_etl.parser` Rust extension for ~1000x faster parsing, with `sql_parser_rs` and pure-Python fallbacks. Set `WXYC_ETL_NO_RUST=1` to force pure-Python. |
 | `semantic_index/models.py` | Pydantic data models for all pipeline entities. |
-| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: FK chain, name match, normalized, fuzzy (Jaro-Winkler), Discogs, raw fallback. |
+| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: FK chain, name match, normalized (via `wxyc_etl.text.normalize_artist_name` + local bracket/the/& transforms), fuzzy (Jaro-Winkler), Discogs, raw fallback. Uses `wxyc_etl.text.split_artist_name` for alias splitting. |
 | `semantic_index/adjacency.py` | Extract consecutive artist pairs within radio shows. |
 | `semantic_index/pmi.py` | Compute Pointwise Mutual Information for artist co-occurrences. |
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
 | `semantic_index/cross_reference.py` | Extract cross-reference edges from catalog cross-reference tables. |
-| `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. |
+| `semantic_index/discogs_client.py` | Two-tier Discogs client: discogs-cache PostgreSQL with library-metadata-lookup API fallback. Uses `wxyc_etl.schema` constants for all discogs-cache table names. |
 | `semantic_index/wikidata_client.py` | Wikidata SPARQL client: batched lookups by Discogs ID (P1953), influence relationships (P737), label hierarchy (P749/P355), streaming service IDs (P1902 Spotify, P2850 Apple Music, P3283 Bandcamp), and name search via wbsearchentities API. |
 | `semantic_index/entity_store.py` | Persistent entity store for reconciled artist identities: schema creation/migration, CRUD, artist upsert, reconciliation log, artist styles, entity deduplication by shared Wikidata QID. Creates the artist table from scratch on a fresh database or migrates an existing one. |
 | `semantic_index/reconciliation.py` | Bulk Discogs matching for unreconciled artists via discogs-cache release_artist table, with member/group fallback via artist_member table. |
@@ -38,7 +38,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features from extracted data dump, aggregate per-artist audio profiles, compute cosine similarity edges. |
 | `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: artist name matching and recording MBID resolution via `mb_artist_recording` materialized view. |
-| `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Idempotent post-processing step runnable standalone or as a pipeline step. |
+| `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Uses `wxyc_etl.text.is_compilation_artist` to filter compilation entries. Idempotent post-processing step runnable standalone or as a pipeline step. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
 | `semantic_index/sqlite_export.py` | Build and export SQLite graph database with enrichment and edge tables. Supports optional entity store integration for persistent artist identities. |
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
@@ -221,6 +221,17 @@ pytest                          # unit tests only
 pytest -m integration           # needs fixture dump
 pytest -m slow                  # needs production dump
 ```
+
+### Shared Dependencies (wxyc-etl)
+
+The pipeline uses `wxyc-etl` (a Rust/PyO3 package) for shared text normalization, compilation detection, and schema constants:
+
+- **`wxyc_etl.text.normalize_artist_name(name)`** -- NFKD decomposition + diacritics stripping + lowercase + trim. Used as the base layer in `artist_resolver._normalize()`, which adds semantic-index-specific transforms (bracket removal, "the " strip, `&` -> `and`).
+- **`wxyc_etl.text.is_compilation_artist(name)`** -- Compilation/VA detection covering "Various Artists", "V/A", "v.a.", "Soundtrack", "Compilation". Replaces the old narrow `is_various_artists()` in `utils.py`.
+- **`wxyc_etl.text.split_artist_name(name)`** -- Context-free multi-artist splitting on `, `, ` / `, ` + `. Used in `artist_resolver._normalized_forms()`.
+- **`wxyc_etl.schema.*`** -- Table name constants (`RELEASE_TABLE`, `RELEASE_ARTIST_TABLE`, `RELEASE_LABEL_TABLE`, `RELEASE_STYLE_TABLE`, `RELEASE_TRACK_TABLE`, `RELEASE_TRACK_ARTIST_TABLE`) for all discogs-cache SQL queries in `discogs_client.py` and `reconciliation.py`.
+
+Summary tables (`artist_style_summary`, `artist_personnel_summary`, `artist_label_summary`, `artist_compilation_summary`) are materialized views created by discogs-cache and are not part of the wxyc-etl schema constants.
 
 ### Code Style
 
