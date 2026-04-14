@@ -12,6 +12,7 @@ Resolution strategies (in order of precedence):
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import Counter
 from typing import TYPE_CHECKING
@@ -20,6 +21,15 @@ from rapidfuzz import process as rfprocess
 from rapidfuzz.distance import JaroWinkler
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
+
+try:
+    from wxyc_etl.fuzzy import (  # type: ignore[import-not-found]
+        batch_fuzzy_resolve as _rust_batch_resolve,
+    )
+
+    _HAS_WXYC_ETL = True
+except ImportError:
+    _HAS_WXYC_ETL = False
 
 if TYPE_CHECKING:
     from semantic_index.discogs_client import DiscogsClient
@@ -194,11 +204,31 @@ class ArtistResolver:
             resolution_method="raw",
         )
 
+    def resolve_all(self, entries: list[FlowsheetEntry]) -> list[ResolvedEntry]:
+        """Resolve all entries, using Rust batch fuzzy matching when available.
+
+        Equivalent to calling :meth:`resolve` on each entry, but pre-populates
+        the fuzzy cache via a single Rust batch call for all lowered artist names.
+        Tiers 1-3 (FK chain, exact, normalized) and 5-6 (Discogs, raw) are
+        unchanged.
+
+        Args:
+            entries: Flowsheet entries to resolve.
+
+        Returns:
+            Resolved entries in the same order as the input.
+        """
+        if _HAS_WXYC_ETL and not os.environ.get("WXYC_ETL_NO_RUST"):
+            queries = list({e.artist_name.strip().lower() for e in entries})
+            self._batch_fuzzy_resolve(queries, FUZZY_MIN_SCORE)
+        return [self.resolve(entry) for entry in entries]
+
     def _fuzzy_match(self, query: str, min_score: float = FUZZY_MIN_SCORE) -> str | None:
         """Find the best fuzzy match for a query string.
 
-        Uses rapidfuzz.process.extract (C-accelerated batch scoring) and caches
-        results so repeated queries for the same name are instant.
+        When ``wxyc_etl`` is available and ``WXYC_ETL_NO_RUST`` is not set,
+        checks the cache populated by :meth:`_batch_fuzzy_resolve`.
+        Otherwise falls back to the per-query rapidfuzz path.
 
         Args:
             query: Lowercased artist name to match.
@@ -210,12 +240,12 @@ class ArtistResolver:
         if not self._fuzzy_choices or not query:
             return None
 
-        # Check cache
+        # Check cache (populated by _batch_fuzzy_resolve or previous per-query calls)
         cache_key = (query, min_score)
         if cache_key in self._fuzzy_cache:
             return self._fuzzy_cache[cache_key]
 
-        # Use rapidfuzz batch API — scores all candidates in C, returns top N
+        # Per-query rapidfuzz fallback
         results = rfprocess.extract(
             query,
             self._fuzzy_choices.keys(),
@@ -242,6 +272,32 @@ class ArtistResolver:
         self._fuzzy_cache[cache_key] = best_name
         return best_name
 
+    def _batch_fuzzy_resolve(self, queries: list[str], min_score: float = FUZZY_MIN_SCORE) -> None:
+        """Pre-populate the fuzzy cache via a single Rust batch call.
+
+        Calls ``wxyc_etl.fuzzy.batch_fuzzy_resolve`` with all query strings
+        against the catalog and stores results in ``_fuzzy_cache``. Subsequent
+        :meth:`_fuzzy_match` calls for these queries will be instant cache hits.
+
+        Args:
+            queries: Lowercased artist name queries to resolve.
+            min_score: Minimum Jaro-Winkler similarity threshold.
+        """
+        if not self._fuzzy_choices or not queries:
+            return
+
+        catalog_keys = list(self._fuzzy_choices.keys())
+        results = _rust_batch_resolve(
+            queries, catalog_keys, min_score, 2, FUZZY_AMBIGUITY_THRESHOLD
+        )
+
+        for query, matched_key in zip(queries, results, strict=True):
+            cache_key = (query, min_score)
+            if matched_key is not None:
+                self._fuzzy_cache[cache_key] = self._fuzzy_choices[matched_key]
+            else:
+                self._fuzzy_cache[cache_key] = None
+
     def re_resolve_with_play_counts(
         self,
         resolved: list[ResolvedEntry],
@@ -266,11 +322,16 @@ class ArtistResolver:
             if r.resolution_method == "raw":
                 raw_counts[r.canonical_name] += 1
 
+        qualifying_names = [name for name, count in raw_counts.items() if count >= min_plays]
+
+        # Batch-prime fuzzy cache for qualifying names when Rust is available
+        if _HAS_WXYC_ETL and not os.environ.get("WXYC_ETL_NO_RUST") and qualifying_names:
+            self._batch_fuzzy_resolve(qualifying_names, relaxed_threshold)
+
         # Pre-compute fuzzy matches for qualifying names (once per unique name)
         relaxed_matches: dict[str, str | None] = {}
-        for name, count in raw_counts.items():
-            if count >= min_plays:
-                relaxed_matches[name] = self._fuzzy_match(name, min_score=relaxed_threshold)
+        for name in qualifying_names:
+            relaxed_matches[name] = self._fuzzy_match(name, min_score=relaxed_threshold)
 
         matched = sum(1 for m in relaxed_matches.values() if m is not None)
         entries_resolved = sum(
