@@ -21,7 +21,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 
 | Module | Responsibility |
 |--------|---------------|
-| `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Streaming interface for large files. |
+| `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Uses `wxyc_etl.parser` Rust extension for ~1000x faster parsing, with `sql_parser_rs` and pure-Python fallbacks. Set `WXYC_ETL_NO_RUST=1` to force pure-Python. |
 | `semantic_index/models.py` | Pydantic data models for all pipeline entities. |
 | `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: FK chain, name match, normalized, fuzzy (Jaro-Winkler), Discogs, raw fallback. |
 | `semantic_index/adjacency.py` | Extract consecutive artist pairs within radio shows. |
