@@ -15,7 +15,7 @@ This parses the SQL dump, computes PMI for all artist co-occurrences, extracts c
 ## Options
 
 ```
-python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqlite]
+python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqlite] [--db-path PATH]
 ```
 
 | Flag | Default | Description |
@@ -23,6 +23,7 @@ python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqli
 | `--output-dir` | `output/` | Directory for output files |
 | `--min-count` | `2` | Minimum co-occurrence count for graph edges |
 | `--no-sqlite` | disabled | Skip SQLite database export |
+| `--db-path` | none | Path to pipeline SQLite database with persistent identity resolution from LML |
 
 ## How it works
 

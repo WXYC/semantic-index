@@ -12,24 +12,30 @@ from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
 from semantic_index.api.bio import _generated_summary, parse_discogs_markup
-from semantic_index.entity_store import EntityStore
 from semantic_index.models import ArtistStats
+from semantic_index.pipeline_db import PipelineDB
 
 
 def _build_bio_fixture_db() -> str:
-    """Create a fixture database with entity store tables."""
+    """Create a fixture database with pipeline DB tables."""
     path = tempfile.mktemp(suffix=".db")
-    store = EntityStore(path)
-    store.initialize()
+    db = PipelineDB(path)
+    db.initialize()
 
-    entity_ae = store.get_or_create_entity("Autechre", "artist", wikidata_qid="Q2774")
-    store.upsert_artist(
+    cur = db._conn.execute(
+        "INSERT INTO entity (name, entity_type, wikidata_qid) VALUES (?, 'artist', ?)",
+        ("Autechre", "Q2774"),
+    )
+    entity_ae_id = cur.lastrowid
+    db._conn.commit()
+
+    db.upsert_artist(
         "Autechre",
         genre="Electronic",
         discogs_artist_id=12,
-        entity_id=entity_ae.id,
+        entity_id=entity_ae_id,
     )
-    store.update_artist_stats(
+    db.update_artist_stats(
         "Autechre",
         ArtistStats(
             canonical_name="Autechre",
@@ -44,8 +50,8 @@ def _build_bio_fixture_db() -> str:
     )
 
     # Artist with no external IDs
-    store.upsert_artist("Unknown Band", genre="Rock")
-    store.update_artist_stats(
+    db.upsert_artist("Unknown Band", genre="Rock")
+    db.update_artist_stats(
         "Unknown Band",
         ArtistStats(
             canonical_name="Unknown Band",
@@ -59,7 +65,7 @@ def _build_bio_fixture_db() -> str:
         ),
     )
 
-    store.close()
+    db.close()
     return path
 
 

@@ -4,8 +4,8 @@ Creates an artist table with node attributes, edge tables for DJ transitions,
 cross-references, and Discogs-derived relationships (shared personnel, styles,
 labels, compilations), plus enrichment tables for per-artist Discogs metadata.
 
-When an ``EntityStore`` is provided, the artist table already exists (managed
-by the entity store) and export skips artist creation, using the store for ID
+When a ``PipelineDB`` is provided, the artist table already exists (managed
+by the pipeline DB) and export skips artist creation, using the DB for ID
 mapping, stats updates, and style persistence instead.
 """
 
@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge, WikidataInfluenceEdge
 
 if TYPE_CHECKING:
-    from semantic_index.entity_store import EntityStore
     from semantic_index.models import (
         ArtistEnrichment,
         CompilationEdge,
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
         SharedPersonnelEdge,
         SharedStyleEdge,
     )
+    from semantic_index.pipeline_db import PipelineDB
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_wikidata_influence_source ON wikidata_influence(s
 CREATE INDEX IF NOT EXISTS idx_wikidata_influence_target ON wikidata_influence(target_id);
 """
 
-# Edge and enrichment tables only — used when entity_store manages the artist table.
+# Edge and enrichment tables only — used when PipelineDB manages the artist table.
 # Excludes artist (managed by entity store) and artist_style (entity store uses
 # column ``style`` rather than ``style_tag``).
 _EDGE_ENRICHMENT_SCHEMA = """
@@ -234,7 +234,7 @@ def export_sqlite(
     shared_style_edges: list[SharedStyleEdge] | None = None,
     label_family_edges: list[LabelFamilyEdge] | None = None,
     compilation_edges: list[CompilationEdge] | None = None,
-    entity_store: EntityStore | None = None,
+    pipeline_db: PipelineDB | None = None,
     wikidata_influence_edges: list[WikidataInfluenceEdge] | None = None,
 ) -> None:
     """Export the artist graph to a SQLite database.
@@ -250,17 +250,17 @@ def export_sqlite(
         shared_style_edges: Optional shared style edges.
         label_family_edges: Optional label family edges.
         compilation_edges: Optional compilation co-appearance edges.
-        entity_store: Optional entity store. When provided, the artist table
+        pipeline_db: Optional PipelineDB. When provided, the artist table
             is assumed to already exist and be populated. Stats are updated
             via the store, and ID mapping comes from the store.
         wikidata_influence_edges: Optional directed influence edges from Wikidata P737.
     """
     enrichments = enrichments or {}
 
-    if entity_store is not None:
-        _export_with_entity_store(
+    if pipeline_db is not None:
+        _export_with_pipeline_db(
             path,
-            entity_store,
+            pipeline_db,
             artist_stats,
             pmi_edges,
             xref_edges,
@@ -371,9 +371,9 @@ def _export_standalone(
     conn.close()
 
 
-def _export_with_entity_store(
+def _export_with_pipeline_db(
     path: str,
-    entity_store: EntityStore,
+    pipeline_db: PipelineDB,
     artist_stats: dict[str, ArtistStats],
     pmi_edges: list[PmiEdge],
     xref_edges: list[CrossReferenceEdge],
@@ -385,35 +385,35 @@ def _export_with_entity_store(
     compilation_edges: list[CompilationEdge],
     wikidata_influence_edges: list[WikidataInfluenceEdge] | None = None,
 ) -> None:
-    """Export path when an entity store manages the artist table."""
-    conn = entity_store._conn
+    """Export path when PipelineDB manages the artist table."""
+    conn = pipeline_db._conn
 
     # Create only edge and enrichment tables (artist + artist_style already exist)
     conn.executescript(_EDGE_ENRICHMENT_SCHEMA)
 
-    # Ensure xref-only artists exist in the entity store
+    # Ensure xref-only artists exist in the pipeline DB
     xref_names: set[str] = set()
     for xref in xref_edges:
         xref_names.add(xref.artist_a)
         xref_names.add(xref.artist_b)
 
-    existing = set(entity_store.get_name_to_id_mapping().keys())
+    existing = set(pipeline_db.get_name_to_id_mapping().keys())
     missing = xref_names - existing
     if missing:
-        entity_store.bulk_upsert_artists(sorted(missing))
+        pipeline_db.bulk_upsert_artists(sorted(missing))
 
-    # Update stats via entity store
+    # Update stats via pipeline DB
     if artist_stats:
-        entity_store.bulk_update_stats(artist_stats)
+        pipeline_db.bulk_update_stats(artist_stats)
 
-    # Get ID mapping from entity store
-    name_to_id = entity_store.get_name_to_id_mapping()
+    # Get ID mapping from pipeline DB
+    name_to_id = pipeline_db.get_name_to_id_mapping()
 
     # Insert edges
     _insert_edges(conn, name_to_id, pmi_edges, xref_edges, min_count)
 
-    # Insert enrichments — styles go through entity store, personnel/labels go to tables
-    _insert_enrichments_with_store(conn, entity_store, enrichments, name_to_id)
+    # Insert enrichments — styles go through pipeline DB, personnel/labels go to tables
+    _insert_enrichments_with_pipeline_db(conn, pipeline_db, enrichments, name_to_id)
 
     # Insert Discogs-derived edges
     _insert_discogs_edges(
@@ -514,16 +514,16 @@ def _insert_enrichments(
         )
 
 
-def _insert_enrichments_with_store(
+def _insert_enrichments_with_pipeline_db(
     conn: sqlite3.Connection,
-    entity_store: EntityStore,
+    pipeline_db: PipelineDB,
     enrichments: dict[str, ArtistEnrichment],
     name_to_id: dict[str, int],
 ) -> None:
-    """Insert enrichment data, routing styles through the entity store.
+    """Insert enrichment data, routing styles through the pipeline DB.
 
-    The entity store's ``artist_style`` table uses column ``style`` (not
-    ``style_tag``), so styles must go through ``persist_artist_styles()``.
+    The pipeline DB's ``artist_style`` table uses column ``style_tag``,
+    so styles must go through ``persist_artist_styles()``.
     Personnel and labels are inserted into their own tables as usual.
     """
     personnel_rows = []
@@ -535,7 +535,7 @@ def _insert_enrichments_with_store(
             continue
 
         if enrich.styles:
-            entity_store.persist_artist_styles(artist_id, enrich.styles)
+            pipeline_db.persist_artist_styles(artist_id, enrich.styles)
 
         for credit in enrich.personnel:
             for role in credit.roles or [""]:

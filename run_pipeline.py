@@ -25,7 +25,6 @@ from semantic_index.discogs_edges import (
     extract_shared_styles,
 )
 from semantic_index.discogs_enrichment import DiscogsEnricher
-from semantic_index.entity_store import EntityStore
 from semantic_index.graph_export import build_graph, export_gexf, print_top_neighbors
 from semantic_index.label_hierarchy import populate_label_hierarchy
 from semantic_index.models import (
@@ -34,8 +33,8 @@ from semantic_index.models import (
     LibraryRelease,
 )
 from semantic_index.node_attributes import compute_artist_stats
+from semantic_index.pipeline_db import PipelineDB
 from semantic_index.pmi import compute_pmi
-from semantic_index.reconciliation import ArtistReconciler
 from semantic_index.sql_parser import iter_table_rows, load_table_rows
 from semantic_index.sqlite_export import export_sqlite
 from semantic_index.wikidata_client import WikidataClient
@@ -128,22 +127,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Uses dump file size+mtime as cache key.",
     )
     parser.add_argument(
-        "--entity-store-path",
+        "--db-path",
         default=None,
-        help="Path to an entity store SQLite database. Enables entity store mode: "
-        "artists are managed by the entity store rather than created fresh.",
-    )
-    parser.add_argument(
-        "--skip-reconciliation",
-        action="store_true",
-        help="Skip Discogs reconciliation step (requires --entity-store-path)",
-    )
-    parser.add_argument(
-        "--wikidata-reconciliation",
-        action="store_true",
-        help="Search Wikidata by name for artists with no Discogs match. "
-        "Filtered to musicians (P31=human/musical group, P106=musician). "
-        "Requires --entity-store-path.",
+        help="Path to the pipeline SQLite database. When set, artists are managed "
+        "with persistent identity resolution from LML. Creates the database if needed.",
     )
     parser.add_argument(
         "--compute-discogs-edges",
@@ -155,19 +142,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--populate-label-hierarchy",
         action="store_true",
         help="Populate label and label_hierarchy tables from Wikidata P749/P355. "
-        "Requires --entity-store-path and enrichment data.",
+        "Requires --db-path and enrichment data.",
     )
     parser.add_argument(
         "--compute-wikidata-influences",
         action="store_true",
         help="Query Wikidata P737 (influenced by) and create directed influence edges. "
-        "Requires --entity-store-path with reconciled Wikidata QIDs.",
-    )
-    parser.add_argument(
-        "--fetch-streaming-ids",
-        action="store_true",
-        help="Fetch Spotify/Apple Music/Bandcamp IDs from Wikidata (P1902/P2850/P3283). "
-        "Requires --entity-store-path with reconciled Wikidata QIDs.",
+        "Requires --db-path with reconciled Wikidata QIDs.",
     )
     parser.add_argument(
         "--facet-only",
@@ -175,15 +156,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only export facet tables (requires --cache-dir and an existing database). "
         "Loads resolved entries from cache, recomputes adjacency pairs, reads artist IDs "
         "from the existing database, and calls export_facet_tables. Skips all other steps.",
-    )
-    parser.add_argument(
-        "--entity-source",
-        choices=["local", "lml"],
-        default="local",
-        help="Identity source for reconciliation. 'local' (default) runs local "
-        "reconciliation via entity_store.py + reconciliation.py. 'lml' reads "
-        "pre-resolved identities from LML's entity.identity PG table "
-        "(requires --discogs-cache-dsn). Both paths coexist during transition.",
     )
     parser.add_argument(
         "--acousticbrainz-dir",
@@ -238,8 +210,8 @@ def _run_facet_only(
         sys.exit(1)
 
     # Determine target database path
-    if args.entity_store_path:
-        sqlite_path = Path(args.entity_store_path)
+    if args.db_path:
+        sqlite_path = Path(args.db_path)
     else:
         sqlite_path = Path(args.output_dir) / "wxyc_artist_graph.db"
 
@@ -445,32 +417,28 @@ def run(args: argparse.Namespace) -> None:
                     _f,
                 )
 
-    # 5c. Entity store setup (optional)
-    entity_store: EntityStore | None = None
+    # 5c. Pipeline DB setup (optional)
+    pipeline_db: PipelineDB | None = None
     dedup_report = None
-    if args.entity_store_path:
-        store_path = args.entity_store_path
-        log.info("Opening entity store: %s", store_path)
-        entity_store = EntityStore(store_path)
-        entity_store.initialize()
+    if args.db_path:
+        store_path = args.db_path
+        log.info("Opening pipeline DB: %s", store_path)
+        pipeline_db = PipelineDB(store_path)
+        pipeline_db.initialize()
 
         # Bulk upsert all resolved artist names
         all_canonical = list(dict.fromkeys(e.canonical_name for e in resolved_entries))
-        log.info("Bulk upserting %d artists into entity store...", len(all_canonical))
-        entity_store.bulk_upsert_artists(all_canonical)
+        log.info("Bulk upserting %d artists into pipeline DB...", len(all_canonical))
+        pipeline_db.bulk_upsert_artists(all_canonical)
 
-        # 5d. Reconcile: either from LML entity store (PG) or locally
-        if getattr(args, "entity_source", "local") == "lml":
-            # Read pre-resolved identities from LML's entity.identity PG table
-            if not args.discogs_cache_dsn:
-                log.error("--entity-source=lml requires --discogs-cache-dsn")
-                sys.exit(1)
+        # 5d. Import identities from LML entity store (PG)
+        if args.discogs_cache_dsn:
             log.info("Importing identities from LML entity store (entity.identity)...")
             from semantic_index.lml_identity import PgSource, import_lml_identities
 
             pg_source = PgSource(args.discogs_cache_dsn)
             try:
-                lml_report = import_lml_identities(entity_store, pg_source)
+                lml_report = import_lml_identities(pipeline_db, pg_source)
                 log.info(
                     "LML identity import: %d matched, %d unmatched, %d entities created",
                     lml_report.matched,
@@ -480,47 +448,7 @@ def run(args: argparse.Namespace) -> None:
             finally:
                 pg_source.close()
         else:
-            # Local reconciliation (existing behavior)
-            reconcile_client = DiscogsClient(
-                cache_dsn=args.discogs_cache_dsn,
-                api_base_url=None,
-            )
-            reconciler = ArtistReconciler(entity_store, reconcile_client)
-
-            if not args.skip_reconciliation and args.discogs_cache_dsn:
-                log.info("Running Discogs reconciliation...")
-                report = reconciler.reconcile_batch()
-                log.info(
-                    "Reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                    report.attempted,
-                    report.succeeded,
-                    report.no_match,
-                    report.errored,
-                )
-                # Re-try no_match artists against member/group table
-                member_report = reconciler.reconcile_members()
-                log.info(
-                    "Member reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                    member_report.attempted,
-                    member_report.succeeded,
-                    member_report.no_match,
-                    member_report.errored,
-                )
-            elif not args.skip_reconciliation:
-                log.warning("Skipping reconciliation: no discogs-cache DSN available")
-
-            # 5e. Wikidata name search for remaining no_match artists (opt-in)
-            if args.wikidata_reconciliation:
-                log.info("Running Wikidata name search for no_match artists...")
-                wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
-                wikidata_report = reconciler.reconcile_wikidata(wikidata_client)
-                log.info(
-                    "Wikidata reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                    wikidata_report.attempted,
-                    wikidata_report.succeeded,
-                    wikidata_report.no_match,
-                    wikidata_report.errored,
-                )
+            log.warning("No --discogs-cache-dsn provided; skipping LML identity import")
 
         # 5e2. Assign Wikidata QIDs from wikidata-cache via Discogs ID bridge
         if args.wikidata_cache_dsn:
@@ -529,9 +457,7 @@ def run(args: argparse.Namespace) -> None:
                 import psycopg as _pg
 
                 wikidata_conn = _pg.connect(args.wikidata_cache_dsn, autocommit=True)
-                # Get all artists with Discogs IDs — use LEFT JOIN since
-                # some artists may not have an entity yet
-                unlinked = entity_store._conn.execute(
+                unlinked = pipeline_db._conn.execute(
                     "SELECT a.id, a.discogs_artist_id, a.entity_id FROM artist a "
                     "LEFT JOIN entity e ON a.entity_id = e.id "
                     "WHERE a.discogs_artist_id IS NOT NULL "
@@ -540,7 +466,6 @@ def run(args: argparse.Namespace) -> None:
                 if unlinked:
                     discogs_ids = [str(row[1]) for row in unlinked]
                     artist_by_discogs = {str(row[1]): (row[0], row[2]) for row in unlinked}
-                    # Batch lookup in wikidata-cache
                     wk_rows = wikidata_conn.execute(
                         "SELECT dm.discogs_id, dm.qid FROM discogs_mapping dm "
                         "WHERE dm.property = 'P1953' AND dm.discogs_id = ANY(%s)",
@@ -554,30 +479,29 @@ def run(args: argparse.Namespace) -> None:
                             continue
                         artist_id, entity_id = match
                         if entity_id is not None:
-                            entity_store._conn.execute(
+                            pipeline_db._conn.execute(
                                 "UPDATE entity SET wikidata_qid = ?, "
                                 f"updated_at = {now} "
                                 "WHERE id = ? AND wikidata_qid IS NULL",
                                 (qid, entity_id),
                             )
                         else:
-                            # Create entity with QID and link to artist
-                            artist_name = entity_store._conn.execute(
+                            artist_name = pipeline_db._conn.execute(
                                 "SELECT canonical_name FROM artist WHERE id = ?",
                                 (artist_id,),
                             ).fetchone()[0]
-                            cur = entity_store._conn.execute(
+                            cur = pipeline_db._conn.execute(
                                 "INSERT INTO entity (name, entity_type, wikidata_qid, "
                                 f"created_at, updated_at) VALUES (?, 'artist', ?, {now}, {now})",
                                 (artist_name, qid),
                             )
                             new_entity_id = cur.lastrowid
-                            entity_store._conn.execute(
+                            pipeline_db._conn.execute(
                                 "UPDATE artist SET entity_id = ? WHERE id = ?",
                                 (new_entity_id, artist_id),
                             )
                         qid_assigned += 1
-                    entity_store._conn.commit()
+                    pipeline_db._conn.commit()
                     log.info(
                         "  %d/%d artists assigned Wikidata QIDs via Discogs ID bridge",
                         qid_assigned,
@@ -589,15 +513,14 @@ def run(args: argparse.Namespace) -> None:
             except Exception:
                 log.warning("Wikidata QID assignment failed", exc_info=True)
 
-        # 5e3a. MusicBrainz ID bridge via Wikidata (Discogs ID → QID → P434)
+        # 5e3a. MusicBrainz ID bridge via Wikidata (Discogs ID -> QID -> P434)
         if args.wikidata_cache_dsn:
             log.info("Assigning MusicBrainz IDs from wikidata-cache via QID bridge...")
             try:
                 import psycopg as _pg2
 
                 wk_conn = _pg2.connect(args.wikidata_cache_dsn, autocommit=True)
-                # Get artists with Discogs IDs but no MusicBrainz ID
-                need_mb = entity_store._conn.execute(
+                need_mb = pipeline_db._conn.execute(
                     "SELECT a.id, a.discogs_artist_id FROM artist a "
                     "WHERE a.discogs_artist_id IS NOT NULL "
                     "AND a.musicbrainz_artist_id IS NULL"
@@ -605,7 +528,6 @@ def run(args: argparse.Namespace) -> None:
                 if need_mb:
                     discogs_ids = [str(row[1]) for row in need_mb]
                     artist_id_by_discogs = {str(row[1]): row[0] for row in need_mb}
-                    # Join: Discogs ID → QID via P1953, then QID → MB ID via P434
                     wk_rows = wk_conn.execute(
                         "SELECT d.discogs_id, m.discogs_id AS mb_id "
                         "FROM discogs_mapping d "
@@ -617,13 +539,13 @@ def run(args: argparse.Namespace) -> None:
                     for discogs_id_str, mb_uuid in wk_rows:
                         artist_id = artist_id_by_discogs.get(discogs_id_str)
                         if artist_id is not None:
-                            entity_store._conn.execute(
+                            pipeline_db._conn.execute(
                                 "UPDATE artist SET musicbrainz_artist_id = ? "
                                 "WHERE id = ? AND musicbrainz_artist_id IS NULL",
                                 (mb_uuid, artist_id),
                             )
                             mb_bridged += 1
-                    entity_store._conn.commit()
+                    pipeline_db._conn.commit()
                     log.info(
                         "  MusicBrainz via Wikidata bridge: %d/%d artists",
                         mb_bridged,
@@ -633,38 +555,8 @@ def run(args: argparse.Namespace) -> None:
             except Exception:
                 log.warning("MusicBrainz Wikidata bridge failed", exc_info=True)
 
-        # 5e3b. MusicBrainz name matching for remaining unmatched artists
-        if args.musicbrainz_cache_dsn:
-            from semantic_index.musicbrainz_client import MusicBrainzClient
-
-            log.info("Running MusicBrainz name matching for remaining artists...")
-            mb_client = MusicBrainzClient(cache_dsn=args.musicbrainz_cache_dsn)
-            unmatched = entity_store._conn.execute(
-                "SELECT id, canonical_name FROM artist WHERE musicbrainz_artist_id IS NULL"
-            ).fetchall()
-            if unmatched:
-                names = [row[1] for row in unmatched]
-                id_by_name = {row[1].lower(): row[0] for row in unmatched}
-                matches = mb_client.batch_lookup(names)
-                mb_matched = 0
-                for lower_name, (mb_id, _mb_name) in matches.items():
-                    artist_id = id_by_name.get(lower_name)
-                    if artist_id is not None:
-                        entity_store._conn.execute(
-                            "UPDATE artist SET musicbrainz_artist_id = ? "
-                            "WHERE id = ? AND musicbrainz_artist_id IS NULL",
-                            (str(mb_id), artist_id),
-                        )
-                        mb_matched += 1
-                entity_store._conn.commit()
-                log.info(
-                    "  MusicBrainz name matching: %d/%d remaining artists matched",
-                    mb_matched,
-                    len(unmatched),
-                )
-
-        # 5f. Entity deduplication by shared QID (runs after all reconciliation)
-        dedup_report = entity_store.deduplicate_by_qid()
+        # 5f. Entity deduplication by shared QID (runs after all identity import)
+        dedup_report = pipeline_db.deduplicate_by_qid()
         if dedup_report.groups_found > 0:
             log.info(
                 "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
@@ -672,16 +564,6 @@ def run(args: argparse.Namespace) -> None:
                 dedup_report.entities_merged,
                 dedup_report.artists_reassigned,
             )
-
-        # 5g. Fetch streaming IDs from Wikidata (opt-in)
-        if args.fetch_streaming_ids:
-            log.info("Fetching streaming IDs from Wikidata (P1902/P2850/P3283)...")
-            streaming_wikidata = WikidataClient()
-            updated = reconciler.reconcile_streaming_ids(streaming_wikidata)
-            log.info("  Updated streaming IDs for %d entities", updated)
-
-    if args.fetch_streaming_ids and entity_store is None:
-        log.warning("--fetch-streaming-ids requires --entity-store-path")
 
     # 6. Extract adjacency pairs
     log.info("Extracting adjacency pairs...")
@@ -793,11 +675,14 @@ def run(args: argparse.Namespace) -> None:
     elif not args.skip_enrichment:
         log.warning("Skipping Discogs enrichment: no cache DSN or API URL available")
 
-    # 10b. Label hierarchy from Wikidata (optional, requires entity store + enrichments)
-    if args.populate_label_hierarchy and entity_store is not None and enrichments:
+    # 10b. Label hierarchy from Wikidata (optional, requires pipeline DB + enrichments)
+    if args.populate_label_hierarchy and pipeline_db is not None and enrichments:
+        from semantic_index.label_store import LabelStore
+
         log.info("Populating label hierarchy from Wikidata P749/P355...")
         wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
-        lh_report = populate_label_hierarchy(entity_store, enrichments, wikidata_client)
+        label_store = LabelStore(pipeline_db._conn)
+        lh_report = populate_label_hierarchy(label_store, enrichments, wikidata_client)
         log.info(
             "  %d labels created, %d matched to Wikidata, %d hierarchy edges",
             lh_report.labels_created,
@@ -805,20 +690,20 @@ def run(args: argparse.Namespace) -> None:
             lh_report.hierarchy_edges,
         )
     elif args.populate_label_hierarchy:
-        if entity_store is None:
-            log.warning("Skipping label hierarchy: requires --entity-store-path")
+        if pipeline_db is None:
+            log.warning("Skipping label hierarchy: requires --db-path")
         elif not enrichments:
             log.warning("Skipping label hierarchy: no enrichment data available")
 
-    # 10c. Wikidata influence edges (optional, requires entity store with QIDs)
-    if args.compute_wikidata_influences and entity_store is not None:
+    # 10c. Wikidata influence edges (optional, requires pipeline DB with QIDs)
+    if args.compute_wikidata_influences and pipeline_db is not None:
         from semantic_index.wikidata_influence import extract_wikidata_influences
 
         log.info("Querying Wikidata P737 influence relationships...")
         wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
 
-        # Collect all QIDs from the entity store
-        qid_rows = entity_store._conn.execute(
+        # Collect all QIDs from the pipeline DB
+        qid_rows = pipeline_db._conn.execute(
             "SELECT e.wikidata_qid FROM artist a "
             "JOIN entity e ON a.entity_id = e.id "
             "WHERE e.wikidata_qid IS NOT NULL"
@@ -829,10 +714,10 @@ def run(args: argparse.Namespace) -> None:
         if all_qids:
             raw_influences = wikidata_client.get_influences(all_qids)
             log.info("  %d raw influence relationships from Wikidata", len(raw_influences))
-            influence_edges = extract_wikidata_influences(entity_store, raw_influences)
+            influence_edges = extract_wikidata_influences(pipeline_db._conn, raw_influences)
             log.info("  %d influence edges between known artists", len(influence_edges))
     elif args.compute_wikidata_influences:
-        log.warning("Skipping Wikidata influences: requires --entity-store-path")
+        log.warning("Skipping Wikidata influences: requires --db-path")
 
     # 11. Print top neighbors for spotlight artists
     print_top_neighbors(edges, SPOTLIGHT_ARTISTS, n=20)
@@ -847,9 +732,7 @@ def run(args: argparse.Namespace) -> None:
     log.info("GEXF written to %s", gexf_path)
 
     # 13. Export SQLite database
-    sqlite_path = (
-        Path(args.entity_store_path) if entity_store else output_dir / "wxyc_artist_graph.db"
-    )
+    sqlite_path = Path(args.db_path) if pipeline_db else output_dir / "wxyc_artist_graph.db"
     audio_profile_count = 0
     acoustic_edge_count = 0
     if not args.no_sqlite:
@@ -865,7 +748,7 @@ def run(args: argparse.Namespace) -> None:
             shared_style_edges=ss_edges,
             label_family_edges=lf_edges,
             compilation_edges=comp_edges,
-            entity_store=entity_store,
+            pipeline_db=pipeline_db,
             wikidata_influence_edges=influence_edges,
         )
         log.info("SQLite written to %s", sqlite_path)
@@ -986,8 +869,8 @@ def run(args: argparse.Namespace) -> None:
         )
         log.info("Facet tables written to %s", sqlite_path)
 
-    if entity_store is not None:
-        entity_store.close()
+    if pipeline_db is not None:
+        pipeline_db.close()
 
     elapsed = time.time() - t0
     log.info("Done in %.1f seconds.", elapsed)

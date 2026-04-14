@@ -1,10 +1,9 @@
 """Import pre-resolved artist identities from LML's entity.identity table.
 
-When ``--entity-source=lml`` is set, the pipeline reads identity mappings
-from the discogs-cache PostgreSQL database (``entity.identity`` table)
-instead of running local reconciliation. This module provides the bridge
-function that reads those identities and writes them into the local
-SQLite entity store.
+The pipeline reads identity mappings from the discogs-cache PostgreSQL
+database (``entity.identity`` table) and writes them into the local
+SQLite pipeline database. This module provides the bridge function
+that reads those identities and applies them to local artist rows.
 """
 
 from __future__ import annotations
@@ -78,17 +77,17 @@ class ImportReport:
 
 
 def import_lml_identities(
-    entity_store: Any,
+    pipeline_db: Any,
     pg_source: PgFetchProtocol,
 ) -> ImportReport:
-    """Read identities from LML's entity.identity PG table and apply to local entity store.
+    """Read identities from LML's entity.identity PG table and apply to local pipeline DB.
 
     For each identity row, updates the local SQLite artist row with external IDs
     (discogs_artist_id, musicbrainz_artist_id, reconciliation_status) and creates
     an entity row with QID and streaming IDs when a wikidata_qid is present.
 
     Args:
-        entity_store: The local SQLite EntityStore instance.
+        pipeline_db: The local SQLite PipelineDB instance.
         pg_source: A PG source connected to the discogs-cache database.
 
     Returns:
@@ -103,7 +102,7 @@ def import_lml_identities(
     identity_by_name: dict[str, dict[str, Any]] = {row["library_name"]: row for row in rows}
 
     # Get all local artist names
-    conn = entity_store._conn
+    conn = pipeline_db._conn
     conn.row_factory = sqlite3.Row
     local_artists = conn.execute("SELECT id, canonical_name FROM artist").fetchall()
     conn.row_factory = None
@@ -123,7 +122,7 @@ def import_lml_identities(
         report.matched += 1
 
         # Update artist row with external IDs
-        entity_store.upsert_artist(
+        pipeline_db.upsert_artist(
             canonical_name,
             discogs_artist_id=identity["discogs_artist_id"],
             musicbrainz_artist_id=identity["musicbrainz_artist_id"],

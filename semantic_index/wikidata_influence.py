@@ -1,6 +1,6 @@
 """Extract Wikidata influence edges (P737) between reconciled artists.
 
-Resolves Wikidata QIDs to canonical artist names via the entity store,
+Resolves Wikidata QIDs to canonical artist names via the pipeline database,
 producing directed WikidataInfluenceEdge instances for artist pairs where
 both source and target exist in the graph.
 """
@@ -8,28 +8,25 @@ both source and target exist in the graph.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import sqlite3
 
 from semantic_index.models import WikidataInfluence, WikidataInfluenceEdge
-
-if TYPE_CHECKING:
-    from semantic_index.entity_store import EntityStore
 
 logger = logging.getLogger(__name__)
 
 
 def extract_wikidata_influences(
-    entity_store: EntityStore,
+    conn: sqlite3.Connection,
     influences: list[WikidataInfluence],
 ) -> list[WikidataInfluenceEdge]:
     """Build directed influence edges from Wikidata P737 relationships.
 
     For each influence relationship, resolves both source and target QIDs
-    to canonical artist names via the entity store. Only produces edges
+    to canonical artist names via the pipeline database. Only produces edges
     where both artists exist in the graph.
 
     Args:
-        entity_store: Entity store with reconciled artist/entity data.
+        conn: SQLite connection to the pipeline database (with artist/entity tables).
         influences: Raw Wikidata influence relationships from ``WikidataClient.get_influences()``.
 
     Returns:
@@ -38,8 +35,8 @@ def extract_wikidata_influences(
     if not influences:
         return []
 
-    # Build QID → canonical_name mapping from entity store
-    qid_to_name = _build_qid_to_name_mapping(entity_store)
+    # Build QID -> canonical_name mapping from the database
+    qid_to_name = _build_qid_to_name_mapping(conn)
 
     seen: set[tuple[str, str]] = set()
     edges: list[WikidataInfluenceEdge] = []
@@ -74,19 +71,19 @@ def extract_wikidata_influences(
     return edges
 
 
-def _build_qid_to_name_mapping(entity_store: EntityStore) -> dict[str, str]:
+def _build_qid_to_name_mapping(conn: sqlite3.Connection) -> dict[str, str]:
     """Build a mapping from Wikidata QID to canonical artist name.
 
     Joins artist rows (via entity_id) to entity rows (with wikidata_qid)
     to resolve QIDs to the canonical names used in the graph.
 
     Args:
-        entity_store: Entity store with reconciled artist/entity data.
+        conn: SQLite connection to the pipeline database.
 
     Returns:
         Dict mapping wikidata_qid -> canonical_name.
     """
-    rows = entity_store._conn.execute(
+    rows = conn.execute(
         "SELECT e.wikidata_qid, a.canonical_name "
         "FROM artist a "
         "JOIN entity e ON a.entity_id = e.id "
