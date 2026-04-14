@@ -1,8 +1,9 @@
-"""Wikidata SPARQL client for entity lookups and knowledge graph queries.
+"""Wikidata SPARQL client for knowledge graph queries.
 
-Batched SPARQL queries for property lookups (Discogs artist ID via P1953,
-influences via P737, label hierarchy via P749/P355) and entity name search
-via the MediaWiki wbsearchentities API.
+Batched SPARQL queries for graph-specific property lookups: influences
+via P737, label hierarchy via P749/P355, and label-to-QID bridging
+via P1902. Identity resolution methods (Discogs artist ID lookup,
+name search, streaming IDs) have been moved to LML.
 
 The client respects Wikidata's rate limit (~1 request/second) and splits
 large lookups into batches to avoid SPARQL query timeouts.
@@ -19,38 +20,12 @@ from semantic_index.models import (
     WikidataEntity,
     WikidataInfluence,
     WikidataLabelHierarchy,
-    WikidataStreamingIds,
 )
 
 logger = logging.getLogger(__name__)
 
 _QID_PATTERN = re.compile(r"^Q\d+$")
 _RATE_INTERVAL = 1.0  # seconds between requests
-
-# Wikidata QIDs for musician-related occupations (P106 values).
-MUSICIAN_OCCUPATIONS: frozenset[str] = frozenset(
-    {
-        "Q639669",  # musician
-        "Q177220",  # singer
-        "Q753110",  # songwriter
-        "Q488205",  # singer-songwriter
-        "Q36834",  # composer
-        "Q855091",  # guitarist
-        "Q386854",  # rapper
-        "Q183945",  # record producer
-        "Q130857",  # disc jockey
-        "Q806349",  # bandleader
-    }
-)
-
-# Wikidata QIDs for musical group types (P31 values).
-MUSICAL_GROUP_TYPES: frozenset[str] = frozenset(
-    {
-        "Q215380",  # musical group/band
-        "Q5741069",  # musical duo
-        "Q56816954",  # music project
-    }
-)
 
 
 def _extract_qid(uri: str) -> str:
@@ -82,33 +57,30 @@ def _binding_value(binding: dict, key: str) -> str | None:
 
 
 class WikidataClient:
-    """Client for Wikidata SPARQL queries and entity search.
+    """Client for Wikidata SPARQL queries (graph-specific).
 
-    Uses the Wikidata Query Service SPARQL endpoint for property-based
-    batch lookups (Discogs ID, influences, label hierarchy) and the
-    MediaWiki wbsearchentities API for name search.
+    Uses the Wikidata Query Service SPARQL endpoint for influence
+    relationships (P737), label hierarchy (P749/P355), and label-to-QID
+    bridging (P1902).
 
     Args:
         sparql_endpoint: SPARQL endpoint URL. Defaults to Wikidata Query Service.
-        api_endpoint: MediaWiki API URL. Defaults to Wikidata API.
         user_agent: User-Agent header (required by Wikidata).
         batch_size: Max entities per SPARQL VALUES clause.
+        cache_dsn: Optional PostgreSQL DSN for wikidata-cache (used by get_influences).
     """
 
     _DEFAULT_SPARQL_ENDPOINT = "https://query.wikidata.org/sparql"
-    _DEFAULT_API_ENDPOINT = "https://www.wikidata.org/w/api.php"
     _DEFAULT_USER_AGENT = "WXYCSemanticIndex/0.1 (https://wxyc.org; engineering@wxyc.org)"
 
     def __init__(
         self,
         sparql_endpoint: str | None = None,
-        api_endpoint: str | None = None,
         user_agent: str | None = None,
         batch_size: int = 50,
         cache_dsn: str | None = None,
     ) -> None:
         self._sparql_endpoint = sparql_endpoint or self._DEFAULT_SPARQL_ENDPOINT
-        self._api_endpoint = api_endpoint or self._DEFAULT_API_ENDPOINT
         self._user_agent = user_agent or self._DEFAULT_USER_AGENT
         self._batch_size = batch_size
         self._last_request: float = 0
@@ -195,87 +167,6 @@ class WikidataClient:
                 logger.warning("Invalid QID skipped: %r", qid)
         return valid
 
-    def lookup_by_discogs_ids(self, discogs_ids: list[int]) -> dict[int, WikidataEntity]:
-        """Look up Wikidata entities by Discogs artist ID (P1953).
-
-        Cache-first: queries the wikidata-cache PostgreSQL if available,
-        then falls back to SPARQL for any IDs not found in the cache.
-
-        Args:
-            discogs_ids: Discogs artist IDs to look up.
-
-        Returns:
-            Dict mapping discogs_id -> WikidataEntity for each found match.
-        """
-        if not discogs_ids:
-            return {}
-
-        result: dict[int, WikidataEntity] = {}
-        remaining_ids = list(discogs_ids)
-
-        # Try cache first
-        conn = self._get_cache_conn()
-        if conn is not None:
-            try:
-                str_ids = [str(did) for did in discogs_ids]
-                rows = conn.execute(
-                    "SELECT e.qid, e.label, e.description, dm.discogs_id "
-                    "FROM discogs_mapping dm "
-                    "JOIN entity e ON dm.qid = e.qid "
-                    "WHERE dm.property = 'P1953' AND dm.discogs_id = ANY(%s)",
-                    (str_ids,),
-                ).fetchall()
-                for qid, label, description, discogs_id_str in rows:
-                    try:
-                        did = int(discogs_id_str)
-                    except (ValueError, TypeError):
-                        continue
-                    result[did] = WikidataEntity(
-                        qid=qid,
-                        name=label or qid,
-                        description=description,
-                        discogs_artist_id=did,
-                    )
-                return result
-            except Exception:
-                logger.warning("Wikidata cache lookup failed", exc_info=True)
-
-        # SPARQL fallback (only when no cache is available)
-        for batch_start in range(0, len(remaining_ids), self._batch_size):
-            batch = remaining_ids[batch_start : batch_start + self._batch_size]
-            values = " ".join(f'"{did}"' for did in batch)
-            query = (
-                "SELECT ?item ?itemLabel ?discogsId WHERE {\n"
-                f"  VALUES ?discogsId {{ {values} }}\n"
-                "  ?item wdt:P1953 ?discogsId .\n"
-                '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }\n'
-                "}"
-            )
-            try:
-                bindings = self._sparql_query(query)
-                for b in bindings:
-                    qid = _extract_qid(_binding_value(b, "item") or "")
-                    name = _binding_value(b, "itemLabel") or qid
-                    discogs_id_str = _binding_value(b, "discogsId")
-                    if discogs_id_str is not None:
-                        try:
-                            did = int(discogs_id_str)
-                        except (ValueError, TypeError):
-                            continue
-                        result[did] = WikidataEntity(
-                            qid=qid,
-                            name=name,
-                            discogs_artist_id=did,
-                        )
-            except Exception:
-                logger.warning(
-                    "SPARQL lookup_by_discogs_ids failed for batch starting at %d",
-                    batch_start,
-                    exc_info=True,
-                )
-
-        return result
-
     def lookup_labels_by_discogs_ids(
         self, discogs_label_ids: list[int]
     ) -> dict[int, WikidataEntity]:
@@ -301,7 +192,7 @@ class WikidataClient:
                 "SELECT ?item ?itemLabel ?discogsLabelId WHERE {\n"
                 f"  VALUES ?discogsLabelId {{ {values} }}\n"
                 "  ?item wdt:P1902 ?discogsLabelId .\n"
-                '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }\n'
+                '  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}\n'
                 "}"
             )
             try:
@@ -328,60 +219,6 @@ class WikidataClient:
 
         return result
 
-    def lookup_streaming_ids(self, qids: list[str]) -> dict[str, WikidataStreamingIds]:
-        """Look up streaming service IDs for Wikidata entities.
-
-        Queries P1902 (Spotify artist ID), P2850 (Apple Music artist ID),
-        and P3283 (Bandcamp profile ID) using OPTIONAL clauses so partial
-        results are returned. Only entities with at least one streaming ID
-        are included in the result.
-
-        Args:
-            qids: Wikidata QIDs to look up (e.g. ``["Q2774"]``).
-
-        Returns:
-            Dict mapping QID -> WikidataStreamingIds for entities with at
-            least one streaming ID.
-        """
-        valid_qids = self._validate_qids(qids)
-        if not valid_qids:
-            return {}
-
-        result: dict[str, WikidataStreamingIds] = {}
-        for batch_start in range(0, len(valid_qids), self._batch_size):
-            batch = valid_qids[batch_start : batch_start + self._batch_size]
-            values = " ".join(f"wd:{qid}" for qid in batch)
-            query = (
-                "SELECT ?item ?spotifyId ?appleMusicId ?bandcampId WHERE {\n"
-                f"  VALUES ?item {{ {values} }}\n"
-                "  OPTIONAL {{ ?item wdt:P1902 ?spotifyId . }}\n"
-                "  OPTIONAL {{ ?item wdt:P2850 ?appleMusicId . }}\n"
-                "  OPTIONAL {{ ?item wdt:P3283 ?bandcampId . }}\n"
-                "}"
-            )
-            try:
-                bindings = self._sparql_query(query)
-                for b in bindings:
-                    qid = _extract_qid(_binding_value(b, "item") or "")
-                    spotify = _binding_value(b, "spotifyId")
-                    apple_music = _binding_value(b, "appleMusicId")
-                    bandcamp = _binding_value(b, "bandcampId")
-                    if spotify or apple_music or bandcamp:
-                        result[qid] = WikidataStreamingIds(
-                            qid=qid,
-                            spotify_artist_id=spotify,
-                            apple_music_artist_id=apple_music,
-                            bandcamp_id=bandcamp,
-                        )
-            except Exception:
-                logger.warning(
-                    "SPARQL lookup_streaming_ids failed for batch starting at %d",
-                    batch_start,
-                    exc_info=True,
-                )
-
-        return result
-
     def get_influences(self, qids: list[str]) -> list[WikidataInfluence]:
         """Get influence relationships (P737) for given Wikidata entities.
 
@@ -401,7 +238,7 @@ class WikidataClient:
         result: list[WikidataInfluence] = []
         remaining_qids = list(valid_qids)
 
-        # Try cache — when available, treat as authoritative (no SPARQL fallback)
+        # Try cache -- when available, treat as authoritative (no SPARQL fallback)
         conn = self._get_cache_conn()
         if conn is not None:
             try:
@@ -432,7 +269,7 @@ class WikidataClient:
                 "SELECT ?source ?target ?targetLabel WHERE {\n"
                 f"  VALUES ?source {{ {values} }}\n"
                 "  ?source wdt:P737 ?target .\n"
-                '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }\n'
+                '  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}\n'
                 "}"
             )
             try:
@@ -489,7 +326,7 @@ class WikidataClient:
                 "    BIND(?entity AS ?parent)\n"
                 "    ?entity wdt:P355 ?child .\n"
                 "  }\n"
-                '  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }\n'
+                '  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}\n'
                 "}"
             )
             try:
@@ -515,161 +352,3 @@ class WikidataClient:
                 )
 
         return result
-
-    def search_by_name(self, name: str, limit: int = 10) -> list[WikidataEntity]:
-        """Search for Wikidata entities by name.
-
-        Uses the MediaWiki wbsearchentities API for efficient text search.
-
-        Args:
-            name: Search string.
-            limit: Maximum results (capped at 50 by the API).
-
-        Returns:
-            List of matching WikidataEntity instances.
-        """
-        if not name.strip():
-            return []
-
-        self._rate_limit()
-        client = httpx.Client(
-            timeout=30,
-            headers={"User-Agent": self._user_agent},
-        )
-        try:
-            resp = client.get(
-                self._api_endpoint,
-                params={
-                    "action": "wbsearchentities",
-                    "search": name,
-                    "language": "en",
-                    "type": "item",
-                    "limit": min(limit, 50),
-                    "format": "json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return [
-                WikidataEntity(
-                    qid=item["id"],
-                    name=item.get("label", item["id"]),
-                    description=item.get("description"),
-                )
-                for item in data.get("search", [])
-            ]
-        except Exception:
-            logger.warning("Wikidata name search failed for %r", name, exc_info=True)
-            return []
-        finally:
-            client.close()
-
-    def search_musician_by_name(self, name: str, limit: int = 10) -> list[WikidataEntity]:
-        """Search for Wikidata entities by name, filtered to musicians.
-
-        Two-step process: first finds candidates via ``wbsearchentities``,
-        then validates them with a SPARQL query checking P31 (instance of)
-        and P106 (occupation) to keep only humans with musician occupations
-        or musical groups/duos.
-
-        Args:
-            name: Search string (artist name).
-            limit: Maximum candidates to retrieve from search (capped at 50).
-
-        Returns:
-            List of WikidataEntity instances that are musicians, in search
-            relevance order.
-        """
-        candidates = self.search_by_name(name, limit=limit)
-        if not candidates:
-            return []
-
-        candidate_qids = [c.qid for c in candidates]
-        musician_qids = self._filter_musicians(candidate_qids)
-        if not musician_qids:
-            return []
-
-        return [c for c in candidates if c.qid in musician_qids]
-
-    def search_musicians_batch(self, names: list[str], limit: int = 5) -> dict[str, WikidataEntity]:
-        """Search for multiple artist names, batching the musician filter.
-
-        Collects all candidates from individual name searches first, then
-        runs a single SPARQL filter query for all candidates. This reduces
-        SPARQL calls from N (one per name) to 1.
-
-        Args:
-            names: List of artist names to search.
-            limit: Max candidates per name search.
-
-        Returns:
-            Dict mapping input name to best matching WikidataEntity (musicians only).
-        """
-        # Step 1: Collect all candidates from name searches (HTTP API, not SPARQL)
-        name_candidates: dict[str, list[WikidataEntity]] = {}
-        all_candidate_qids: set[str] = set()
-
-        for name in names:
-            candidates = self.search_by_name(name, limit=limit)
-            if candidates:
-                name_candidates[name] = candidates
-                all_candidate_qids.update(c.qid for c in candidates)
-
-        if not all_candidate_qids:
-            return {}
-
-        # Step 2: Single SPARQL filter for ALL candidates
-        musician_qids = self._filter_musicians(list(all_candidate_qids))
-
-        # Step 3: Map back to names (first musician match per name)
-        results: dict[str, WikidataEntity] = {}
-        for name, candidates in name_candidates.items():
-            for c in candidates:
-                if c.qid in musician_qids:
-                    results[name] = c
-                    break
-
-        return results
-
-    def _filter_musicians(self, qids: list[str]) -> set[str]:
-        """Filter QIDs to those that are musicians or musical groups.
-
-        Uses a SPARQL query to check:
-        - Human (P31=Q5) with a musician-related occupation (P106), OR
-        - Musical group/duo/project (P31 in MUSICAL_GROUP_TYPES).
-
-        Args:
-            qids: Candidate Wikidata QIDs to filter.
-
-        Returns:
-            Set of QIDs that pass the musician filter.
-        """
-        valid_qids = self._validate_qids(qids)
-        if not valid_qids:
-            return set()
-
-        values = " ".join(f"wd:{qid}" for qid in valid_qids)
-        occupations = " ".join(f"wd:{qid}" for qid in MUSICIAN_OCCUPATIONS)
-        group_types = " ".join(f"wd:{qid}" for qid in MUSICAL_GROUP_TYPES)
-
-        query = (
-            "SELECT DISTINCT ?item WHERE {\n"
-            f"  VALUES ?item {{ {values} }}\n"
-            "  {\n"
-            "    ?item wdt:P31 wd:Q5 .\n"
-            f"    VALUES ?occupation {{ {occupations} }}\n"
-            "    ?item wdt:P106 ?occupation .\n"
-            "  }\n"
-            "  UNION\n"
-            "  {\n"
-            f"    VALUES ?groupType {{ {group_types} }}\n"
-            "    ?item wdt:P31 ?groupType .\n"
-            "  }\n"
-            "}"
-        )
-        try:
-            bindings = self._sparql_query(query)
-            return {_extract_qid(_binding_value(b, "item") or "") for b in bindings}
-        except Exception:
-            logger.warning("SPARQL musician filter failed for %s", qids, exc_info=True)
-            return set()

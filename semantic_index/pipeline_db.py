@@ -1,0 +1,471 @@
+"""Pipeline database manager for the SQLite graph database.
+
+Manages the SQLite schema (artist, entity, label, and edge tables),
+artist CRUD with COALESCE upsert semantics, bulk stats updates, style
+persistence, and entity deduplication. This is the slimmed-down successor
+to entity_store.py, with all identity resolution code removed (now owned
+by LML via the --entity-source=lml path).
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from types import TracebackType
+
+from semantic_index.models import ArtistStats, DeduplicationReport
+
+logger = logging.getLogger(__name__)
+
+# Columns added to the artist table by _migrate_artist_table().
+_NEW_ARTIST_COLUMNS = [
+    ("entity_id", "INTEGER REFERENCES entity(id)"),
+    ("musicbrainz_artist_id", "TEXT"),
+    ("wxyc_library_code_id", "INTEGER"),
+    ("reconciliation_status", "TEXT NOT NULL DEFAULT 'unreconciled'"),
+    ("created_at", "TEXT"),
+    ("updated_at", "TEXT"),
+]
+
+_ENTITY_STORE_SCHEMA = """
+-- Real-world person, group, or organization.
+CREATE TABLE IF NOT EXISTS entity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wikidata_qid TEXT,
+    name TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT 'artist',
+    spotify_artist_id TEXT,
+    apple_music_artist_id TEXT,
+    bandcamp_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_qid ON entity(wikidata_qid) WHERE wikidata_qid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(entity_type);
+
+-- Phase 2 tables (created now, populated later)
+
+CREATE TABLE IF NOT EXISTS release (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    wxyc_library_release_id INTEGER,
+    discogs_master_id INTEGER,
+    discogs_release_id INTEGER,
+    musicbrainz_release_group_id TEXT,
+    year INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS label (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    entity_id INTEGER REFERENCES entity(id),
+    discogs_label_id INTEGER,
+    musicbrainz_label_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS label_hierarchy (
+    parent_label_id INTEGER NOT NULL REFERENCES label(id),
+    child_label_id INTEGER NOT NULL REFERENCES label(id),
+    source TEXT NOT NULL DEFAULT 'wikidata',
+    PRIMARY KEY (parent_label_id, child_label_id)
+);
+
+-- Per-artist style tags from Discogs (persisted during reconciliation)
+
+CREATE TABLE IF NOT EXISTS artist_style (
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    style_tag TEXT NOT NULL,
+    PRIMARY KEY (artist_id, style_tag)
+);
+
+-- Reconciliation audit trail
+
+CREATE TABLE IF NOT EXISTS reconciliation_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist_id INTEGER NOT NULL REFERENCES artist(id),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    confidence REAL,
+    method TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_artist ON reconciliation_log(artist_id);
+"""
+
+_ENTITY_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_entity_spotify ON entity(spotify_artist_id) WHERE spotify_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_apple_music ON entity(apple_music_artist_id) WHERE apple_music_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_entity_bandcamp ON entity(bandcamp_id) WHERE bandcamp_id IS NOT NULL;
+"""
+
+_ARTIST_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS artist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_name TEXT NOT NULL UNIQUE,
+    genre TEXT,
+    total_plays INTEGER NOT NULL DEFAULT 0,
+    active_first_year INTEGER,
+    active_last_year INTEGER,
+    dj_count INTEGER NOT NULL DEFAULT 0,
+    request_ratio REAL NOT NULL DEFAULT 0.0,
+    show_count INTEGER NOT NULL DEFAULT 0,
+    discogs_artist_id INTEGER,
+    entity_id INTEGER REFERENCES entity(id),
+    musicbrainz_artist_id TEXT,
+    wxyc_library_code_id INTEGER,
+    reconciliation_status TEXT NOT NULL DEFAULT 'unreconciled',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
+_ARTIST_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_artist_entity ON artist(entity_id);
+CREATE INDEX IF NOT EXISTS idx_artist_discogs ON artist(discogs_artist_id) WHERE discogs_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artist_musicbrainz ON artist(musicbrainz_artist_id) WHERE musicbrainz_artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artist_reconciliation ON artist(reconciliation_status);
+"""
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: list[tuple[str, str]],
+) -> list[str]:
+    """Idempotently add columns to a table using PRAGMA inspection.
+
+    Returns the list of column names that were actually added.
+    """
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    added = []
+    for col_name, col_def in columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+            added.append(col_name)
+            logger.info("Added column %s to %s table", col_name, table)
+    return added
+
+
+class PipelineDB:
+    """Manages the SQLite graph database for the pipeline.
+
+    Handles schema creation/migration, artist CRUD with COALESCE upsert
+    semantics, bulk stats updates, style persistence, and entity
+    deduplication by shared Wikidata QID.
+
+    Args:
+        db_path: Path to the SQLite database file.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn = sqlite3.connect(db_path)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+
+    def initialize(self) -> None:
+        """Create tables and migrate the artist table if needed.
+
+        Fully idempotent -- safe on fresh, old-schema, or already-migrated databases.
+        """
+        self._migrate_entity_unique_qid()
+        self._conn.executescript(_ENTITY_STORE_SCHEMA)
+        self._migrate_entity_table()
+        self._conn.executescript(_ENTITY_INDEXES)
+        self._migrate_artist_table()
+        if self._has_table("artist"):
+            self._conn.executescript(_ARTIST_INDEXES)
+        self._conn.commit()
+        logger.info("Pipeline DB initialized: %s", self._db_path)
+
+    def _migrate_entity_unique_qid(self) -> None:
+        """Rebuild the entity table without the UNIQUE constraint on wikidata_qid."""
+        if not self._has_table("entity"):
+            return
+
+        indexes = self._conn.execute("PRAGMA index_list(entity)").fetchall()
+        has_unique_qid = False
+        for idx in indexes:
+            idx_name = idx[1]
+            is_unique = bool(idx[2])
+            if is_unique:
+                cols = self._conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                if any(col[2] == "wikidata_qid" for col in cols):
+                    has_unique_qid = True
+                    break
+
+        if not has_unique_qid:
+            return
+
+        logger.info("Rebuilding entity table to remove UNIQUE constraint on wikidata_qid")
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute("ALTER TABLE entity RENAME TO _entity_old")
+        self._conn.execute(
+            """CREATE TABLE entity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wikidata_qid TEXT,
+                name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'artist',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"""
+        )
+        self._conn.execute("INSERT INTO entity SELECT * FROM _entity_old")
+        self._conn.execute("DROP TABLE _entity_old")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
+        logger.info("Entity table rebuilt without UNIQUE constraint on wikidata_qid")
+
+    _NEW_ENTITY_COLUMNS: list[tuple[str, str]] = [
+        ("spotify_artist_id", "TEXT"),
+        ("apple_music_artist_id", "TEXT"),
+        ("bandcamp_id", "TEXT"),
+    ]
+
+    def _migrate_entity_table(self) -> None:
+        """Add new columns to an existing entity table if they are missing."""
+        if not self._has_table("entity"):
+            return
+
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(entity)")}
+        for col_name, col_def in self._NEW_ENTITY_COLUMNS:
+            if col_name not in existing:
+                self._conn.execute(f"ALTER TABLE entity ADD COLUMN {col_name} {col_def}")
+                logger.info("Migrated entity table: added column %s", col_name)
+
+    def _has_table(self, name: str) -> bool:
+        """Check whether a table exists in the database."""
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def _migrate_artist_table(self) -> None:
+        """Create the artist table if missing, or add new columns to an existing one."""
+        if not self._has_table("artist"):
+            self._conn.executescript(_ARTIST_TABLE_SCHEMA)
+            logger.info("Created artist table with full schema")
+            return
+
+        added = _ensure_columns(self._conn, "artist", _NEW_ARTIST_COLUMNS)
+
+        if "created_at" in added or "updated_at" in added:
+            self._conn.execute(
+                """UPDATE artist
+                   SET created_at = COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                       updated_at = COALESCE(updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"""
+            )
+
+    # ------------------------------------------------------------------
+    # Artist CRUD
+    # ------------------------------------------------------------------
+
+    def upsert_artist(
+        self,
+        canonical_name: str,
+        *,
+        genre: str | None = None,
+        discogs_artist_id: int | None = None,
+        entity_id: int | None = None,
+        musicbrainz_artist_id: str | None = None,
+        wxyc_library_code_id: int | None = None,
+    ) -> int:
+        """Insert or update an artist row using COALESCE semantics.
+
+        On conflict (canonical_name), only updates fields where the new value
+        is not NULL -- existing populated fields are never overwritten with NULL.
+
+        Returns:
+            The artist row's integer primary key.
+        """
+        cur = self._conn.execute(
+            """INSERT INTO artist (canonical_name, genre, discogs_artist_id, entity_id,
+                                   musicbrainz_artist_id, wxyc_library_code_id,
+                                   updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(canonical_name) DO UPDATE SET
+                   genre = COALESCE(excluded.genre, artist.genre),
+                   discogs_artist_id = COALESCE(excluded.discogs_artist_id, artist.discogs_artist_id),
+                   entity_id = COALESCE(excluded.entity_id, artist.entity_id),
+                   musicbrainz_artist_id = COALESCE(excluded.musicbrainz_artist_id, artist.musicbrainz_artist_id),
+                   wxyc_library_code_id = COALESCE(excluded.wxyc_library_code_id, artist.wxyc_library_code_id),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               RETURNING id""",
+            (
+                canonical_name,
+                genre,
+                discogs_artist_id,
+                entity_id,
+                musicbrainz_artist_id,
+                wxyc_library_code_id,
+            ),
+        )
+        row = cur.fetchone()
+        self._conn.commit()
+        assert row is not None
+        return int(row[0])
+
+    def bulk_upsert_artists(self, names: list[str]) -> dict[str, int]:
+        """Insert or retrieve artist rows for a list of canonical names.
+
+        Returns:
+            Dict mapping canonical_name -> artist row id.
+        """
+        unique_names = list(dict.fromkeys(names))
+        result: dict[str, int] = {}
+        for name in unique_names:
+            result[name] = self.upsert_artist(name)
+        return result
+
+    def get_name_to_id_mapping(self) -> dict[str, int]:
+        """Return a mapping of canonical_name to artist row id."""
+        rows = self._conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+        return {row[1]: row[0] for row in rows}
+
+    # ------------------------------------------------------------------
+    # Artist Stats
+    # ------------------------------------------------------------------
+
+    def update_artist_stats(self, canonical_name: str, stats: ArtistStats) -> None:
+        """Update stats columns for a single artist."""
+        cur = self._conn.execute(
+            """UPDATE artist SET
+                   total_plays = ?,
+                   genre = COALESCE(?, genre),
+                   active_first_year = ?,
+                   active_last_year = ?,
+                   dj_count = ?,
+                   request_ratio = ?,
+                   show_count = ?,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE canonical_name = ?""",
+            (
+                stats.total_plays,
+                stats.genre,
+                stats.active_first_year,
+                stats.active_last_year,
+                stats.dj_count,
+                stats.request_ratio,
+                stats.show_count,
+                canonical_name,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"No artist with canonical_name '{canonical_name}'")
+        self._conn.commit()
+
+    def bulk_update_stats(self, artist_stats: dict[str, ArtistStats]) -> None:
+        """Update stats for multiple artists in a single transaction."""
+        for name, stats in artist_stats.items():
+            self.update_artist_stats(name, stats)
+
+    # ------------------------------------------------------------------
+    # Artist Styles
+    # ------------------------------------------------------------------
+
+    def persist_artist_styles(self, artist_id: int, styles: list[str]) -> None:
+        """Persist Discogs style tags for an artist (idempotent)."""
+        if not styles:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO artist_style (artist_id, style_tag) VALUES (?, ?)",
+            [(artist_id, style) for style in styles],
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Entity Deduplication
+    # ------------------------------------------------------------------
+
+    def find_duplicate_qid_groups(self) -> list[tuple[str, list[int]]]:
+        """Find groups of entities sharing the same non-NULL Wikidata QID."""
+        rows = self._conn.execute(
+            """SELECT wikidata_qid, GROUP_CONCAT(id)
+               FROM entity
+               WHERE wikidata_qid IS NOT NULL
+               GROUP BY wikidata_qid
+               HAVING COUNT(*) > 1
+               ORDER BY wikidata_qid"""
+        ).fetchall()
+        return [(row[0], sorted(int(x) for x in row[1].split(","))) for row in rows]
+
+    def merge_entities(self, keep_id: int, merge_id: int) -> None:
+        """Merge two entities: re-parent artists from merge_id to keep_id, then delete merge_id."""
+        if keep_id == merge_id:
+            raise ValueError("Cannot merge an entity into itself")
+
+        for eid, label in [(keep_id, "keep"), (merge_id, "merge")]:
+            row = self._conn.execute("SELECT id FROM entity WHERE id = ?", (eid,)).fetchone()
+            if row is None:
+                raise ValueError(f"No entity with id {eid} ({label})")
+
+        self._conn.execute(
+            "UPDATE artist SET entity_id = ? WHERE entity_id = ?", (keep_id, merge_id)
+        )
+        self._conn.execute("DELETE FROM entity WHERE id = ?", (merge_id,))
+        self._conn.commit()
+
+    def deduplicate_by_qid(self) -> DeduplicationReport:
+        """Find entities sharing a Wikidata QID and merge duplicates."""
+        groups = self.find_duplicate_qid_groups()
+        entities_merged = 0
+        artists_reassigned = 0
+
+        for qid, entity_ids in groups:
+            keep_id = entity_ids[0]
+            for merge_id in entity_ids[1:]:
+                count = self._conn.execute(
+                    "SELECT COUNT(*) FROM artist WHERE entity_id = ?", (merge_id,)
+                ).fetchone()[0]
+                artists_reassigned += count
+                self.merge_entities(keep_id, merge_id)
+                entities_merged += 1
+            logger.info(
+                "Deduplicated QID %s: kept entity %d, merged %d entities",
+                qid,
+                keep_id,
+                len(entity_ids) - 1,
+            )
+
+        if groups:
+            logger.info(
+                "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
+                len(groups),
+                entities_merged,
+                artists_reassigned,
+            )
+        else:
+            logger.info("Entity deduplication: no duplicate QIDs found")
+
+        return DeduplicationReport(
+            groups_found=len(groups),
+            entities_merged=entities_merged,
+            artists_reassigned=artists_reassigned,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()
+
+    def __enter__(self) -> PipelineDB:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.close()

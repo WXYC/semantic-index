@@ -10,7 +10,6 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.entity_store import EntityStore
 from semantic_index.models import (
     ArtistStats,
     CrossReferenceEdge,
@@ -19,6 +18,7 @@ from semantic_index.models import (
     SharedStyleEdge,
     WikidataInfluenceEdge,
 )
+from semantic_index.pipeline_db import PipelineDB
 from semantic_index.sqlite_export import export_sqlite
 
 
@@ -554,40 +554,35 @@ class TestExplain:
 
 
 def _build_entity_store_fixture_db() -> str:
-    """Create a fixture SQLite database with entity store tables and return its path."""
+    """Create a fixture SQLite database with pipeline DB tables and return its path."""
     path = tempfile.mktemp(suffix=".db")
-    store = EntityStore(path)
-    store.initialize()
+    db = PipelineDB(path)
+    db.initialize()
+    conn = db._conn
 
     # Create entities
-    entity_ae = store.get_or_create_entity("Autechre", "artist")
-    store.update_entity_qid(entity_ae.id, "Q375855")
-    entity_sl = store.get_or_create_entity("Stereolab", "artist")
+    cur = conn.execute(
+        "INSERT INTO entity (name, entity_type, wikidata_qid) VALUES ('Autechre', 'artist', 'Q375855')"
+    )
+    entity_ae_id = cur.lastrowid
+    cur = conn.execute("INSERT INTO entity (name, entity_type) VALUES ('Stereolab', 'artist')")
+    entity_sl_id = cur.lastrowid
+    conn.commit()
 
     # Upsert artists linked to entities
-    store.upsert_artist(
+    db.upsert_artist(
         "Autechre",
         genre="Electronic",
         discogs_artist_id=1240,
-        entity_id=entity_ae.id,
+        entity_id=entity_ae_id,
         musicbrainz_artist_id="410c9baf-5469-44f6-9852-826524b80c61",
     )
-    store.upsert_artist(
-        "Stereolab",
-        genre="Rock",
-        entity_id=entity_sl.id,
-    )
-    # An alias pointing to the same entity as Autechre
-    store.upsert_artist(
-        "Ae",
-        genre="Electronic",
-        entity_id=entity_ae.id,
-    )
-    # An artist with no entity
-    store.upsert_artist("Cat Power", genre="Rock")
+    db.upsert_artist("Stereolab", genre="Rock", entity_id=entity_sl_id)
+    db.upsert_artist("Ae", genre="Electronic", entity_id=entity_ae_id)
+    db.upsert_artist("Cat Power", genre="Rock")
 
     # Update stats
-    store.update_artist_stats(
+    db.update_artist_stats(
         "Autechre",
         ArtistStats(
             canonical_name="Autechre",
@@ -600,7 +595,7 @@ def _build_entity_store_fixture_db() -> str:
             show_count=40,
         ),
     )
-    store.update_artist_stats(
+    db.update_artist_stats(
         "Stereolab",
         ArtistStats(
             canonical_name="Stereolab",
@@ -613,7 +608,7 @@ def _build_entity_store_fixture_db() -> str:
             show_count=25,
         ),
     )
-    store.update_artist_stats(
+    db.update_artist_stats(
         "Ae",
         ArtistStats(
             canonical_name="Ae",
@@ -626,7 +621,7 @@ def _build_entity_store_fixture_db() -> str:
             show_count=3,
         ),
     )
-    store.update_artist_stats(
+    db.update_artist_stats(
         "Cat Power",
         ArtistStats(
             canonical_name="Cat Power",
@@ -641,20 +636,18 @@ def _build_entity_store_fixture_db() -> str:
     )
 
     # Mark reconciliation status for Autechre
-    store.update_reconciliation_status(
-        store.get_artist_by_name("Autechre")["id"],
-        "reconciled",  # type: ignore[index]
+    conn.execute(
+        "UPDATE artist SET reconciliation_status = 'reconciled' WHERE canonical_name = 'Autechre'"
     )
 
     # Set streaming IDs on Autechre's entity
-    store.update_entity_streaming_ids(
-        entity_ae.id,
-        spotify="5bMqBjPbCOWGgWJpbAqdQq",
-        apple_music="15821",
-        bandcamp="autechre",
+    conn.execute(
+        "UPDATE entity SET spotify_artist_id = ?, apple_music_artist_id = ?, bandcamp_id = ? WHERE id = ?",
+        ("5bMqBjPbCOWGgWJpbAqdQq", "15821", "autechre", entity_ae_id),
     )
+    conn.commit()
 
-    store.close()
+    db.close()
     return path
 
 
