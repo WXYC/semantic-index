@@ -493,11 +493,12 @@ async function fetchCommunities() {
   }
 }
 
-// Bootstrap: fetch all to get total_artists, then re-fetch with slider percentage
-api('/graph/communities', { min_size: 1, limit: 500 }).then(data => {
+// Bootstrap community data — must complete before any neighborhood loads
+const communitiesReady = api('/graph/communities', { min_size: 1, limit: 500 }).then(async (data) => {
   if (data) {
     totalGraphArtists = data.total_artists || 0;
-    fetchCommunities();
+    for (const c of data.communities) communityMap[c.id] = c;
+    await fetchCommunities();
   }
 });
 
@@ -1564,7 +1565,7 @@ window.addEventListener('popstate', async () => {
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
   document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
-  fetchCommunities();
+  await fetchCommunities();
 
   updateFacetState();
   if (state.artist != null) {
@@ -1620,7 +1621,7 @@ async function loadFacets() {
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
   document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
-  fetchCommunities();
+  await communitiesReady;
 
   updateFacetState();
 
