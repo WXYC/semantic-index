@@ -15,6 +15,7 @@ dependencies = [
     "rapidfuzz>=3.0.0",
     "psycopg[binary]>=3.1",
     "httpx>=0.25",
+    "wxyc-etl>=0.1.0",
 ]
 
 [project.optional-dependencies]
