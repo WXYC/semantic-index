@@ -177,6 +177,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "from the existing database, and calls export_facet_tables. Skips all other steps.",
     )
     parser.add_argument(
+        "--entity-source",
+        choices=["local", "lml"],
+        default="local",
+        help="Identity source for reconciliation. 'local' (default) runs local "
+        "reconciliation via entity_store.py + reconciliation.py. 'lml' reads "
+        "pre-resolved identities from LML's entity.identity PG table "
+        "(requires --discogs-cache-dsn). Both paths coexist during transition.",
+    )
+    parser.add_argument(
         "--acousticbrainz-dir",
         default=os.environ.get("ACOUSTICBRAINZ_DIR"),
         help="Path to extracted AcousticBrainz data dump. "
@@ -450,47 +459,68 @@ def run(args: argparse.Namespace) -> None:
         log.info("Bulk upserting %d artists into entity store...", len(all_canonical))
         entity_store.bulk_upsert_artists(all_canonical)
 
-        # 5d. Reconcile via Discogs (unless skipped or no cache DSN)
-        reconcile_client = DiscogsClient(
-            cache_dsn=args.discogs_cache_dsn,
-            api_base_url=None,
-        )
-        reconciler = ArtistReconciler(entity_store, reconcile_client)
+        # 5d. Reconcile: either from LML entity store (PG) or locally
+        if getattr(args, "entity_source", "local") == "lml":
+            # Read pre-resolved identities from LML's entity.identity PG table
+            if not args.discogs_cache_dsn:
+                log.error("--entity-source=lml requires --discogs-cache-dsn")
+                sys.exit(1)
+            log.info("Importing identities from LML entity store (entity.identity)...")
+            from semantic_index.lml_identity import PgSource, import_lml_identities
 
-        if not args.skip_reconciliation and args.discogs_cache_dsn:
-            log.info("Running Discogs reconciliation...")
-            report = reconciler.reconcile_batch()
-            log.info(
-                "Reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                report.attempted,
-                report.succeeded,
-                report.no_match,
-                report.errored,
+            pg_source = PgSource(args.discogs_cache_dsn)
+            try:
+                lml_report = import_lml_identities(entity_store, pg_source)
+                log.info(
+                    "LML identity import: %d matched, %d unmatched, %d entities created",
+                    lml_report.matched,
+                    lml_report.unmatched,
+                    lml_report.entities_created,
+                )
+            finally:
+                pg_source.close()
+        else:
+            # Local reconciliation (existing behavior)
+            reconcile_client = DiscogsClient(
+                cache_dsn=args.discogs_cache_dsn,
+                api_base_url=None,
             )
-            # Re-try no_match artists against member/group table
-            member_report = reconciler.reconcile_members()
-            log.info(
-                "Member reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                member_report.attempted,
-                member_report.succeeded,
-                member_report.no_match,
-                member_report.errored,
-            )
-        elif not args.skip_reconciliation:
-            log.warning("Skipping reconciliation: no discogs-cache DSN available")
+            reconciler = ArtistReconciler(entity_store, reconcile_client)
 
-        # 5e. Wikidata name search for remaining no_match artists (opt-in)
-        if args.wikidata_reconciliation:
-            log.info("Running Wikidata name search for no_match artists...")
-            wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
-            wikidata_report = reconciler.reconcile_wikidata(wikidata_client)
-            log.info(
-                "Wikidata reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
-                wikidata_report.attempted,
-                wikidata_report.succeeded,
-                wikidata_report.no_match,
-                wikidata_report.errored,
-            )
+            if not args.skip_reconciliation and args.discogs_cache_dsn:
+                log.info("Running Discogs reconciliation...")
+                report = reconciler.reconcile_batch()
+                log.info(
+                    "Reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                    report.attempted,
+                    report.succeeded,
+                    report.no_match,
+                    report.errored,
+                )
+                # Re-try no_match artists against member/group table
+                member_report = reconciler.reconcile_members()
+                log.info(
+                    "Member reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                    member_report.attempted,
+                    member_report.succeeded,
+                    member_report.no_match,
+                    member_report.errored,
+                )
+            elif not args.skip_reconciliation:
+                log.warning("Skipping reconciliation: no discogs-cache DSN available")
+
+            # 5e. Wikidata name search for remaining no_match artists (opt-in)
+            if args.wikidata_reconciliation:
+                log.info("Running Wikidata name search for no_match artists...")
+                wikidata_client = WikidataClient(cache_dsn=args.wikidata_cache_dsn)
+                wikidata_report = reconciler.reconcile_wikidata(wikidata_client)
+                log.info(
+                    "Wikidata reconciliation: %d attempted, %d succeeded, %d no_match, %d errored",
+                    wikidata_report.attempted,
+                    wikidata_report.succeeded,
+                    wikidata_report.no_match,
+                    wikidata_report.errored,
+                )
 
         # 5e2. Assign Wikidata QIDs from wikidata-cache via Discogs ID bridge
         if args.wikidata_cache_dsn:
