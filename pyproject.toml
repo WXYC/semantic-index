@@ -79,10 +79,13 @@ follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: marks tests as integration tests (needs fixture dump)",
-    "slow: marks tests as slow (runs against production dump)",
+    "unit: pure logic tests, no external dependencies",
+    "postgres: needs PostgreSQL (gated by DATABASE_URL_TEST)",
+    "integration: needs external service or fixture data",
+    "e2e: full pipeline end-to-end test",
+    "parity: old vs new implementation comparison",
 ]
-addopts = "-m 'not integration and not slow'"
+addopts = "-m 'not integration and not postgres and not e2e and not parity'"
 console_output_style = "progress"
 testpaths = ["tests"]
 pythonpath = ["."]
