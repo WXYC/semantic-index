@@ -259,7 +259,13 @@ def get_communities(
                 top_artists=json.loads(r["top_artists"]) if r["top_artists"] else None,
             )
         )
-    return CommunitiesResponse(communities=communities)
+    try:
+        total = db.execute("SELECT COUNT(*) FROM artist WHERE community_id IS NOT NULL").fetchone()[
+            0
+        ]
+    except sqlite3.OperationalError:
+        total = 0
+    return CommunitiesResponse(communities=communities, total_artists=total)
 
 
 @router.get("/discovery", response_model=DiscoveryResponse)

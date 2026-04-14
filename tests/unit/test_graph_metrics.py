@@ -5,7 +5,12 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 
-from semantic_index.graph_metrics import GraphMetricsReport, _ensure_schema, compute_and_persist
+from semantic_index.graph_metrics import (
+    GraphMetricsReport,
+    _ensure_schema,
+    _generate_community_labels,
+    compute_and_persist,
+)
 from semantic_index.models import PmiEdge
 from semantic_index.sqlite_export import export_sqlite
 from tests.conftest import make_artist_stats
@@ -239,3 +244,114 @@ class TestComputeAndPersist:
         r2 = compute_and_persist(path)
         assert r1.community_count == r2.community_count
         assert r1.artists_scored == r2.artists_scored
+
+
+class TestLLMLabels:
+    def test_skipped_without_api_key(self):
+        """Labels stay as Discogs-derived when api_key is None."""
+        path = _build_fixture_db()
+        compute_and_persist(path, api_key=None)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT label FROM community WHERE label IS NOT NULL").fetchall()
+        assert len(rows) >= 2
+        # Labels should be Discogs-derived (no LLM call made)
+        for r in rows:
+            assert r["label"] is not None
+        conn.close()
+
+    def test_override_takes_precedence(self):
+        """Hand-curated overrides bypass LLM entirely."""
+        import json
+        from unittest.mock import patch
+
+        path = _build_fixture_db()
+        compute_and_persist(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        top = conn.execute(
+            "SELECT top_artists, label FROM community ORDER BY size DESC LIMIT 1"
+        ).fetchone()
+        anchor_artists = json.loads(top["top_artists"])[:3]
+        # Read community metadata back for _generate_community_labels
+        meta = [
+            {
+                "id": r["id"],
+                "size": r["size"],
+                "label": r["label"],
+                "top_genres": r["top_genres"],
+                "top_artists": r["top_artists"],
+            }
+            for r in conn.execute("SELECT * FROM community ORDER BY size DESC")
+        ]
+        conn.close()
+
+        override = {frozenset(anchor_artists): "My Custom Label"}
+        with patch("semantic_index.graph_metrics.COMMUNITY_LABEL_OVERRIDES", override):
+            _generate_community_labels(meta, min_size=1, api_key="fake-key")
+
+        assert meta[0]["label"] == "My Custom Label"
+
+    def test_graceful_on_api_failure(self):
+        """LLM failures preserve Discogs labels for all communities."""
+        from unittest.mock import MagicMock, patch
+
+        path = _build_fixture_db()
+        compute_and_persist(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        meta = [
+            {
+                "id": r["id"],
+                "size": r["size"],
+                "label": r["label"],
+                "top_genres": r["top_genres"],
+                "top_artists": r["top_artists"],
+            }
+            for r in conn.execute("SELECT * FROM community ORDER BY size DESC")
+        ]
+        conn.close()
+        baseline_labels = [m["label"] for m in meta]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = Exception("API down")
+        with patch("semantic_index.graph_metrics.anthropic") as mock_mod:
+            mock_mod.Anthropic.return_value = mock_client
+            _generate_community_labels(meta, min_size=1, api_key="fake-key")
+
+        for m, baseline in zip(meta, baseline_labels, strict=True):
+            assert m["label"] == baseline
+
+    def test_generated_label_stored(self):
+        """Mock a successful LLM call and verify the generated label is used."""
+        from unittest.mock import MagicMock, patch
+
+        path = _build_fixture_db()
+        compute_and_persist(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        meta = [
+            {
+                "id": r["id"],
+                "size": r["size"],
+                "label": r["label"],
+                "top_genres": r["top_genres"],
+                "top_artists": r["top_artists"],
+            }
+            for r in conn.execute("SELECT * FROM community ORDER BY size DESC")
+        ]
+        conn.close()
+
+        mock_content = MagicMock()
+        mock_content.text = "Beat-Driven IDM"
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        with patch("semantic_index.graph_metrics.anthropic") as mock_mod:
+            mock_mod.Anthropic.return_value = mock_client
+            _generate_community_labels(meta, min_size=1, api_key="fake-key")
+
+        labels = [m["label"] for m in meta]
+        assert "Beat-Driven IDM" in labels
