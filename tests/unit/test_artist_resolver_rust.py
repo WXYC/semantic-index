@@ -5,6 +5,9 @@ identical resolution results to the existing Python (rapidfuzz) path.
 """
 
 import os
+import random
+import string
+import time
 
 import pytest
 
@@ -212,3 +215,76 @@ class TestReResolveWithPlayCountsParity:
             assert rust.resolution_method == python.resolution_method, (
                 f"entry {rust.entry.id}: Rust={rust.resolution_method!r} vs Python={python.resolution_method!r}"
             )
+
+
+def _random_artist_name(rng: random.Random) -> str:
+    """Generate a random artist-like name (2-4 words, 3-10 chars each)."""
+    n_words = rng.randint(2, 4)
+    words = []
+    for _ in range(n_words):
+        length = rng.randint(3, 10)
+        word = "".join(rng.choices(string.ascii_lowercase, k=length))
+        words.append(word.capitalize())
+    return " ".join(words)
+
+
+@pytest.mark.slow
+class TestFuzzyResolvePerformance:
+    """Benchmark: Rust batch path vs Python per-query path.
+
+    rapidfuzz uses a highly optimized C extension with SIMD for Jaro-Winkler,
+    so the Rust path may not be faster until the Rust JW implementation adds
+    SIMD and/or rayon parallelism. This test verifies parity and logs timings.
+    """
+
+    def test_fuzzy_resolve_performance(self):
+        """Rust batch path produces identical results to Python at scale."""
+        rng = random.Random(42)
+        n_catalog = 5000
+        n_queries = 1000
+
+        catalog_names = [_random_artist_name(rng) for _ in range(n_catalog)]
+        codes = [
+            make_library_code(id=i + 1000, presentation_name=name)
+            for i, name in enumerate(catalog_names)
+        ]
+
+        # Create queries: mix of near-matches (slight mutations) and random names
+        entries = []
+        for i in range(n_queries):
+            if i % 3 == 0 and catalog_names:
+                base = rng.choice(catalog_names).lower()
+                if len(base) > 2:
+                    pos = rng.randint(0, len(base) - 1)
+                    char = rng.choice(string.ascii_lowercase)
+                    name = base[:pos] + char + base[pos + 1 :]
+                else:
+                    name = base
+            else:
+                name = _random_artist_name(rng)
+            entries.append(make_flowsheet_entry(id=i, library_release_id=0, artist_name=name))
+
+        # Time Python path
+        env_key = "WXYC_ETL_NO_RUST"
+        os.environ[env_key] = "1"
+        try:
+            python_resolver = ArtistResolver(releases=[], codes=codes)
+            t0 = time.perf_counter()
+            python_results = [python_resolver.resolve(e) for e in entries]
+            python_time = time.perf_counter() - t0
+        finally:
+            os.environ.pop(env_key, None)
+
+        # Time Rust batch path
+        rust_resolver = ArtistResolver(releases=[], codes=codes)
+        t0 = time.perf_counter()
+        rust_results = rust_resolver.resolve_all(entries)
+        rust_time = time.perf_counter() - t0
+
+        speedup = python_time / rust_time if rust_time > 0 else float("inf")
+        print(f"\nPython: {python_time:.3f}s, Rust: {rust_time:.3f}s, speedup: {speedup:.1f}x")
+
+        # Verify result parity at scale
+        for rust, python in zip(rust_results, python_results, strict=True):
+            assert rust.canonical_name == python.canonical_name
+            assert rust.resolution_method == python.resolution_method
