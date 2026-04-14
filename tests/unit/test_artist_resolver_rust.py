@@ -31,20 +31,24 @@ def _make_catalog_codes():
     return [make_library_code(id=id_, presentation_name=name) for id_, name in artists]
 
 
-def _resolve_with_path(entries, codes, *, use_rust: bool):
-    """Resolve entries using either the Rust or Python path.
+def _resolve_with_path(entries, codes, *, use_rust: bool, releases=None):
+    """Resolve entries using either the Rust batch or Python per-entry path.
 
-    Sets/clears WXYC_ETL_NO_RUST to force the desired path.
+    When use_rust=True, uses resolve_all() which pre-populates the fuzzy cache
+    via the Rust batch call. When use_rust=False, forces the Python fallback by
+    setting WXYC_ETL_NO_RUST and using per-entry resolve().
     """
     env_key = "WXYC_ETL_NO_RUST"
     old_val = os.environ.get(env_key)
     try:
         if use_rust:
             os.environ.pop(env_key, None)
+            resolver = ArtistResolver(releases=releases or [], codes=codes)
+            return resolver.resolve_all(entries)
         else:
             os.environ[env_key] = "1"
-        resolver = ArtistResolver(releases=[], codes=codes)
-        return [resolver.resolve(entry) for entry in entries]
+            resolver = ArtistResolver(releases=releases or [], codes=codes)
+            return [resolver.resolve(entry) for entry in entries]
     finally:
         if old_val is None:
             os.environ.pop(env_key, None)
@@ -90,26 +94,15 @@ class TestBatchFuzzyResolveParity:
         """FK chain, name match, and normalized match are untouched by the Rust path."""
         release = make_library_release(id=100, library_code_id=200)
         codes = _make_catalog_codes()
-
-        env_key = "WXYC_ETL_NO_RUST"
-        old_val = os.environ.get(env_key)
-        try:
-            os.environ.pop(env_key, None)
-            resolver = ArtistResolver(releases=[release], codes=codes)
-            entries = [
-                # Tier 1: FK chain
-                make_flowsheet_entry(id=1, library_release_id=100, artist_name="whatever"),
-                # Tier 2: exact name match
-                make_flowsheet_entry(id=2, library_release_id=0, artist_name="Stereolab"),
-                # Tier 3: normalized ("The" stripping)
-                make_flowsheet_entry(id=3, library_release_id=0, artist_name="The Stereolab"),
-            ]
-            results = [resolver.resolve(entry) for entry in entries]
-        finally:
-            if old_val is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = old_val
+        entries = [
+            # Tier 1: FK chain
+            make_flowsheet_entry(id=1, library_release_id=100, artist_name="whatever"),
+            # Tier 2: exact name match
+            make_flowsheet_entry(id=2, library_release_id=0, artist_name="Stereolab"),
+            # Tier 3: normalized ("The" stripping)
+            make_flowsheet_entry(id=3, library_release_id=0, artist_name="The Stereolab"),
+        ]
+        results = _resolve_with_path(entries, codes, use_rust=True, releases=[release])
 
         assert results[0].resolution_method == "catalog"
         assert results[0].canonical_name == "Autechre"
