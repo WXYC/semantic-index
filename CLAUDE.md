@@ -23,7 +23,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 |--------|---------------|
 | `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Uses `wxyc_etl.parser` Rust extension for ~1000x faster parsing, with `sql_parser_rs` and pure-Python fallbacks. Set `WXYC_ETL_NO_RUST=1` to force pure-Python. |
 | `semantic_index/models.py` | Pydantic data models for all pipeline entities. |
-| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: FK chain, name match, normalized (via `wxyc_etl.text.normalize_artist_name` + local bracket/the/& transforms), fuzzy (Jaro-Winkler), Discogs, raw fallback. Uses `wxyc_etl.text.split_artist_name` for alias splitting. |
+| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: compilation track artist (CTA) lookup for VA entries, FK chain, name match, normalized (via `wxyc_etl.text.normalize_artist_name` + local bracket/the/& transforms), fuzzy (Jaro-Winkler), Discogs, raw fallback. Uses `wxyc_etl.text.split_artist_name` for alias splitting, `wxyc_etl.text.is_compilation_artist` for VA detection. |
 | `semantic_index/adjacency.py` | Extract consecutive artist pairs within radio shows. |
 | `semantic_index/pmi.py` | Compute Pointwise Mutual Information for artist co-occurrences. |
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
@@ -62,6 +62,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | LIBRARY_CODE_CROSS_REFERENCE | 1=CROSS_REFERENCING_ARTIST_ID (→ LIBRARY_CODE.ID), 2=CROSS_REFERENCED_LIBRARY_CODE_ID, 3=COMMENT |
 | RELEASE_CROSS_REFERENCE | 1=CROSS_REFERENCING_ARTIST_ID (→ LIBRARY_CODE.ID), 2=CROSS_REFERENCED_RELEASE_ID, 3=COMMENT |
 | GENRE | 0=ID, 1=NAME |
+| COMPILATION_TRACK_ARTIST | 0=ID, 1=LIBRARY_RELEASE_ID, 2=ARTIST_NAME, 3=TRACK_TITLE (loaded from separate dump via `--compilation-track-artist-dump`) |
 
 ### SQLite Schema
 
@@ -268,6 +269,7 @@ python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --discogs-
 ```
 
 - `--db-path PATH` — Path to pipeline SQLite database. Creates it if needed. Identity resolution is read from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`).
+- `--compilation-track-artist-dump PATH` — Path to a SQL dump containing the `COMPILATION_TRACK_ARTIST` table. When provided, VA/compilation entries are resolved to per-track artists (Tier 0) before the FK chain.
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--db-path` with reconciled Wikidata QIDs.
 - `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--db-path` and enrichment data.

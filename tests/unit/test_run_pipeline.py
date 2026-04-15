@@ -54,6 +54,14 @@ class TestParseArgs:
         args = parse_args(["dump.sql", "--facet-only", "--cache-dir", "/tmp/cache"])
         assert args.facet_only is True
 
+    def test_compilation_track_artist_dump_default(self):
+        args = parse_args(["dump.sql"])
+        assert args.compilation_track_artist_dump is None
+
+    def test_compilation_track_artist_dump_flag(self):
+        args = parse_args(["dump.sql", "--compilation-track-artist-dump", "/tmp/cta_dump.sql"])
+        assert args.compilation_track_artist_dump == "/tmp/cta_dump.sql"
+
     def test_deleted_flags_removed(self):
         """Verify deleted flags no longer exist in the parser."""
         with pytest.raises(SystemExit):
