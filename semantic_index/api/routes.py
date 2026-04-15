@@ -53,7 +53,7 @@ def _scols(prefix: str = "") -> str:
     p = f"{prefix}." if prefix else ""
     s = f"{p}id, {p}canonical_name, {p}genre, {p}total_plays"
     if _HAS_METRICS:
-        s += f", {p}community_id, {p}pagerank, {p}community_affinity"
+        s += f", {p}community_id, {p}pagerank"
     return s
 
 
@@ -157,7 +157,6 @@ def _artist_summary(row: sqlite3.Row) -> ArtistSummary:
         total_plays=row["total_plays"],
         community_id=row["community_id"] if "community_id" in keys else None,
         pagerank=row["pagerank"] if "pagerank" in keys else None,
-        community_affinity=row["community_affinity"] if "community_affinity" in keys else None,
     )
 
 

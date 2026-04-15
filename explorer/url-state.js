@@ -1,6 +1,6 @@
 /** URL state management for the graph explorer. */
 
-export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", heat: "0.5", neighborhoods: "3" };
+export const DEFAULTS = { edge: "djTransition", depth: "2", limit: "10", month: "", dj: "", heat: "0.5" };
 
 /**
  * Parse URL search string into graph state.
@@ -16,7 +16,6 @@ export function parseURL(search) {
     month: p.get("month") || DEFAULTS.month,
     dj: p.get("dj") || DEFAULTS.dj,
     heat: p.get("heat") || DEFAULTS.heat,
-    neighborhoods: p.get("neighborhoods") || DEFAULTS.neighborhoods,
   };
 }
 
@@ -35,7 +34,6 @@ export function buildURL(artistName, controls) {
   if (controls.month && controls.month !== DEFAULTS.month) p.set("month", controls.month);
   if (controls.dj && controls.dj !== DEFAULTS.dj) p.set("dj", controls.dj);
   if (controls.heat && controls.heat !== DEFAULTS.heat) p.set("heat", controls.heat);
-  if (controls.neighborhoods && controls.neighborhoods !== DEFAULTS.neighborhoods) p.set("neighborhoods", controls.neighborhoods);
   const qs = p.toString();
   return qs ? `?${qs}` : "/";
 }

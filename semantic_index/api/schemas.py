@@ -16,7 +16,6 @@ class ArtistSummary(BaseModel):
     total_plays: int
     community_id: int | None = None
     pagerank: float | None = None
-    community_affinity: float | None = None
 
 
 class SearchResponse(BaseModel):
