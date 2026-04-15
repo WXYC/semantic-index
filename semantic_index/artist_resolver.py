@@ -1,6 +1,7 @@
 """Artist name resolution via library catalog and Discogs.
 
 Resolution strategies (in order of precedence):
+0. Compilation track: for VA entries, look up per-track artist in COMPILATION_TRACK_ARTIST index
 1. FK chain: LIBRARY_RELEASE_ID → LIBRARY_RELEASE → LIBRARY_CODE → PRESENTATION_NAME
 2. Name match: exact case-insensitive match against LIBRARY_CODE.PRESENTATION_NAME
 3. Normalized match: strip "The ", "&" → "and", bracket removal, slash/aka alias splitting
@@ -19,7 +20,11 @@ from typing import TYPE_CHECKING
 
 from rapidfuzz import process as rfprocess
 from rapidfuzz.distance import JaroWinkler
-from wxyc_etl.text import normalize_artist_name, split_artist_name  # type: ignore[import-untyped]
+from wxyc_etl.text import (  # type: ignore[import-untyped]
+    is_compilation_artist,
+    normalize_artist_name,
+    split_artist_name,
+)
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
 
@@ -101,6 +106,27 @@ def _normalized_forms(name: str) -> list[str]:
     return forms
 
 
+def build_cta_index(rows: list[tuple]) -> dict[tuple[int, str], str]:
+    """Build a lookup index from COMPILATION_TRACK_ARTIST rows.
+
+    Args:
+        rows: Tuples of (id, library_release_id, artist_name, track_title).
+
+    Returns:
+        Dict keyed on (library_release_id, normalized_track_title) → artist_name.
+        Track titles are stripped and lowercased. NULL titles are skipped.
+        Duplicate keys are overwritten (last write wins).
+    """
+    index: dict[tuple[int, str], str] = {}
+    for row in rows:
+        _, release_id, artist_name, track_title = row[:4]
+        if track_title is None:
+            continue
+        key = (release_id, track_title.strip().lower())
+        index[key] = artist_name
+    return index
+
+
 class ArtistResolver:
     """Resolves flowsheet artist names to canonical catalog names.
 
@@ -115,8 +141,10 @@ class ArtistResolver:
         releases: list[LibraryRelease],
         codes: list[LibraryCode],
         discogs_client: DiscogsClient | None = None,
+        compilation_track_index: dict[tuple[int, str], str] | None = None,
     ) -> None:
         self._discogs_client = discogs_client
+        self._compilation_track_index = compilation_track_index
         self._release_to_code: dict[int, int] = {r.id: r.library_code_id for r in releases}
         self._code_to_name: dict[int, str] = {c.id: c.presentation_name for c in codes}
         self._code_to_genre: dict[int, int] = {c.id: c.genre_id for c in codes}
@@ -149,12 +177,55 @@ class ArtistResolver:
         # Cache: lowered query → (canonical_name | None) per threshold
         self._fuzzy_cache: dict[tuple[str, float], str | None] = {}
 
+    def _canonicalize_name(self, name: str) -> str:
+        """Canonicalize an artist name through the catalog indexes.
+
+        Tries exact name match, then normalized match, then fuzzy match.
+        Returns the canonical name if found, otherwise the lowercased input.
+        """
+        key = name.strip().lower()
+
+        # Exact match
+        matched = self._name_index.get(key)
+        if matched is not None:
+            return matched
+
+        # Normalized match
+        norm = _normalize(name)
+        norm_match = self._name_index.get(norm) or self._normalized_index.get(norm)
+        if norm_match is not None:
+            return norm_match
+
+        # Fuzzy match
+        fuzzy_result = self._fuzzy_match(key)
+        if fuzzy_result is not None:
+            return fuzzy_result
+
+        return key
+
     def resolve(self, entry: FlowsheetEntry) -> ResolvedEntry:
         """Resolve an entry's artist name to a canonical catalog name.
 
-        Tries FK chain first, then exact name match, then normalized name match,
-        then fuzzy match, then falls back to raw.
+        Tries compilation track lookup first (for VA entries), then FK chain,
+        then exact name match, then normalized name match, then fuzzy match,
+        then falls back to raw.
         """
+        # Tier 0: Compilation track artist (CTA) lookup
+        if (
+            self._compilation_track_index is not None
+            and entry.library_release_id > 0
+            and is_compilation_artist(entry.artist_name)
+        ):
+            track_key = (entry.library_release_id, entry.song_title.strip().lower())
+            cta_artist = self._compilation_track_index.get(track_key)
+            if cta_artist is not None:
+                canonical = self._canonicalize_name(cta_artist)
+                return ResolvedEntry(
+                    entry=entry,
+                    canonical_name=canonical,
+                    resolution_method="compilation_track",
+                )
+
         # Strategy 1: FK chain (LIBRARY_RELEASE_ID → LIBRARY_CODE → PRESENTATION_NAME)
         if entry.library_release_id > 0:
             code_id = self._release_to_code.get(entry.library_release_id)

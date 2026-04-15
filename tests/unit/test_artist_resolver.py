@@ -9,6 +9,7 @@ from semantic_index.artist_resolver import (
     FUZZY_MIN_SCORE_RELAXED,
     FUZZY_RELAXED_MIN_PLAYS,
     ArtistResolver,
+    build_cta_index,
 )
 from semantic_index.models import DiscogsSearchResult, ResolvedEntry
 from tests.conftest import make_flowsheet_entry, make_library_code, make_library_release
@@ -501,3 +502,223 @@ class TestPlayCountWeightedFuzzy:
         assert FUZZY_MIN_SCORE == 0.90
         assert FUZZY_MIN_SCORE_RELAXED == 0.82
         assert FUZZY_RELAXED_MIN_PLAYS == 10
+
+
+class TestBuildCtaIndex:
+    """Tests for build_cta_index() — builds lookup from COMPILATION_TRACK_ARTIST rows."""
+
+    def test_basic_index_building(self):
+        """Rows are indexed by (library_release_id, normalized_track_title)."""
+        rows = [
+            (1, 100, "Nirvana", "Pay To Play"),
+            (2, 100, "Beck", "Bogusflow"),
+        ]
+        index = build_cta_index(rows)
+
+        assert index[(100, "pay to play")] == "Nirvana"
+        assert index[(100, "bogusflow")] == "Beck"
+
+    def test_case_insensitive_track_title(self):
+        """Track titles are normalized to lowercase for lookup."""
+        rows = [(1, 100, "Sonic Youth", "COMPILATION BLUES")]
+        index = build_cta_index(rows)
+
+        assert index[(100, "compilation blues")] == "Sonic Youth"
+
+    def test_null_track_titles_skipped(self):
+        """Rows with NULL track titles are excluded from the index."""
+        rows = [
+            (1, 100, "Nirvana", None),
+            (2, 100, "Beck", "Bogusflow"),
+        ]
+        index = build_cta_index(rows)
+
+        assert len(index) == 1
+        assert index[(100, "bogusflow")] == "Beck"
+
+    def test_multiple_tracks_on_same_release(self):
+        """Different tracks on the same release are all indexed."""
+        rows = [
+            (1, 100, "Nirvana", "Pay To Play"),
+            (2, 100, "Beck", "Bogusflow"),
+            (3, 100, "Hole", "Beautiful Son"),
+        ]
+        index = build_cta_index(rows)
+
+        assert len(index) == 3
+        assert index[(100, "pay to play")] == "Nirvana"
+        assert index[(100, "bogusflow")] == "Beck"
+        assert index[(100, "beautiful son")] == "Hole"
+
+    def test_duplicate_key_last_write_wins(self):
+        """When (release_id, track_title) appears twice, the last row wins."""
+        rows = [
+            (1, 100, "Nirvana", "Pay To Play"),
+            (2, 100, "Kurt Cobain", "Pay To Play"),
+        ]
+        index = build_cta_index(rows)
+
+        assert index[(100, "pay to play")] == "Kurt Cobain"
+
+    def test_empty_rows(self):
+        """Empty input produces an empty index."""
+        index = build_cta_index([])
+        assert index == {}
+
+    def test_whitespace_stripped_from_title(self):
+        """Leading/trailing whitespace is stripped from track titles."""
+        rows = [(1, 100, "Nirvana", "  Pay To Play  ")]
+        index = build_cta_index(rows)
+
+        assert index[(100, "pay to play")] == "Nirvana"
+
+
+class TestCompilationTrackResolution:
+    """Tests for Tier 0: compilation track artist resolution (CTA + Discogs)."""
+
+    def _make_resolver(self, releases=None, codes=None, compilation_track_index=None):
+        return ArtistResolver(
+            releases=releases or [],
+            codes=codes or [],
+            compilation_track_index=compilation_track_index,
+        )
+
+    def test_va_entry_resolves_via_cta(self):
+        """A Various Artists entry resolves to the CTA track artist."""
+        cta_index = {(100, "pay to play"): "Nirvana"}
+        release = make_library_release(id=100, library_code_id=200)
+        code = make_library_code(id=200, presentation_name="Various Artists")
+        resolver = self._make_resolver(
+            releases=[release], codes=[code], compilation_track_index=cta_index
+        )
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="Pay To Play"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "nirvana"
+        assert resolved.resolution_method == "compilation_track"
+
+    def test_case_insensitive_song_title(self):
+        """Song title matching is case-insensitive."""
+        cta_index = {(100, "pay to play"): "Nirvana"}
+        resolver = self._make_resolver(compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="PAY TO PLAY"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "nirvana"
+        assert resolved.resolution_method == "compilation_track"
+
+    def test_non_va_entries_skip_cta(self):
+        """Non-compilation entries are not affected by CTA lookup."""
+        cta_index = {(100, "vi scose poise"): "Nirvana"}
+        code = make_library_code(id=200, presentation_name="Autechre")
+        release = make_library_release(id=100, library_code_id=200)
+        resolver = self._make_resolver(
+            releases=[release], codes=[code], compilation_track_index=cta_index
+        )
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Autechre", song_title="VI Scose Poise"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "Autechre"
+        assert resolved.resolution_method == "catalog"
+
+    def test_falls_through_when_no_cta_match(self):
+        """When CTA has no match for the track, fall through to existing tiers."""
+        cta_index = {(100, "other song"): "Nirvana"}
+        resolver = self._make_resolver(compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="Unknown Track"
+        )
+        resolved = resolver.resolve(entry)
+
+        # Falls through to raw since no catalog match
+        assert resolved.resolution_method == "raw"
+
+    def test_cta_name_canonicalized_via_catalog(self):
+        """CTA artist name is canonicalized through the catalog name index."""
+        cta_index = {(100, "pay to play"): "Nirvana"}
+        code = make_library_code(id=300, presentation_name="Nirvana")
+        resolver = self._make_resolver(codes=[code], compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="Pay To Play"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "Nirvana"
+        assert resolved.resolution_method == "compilation_track"
+
+    def test_cta_name_canonicalized_via_normalized(self):
+        """CTA artist name canonicalized through normalized match ('The X' -> 'X')."""
+        cta_index = {(100, "mad dog 20/20"): "The Teenage Fanclub"}
+        code = make_library_code(id=300, presentation_name="Teenage Fanclub")
+        resolver = self._make_resolver(codes=[code], compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="Mad Dog 20/20"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "Teenage Fanclub"
+        assert resolved.resolution_method == "compilation_track"
+
+    def test_raw_cta_name_when_no_catalog_match(self):
+        """When CTA name doesn't match any catalog entry, return it lowercased."""
+        cta_index = {(100, "pay to play"): "Nirvana"}
+        resolver = self._make_resolver(compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100, artist_name="Various Artists", song_title="Pay To Play"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "nirvana"
+        assert resolved.resolution_method == "compilation_track"
+
+    def test_skipped_when_library_release_id_zero(self):
+        """CTA lookup is skipped when library_release_id is 0."""
+        cta_index = {(0, "pay to play"): "Nirvana"}
+        resolver = self._make_resolver(compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=0, artist_name="Various Artists", song_title="Pay To Play"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "raw"
+
+    def test_backward_compatible_without_cta(self):
+        """When no CTA index is provided, resolver works exactly as before."""
+        resolver = self._make_resolver()
+
+        entry = make_flowsheet_entry(
+            library_release_id=0, artist_name="Various Artists", song_title="Something"
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "various artists"
+        assert resolved.resolution_method == "raw"
+
+    def test_soundtracks_artist_resolves_via_cta(self):
+        """Soundtrack entries (also compilation artists) resolve via CTA."""
+        cta_index = {(100, "in a sentimental mood"): "Duke Ellington & John Coltrane"}
+        resolver = self._make_resolver(compilation_track_index=cta_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100,
+            artist_name="Soundtracks - J",
+            song_title="In A Sentimental Mood",
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "duke ellington & john coltrane"
+        assert resolved.resolution_method == "compilation_track"
