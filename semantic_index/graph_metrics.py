@@ -35,6 +35,7 @@ _GRAPH_METRIC_COLUMNS = [
     ("discovery_score", "REAL"),
     ("dj_edge_count", "INTEGER"),
     ("acoustic_neighbor_count", "INTEGER"),
+    ("community_affinity", "REAL"),
 ]
 
 _COMMUNITY_TABLE_SCHEMA = """\
@@ -231,7 +232,9 @@ def _build_community_metadata(
 
 # Hand-curated overrides keyed by frozenset of top 3 anchor artists (stable
 # across re-runs since community IDs are arbitrary but anchor artists are not).
-COMMUNITY_LABEL_OVERRIDES: dict[frozenset[str], str] = {}
+COMMUNITY_LABEL_OVERRIDES: dict[frozenset[str], str] = {
+    frozenset(["Yo La Tengo", "Beach House", "Radiohead"]): "Art Pop & Luminous Indie",
+}
 
 _LABEL_SYSTEM_PROMPT = (
     "You name musical neighborhoods for a college radio station's artist map. "
@@ -340,6 +343,51 @@ def _generate_community_labels(
             )
 
 
+def _compute_community_affinity(
+    conn: sqlite3.Connection,
+    node_community: dict[int, int],
+    graph_nodes: set[int],
+) -> dict[int, float]:
+    """Compute per-artist community affinity: fraction of edges within own community.
+
+    Excludes edges to Various Artists nodes (which have no community assignment
+    and would inflate cross-community counts). Artists with affinity > 0.5 are
+    core community members; below that they're bridge/peripheral artists.
+    """
+    # Get all VA artist IDs to exclude from edge counting
+    va_ids = {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM artist WHERE community_id IS NULL "
+            "AND id IN (SELECT source_id FROM dj_transition UNION SELECT target_id FROM dj_transition)"
+        ).fetchall()
+    }
+
+    affinities: dict[int, float] = {}
+    for artist_id in graph_nodes:
+        cid = node_community.get(artist_id)
+        if cid is None:
+            continue
+        edges = conn.execute(
+            "SELECT target_id FROM dj_transition WHERE source_id = ? "
+            "UNION ALL "
+            "SELECT source_id FROM dj_transition WHERE target_id = ?",
+            (artist_id, artist_id),
+        ).fetchall()
+        total = 0
+        within = 0
+        for (neighbor_id,) in edges:
+            if neighbor_id in va_ids:
+                continue
+            total += 1
+            neighbor_cid = node_community.get(neighbor_id)
+            if neighbor_cid == cid:
+                within += 1
+        affinities[artist_id] = within / total if total > 0 else 0.0
+
+    return affinities
+
+
 def _persist(
     conn: sqlite3.Connection,
     node_community: dict[int, int],
@@ -347,25 +395,26 @@ def _persist(
     betweenness: dict[int, float],
     pagerank: dict[int, float],
     discovery: dict[int, tuple[float, int, int]],
+    affinities: dict[int, float],
 ) -> None:
     """Clear old metrics and write new values."""
-    # Reset graph metric columns (targeted — only columns this module manages)
     conn.execute(
         "UPDATE artist SET community_id = NULL, betweenness = NULL, pagerank = NULL, "
-        "discovery_score = NULL, dj_edge_count = NULL, acoustic_neighbor_count = NULL"
+        "discovery_score = NULL, dj_edge_count = NULL, acoustic_neighbor_count = NULL, "
+        "community_affinity = NULL"
     )
     conn.execute("DELETE FROM community")
 
-    # Batch update artist rows
     for artist_id, comm_id in node_community.items():
         bc = betweenness.get(artist_id, 0.0)
         pr = pagerank.get(artist_id, 0.0)
         score, dj_deg, ac_deg = discovery.get(artist_id, (0.0, 0, 0))
+        aff = affinities.get(artist_id, 0.0)
         conn.execute(
             "UPDATE artist SET community_id = ?, betweenness = ?, pagerank = ?, "
-            "discovery_score = ?, dj_edge_count = ?, acoustic_neighbor_count = ? "
-            "WHERE id = ?",
-            (comm_id, bc, pr, score, dj_deg, ac_deg, artist_id),
+            "discovery_score = ?, dj_edge_count = ?, acoustic_neighbor_count = ?, "
+            "community_affinity = ? WHERE id = ?",
+            (comm_id, bc, pr, score, dj_deg, ac_deg, aff, artist_id),
         )
 
     # Insert community metadata
@@ -426,8 +475,11 @@ def compute_and_persist(
         logger.info("Generating LLM community labels...")
         _generate_community_labels(communities_meta, min_size=100, api_key=api_key)
 
+    logger.info("Computing community affinity scores...")
+    affinities = _compute_community_affinity(conn, node_community, graph_nodes)
+
     logger.info("Persisting results...")
-    _persist(conn, node_community, communities_meta, betweenness, pagerank, discovery)
+    _persist(conn, node_community, communities_meta, betweenness, pagerank, discovery, affinities)
 
     conn.close()
 

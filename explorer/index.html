@@ -508,7 +508,8 @@ document.getElementById('neighborhoodCutoff').addEventListener('change', async (
   reloadCenter();
 });
 
-function getCommunityLabel(communityId) {
+function getCommunityLabel(communityId, affinity) {
+  if (affinity != null && affinity < 0.3) return null;
   const c = communityMap[communityId];
   return c ? c.label : null;
 }
@@ -638,7 +639,7 @@ function populateSidebar(centerArtist, neighbors) {
   const header = document.querySelector('.sidebar-header');
   header.querySelector('.artist-name').textContent = centerArtist.canonical_name;
   const metaEl = header.querySelector('.artist-meta');
-  const communityLabel = getCommunityLabel(centerArtist.community_id);
+  const communityLabel = getCommunityLabel(centerArtist.community_id, centerArtist.community_affinity);
   if (communityLabel != null && centerArtist.community_id != null) {
     const color = COMMUNITY_PALETTE[centerArtist.community_id % COMMUNITY_PALETTE.length];
     metaEl.innerHTML =
@@ -737,7 +738,7 @@ function populateSidebar(centerArtist, neighbors) {
         <span class="weight-badge">${weightDisplay}</span>
       </div>
       <div class="neighbor-meta">${(() => {
-        const cl = getCommunityLabel(n.artist.community_id);
+        const cl = getCommunityLabel(n.artist.community_id, n.artist.community_affinity);
         if (cl != null && n.artist.community_id != null) {
           const clr = COMMUNITY_PALETTE[n.artist.community_id % COMMUNITY_PALETTE.length];
           return `<span class="community-pill" style="background:${clr}">${escapeHtml(cl)}</span> · ${n.artist.total_plays || 0} plays`;
