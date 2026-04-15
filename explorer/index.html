@@ -110,10 +110,6 @@
   .sidebar-header .artist-meta {
     font-size: 11px; color: #888; margin-top: 4px; display: block;
   }
-  .community-pill {
-    display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
-    padding: 2px 8px; border-radius: 10px; color: #111; margin-top: 4px;
-  }
   .sidebar-list {
     flex: 1; overflow-y: auto; padding: 0;
   }
@@ -339,13 +335,6 @@
         <span class="slider-label">Hot</span>
       </div>
     </div>
-    <div class="slider-control">
-      <div class="slider-row">
-        <span class="slider-label">Fewer</span>
-        <input type="range" id="neighborhoodCutoff" min="1" max="10" value="3" step="0.5">
-        <span class="slider-label">More</span>
-      </div>
-    </div>
     <input type="hidden" id="colorMode" value="community">
     <input type="hidden" id="sizeMode" value="centrality">
   </div>
@@ -478,41 +467,6 @@ async function api(path, params = {}, signal) {
   return res.json();
 }
 
-// Community metadata cache
-let communityMap = {};
-let totalGraphArtists = 0;
-
-async function fetchCommunities() {
-  const pct = parseFloat(document.getElementById('neighborhoodCutoff').value);
-  const minSize = Math.max(1, Math.round(totalGraphArtists * pct / 100));
-  const data = await api('/graph/communities', { min_size: minSize, limit: 500 });
-  communityMap = {};
-  if (data && data.communities) {
-    if (data.total_artists) totalGraphArtists = data.total_artists;
-    for (const c of data.communities) communityMap[c.id] = c;
-  }
-}
-
-// Bootstrap community data — must complete before any neighborhood loads
-const communitiesReady = api('/graph/communities', { min_size: 1, limit: 500 }).then(async (data) => {
-  if (data) {
-    totalGraphArtists = data.total_artists || 0;
-    for (const c of data.communities) communityMap[c.id] = c;
-    await fetchCommunities();
-  }
-});
-
-document.getElementById('neighborhoodCutoff').addEventListener('change', async () => {
-  await fetchCommunities();
-  nodeGroup.selectAll('circle').attr('fill', d => getColor(d));
-  reloadCenter();
-});
-
-function getCommunityLabel(communityId, affinity) {
-  if (affinity != null && affinity < 0.3) return null;
-  const c = communityMap[communityId];
-  return c ? c.label : null;
-}
 
 const EXCLUDED_ARTISTS = new Set([
   'various', 'various artists', 'v/a', 'va', 'various artist',
@@ -638,16 +592,8 @@ function populateSidebar(centerArtist, neighbors) {
 
   const header = document.querySelector('.sidebar-header');
   header.querySelector('.artist-name').textContent = centerArtist.canonical_name;
-  const metaEl = header.querySelector('.artist-meta');
-  const communityLabel = getCommunityLabel(centerArtist.community_id, centerArtist.community_affinity);
-  if (communityLabel != null && centerArtist.community_id != null) {
-    const color = COMMUNITY_PALETTE[centerArtist.community_id % COMMUNITY_PALETTE.length];
-    metaEl.innerHTML =
-      `<span class="community-pill" style="background:${color}">${communityLabel}</span>` +
-      ` · ${centerArtist.total_plays || 0} plays`;
-  } else {
-    metaEl.textContent = `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
-  }
+  header.querySelector('.artist-meta').textContent =
+    `${centerArtist.genre || 'Unknown genre'} · ${centerArtist.total_plays || 0} plays`;
 
   TransitionPlayer.stop();
 
@@ -737,14 +683,7 @@ function populateSidebar(centerArtist, neighbors) {
         <button class="card-play-btn" title="Play transition">&#9654;</button>
         <span class="weight-badge">${weightDisplay}</span>
       </div>
-      <div class="neighbor-meta">${(() => {
-        const cl = getCommunityLabel(n.artist.community_id, n.artist.community_affinity);
-        if (cl != null && n.artist.community_id != null) {
-          const clr = COMMUNITY_PALETTE[n.artist.community_id % COMMUNITY_PALETTE.length];
-          return `<span class="community-pill" style="background:${clr}">${escapeHtml(cl)}</span> · ${n.artist.total_plays || 0} plays`;
-        }
-        return `${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays`;
-      })()}</div>
+      <div class="neighbor-meta">${escapeHtml(n.artist.genre || 'Unknown')} · ${n.artist.total_plays || 0} plays</div>
       <div class="narrative loading">Loading...</div>
     `;
 
@@ -1294,7 +1233,6 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     month: document.getElementById('monthFilter').value,
     dj: document.getElementById('djFilter').value,
     heat: document.getElementById('minRawCount').value,
-    neighborhoods: document.getElementById('neighborhoodCutoff').value,
   };
   history.pushState({ artistName }, '', buildURL(artistName, controls));
 }
@@ -1565,8 +1503,6 @@ window.addEventListener('popstate', async () => {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
-  document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
-  await fetchCommunities();
 
   updateFacetState();
   if (state.artist != null) {
@@ -1621,8 +1557,6 @@ async function loadFacets() {
   document.getElementById('monthFilter').value = state.month;
   document.getElementById('djFilter').value = state.dj;
   document.getElementById('minRawCount').value = state.heat;
-  document.getElementById('neighborhoodCutoff').value = state.neighborhoods;
-  await communitiesReady;
 
   updateFacetState();
 
