@@ -490,7 +490,7 @@ function nodeRadius(d) {
 }
 
 function linkWidth(weight) {
-  return Math.max(0.5, Math.min(5, Math.abs(weight) * 0.5));
+  return Math.max(1.5, Math.min(8, Math.abs(weight) * 1.5));
 }
 
 // --- Sidebar ---
@@ -1124,8 +1124,8 @@ function clearEdgeHighlight() {
   highlightedSourceId = null;
   highlightedTargetId = null;
   linkGroup.selectAll('line')
-    .attr('stroke', '#333')
-    .attr('stroke-opacity', 0.6)
+    .attr('stroke', '#555')
+    .attr('stroke-opacity', 0.35)
     .attr('stroke-width', d => linkWidth(d.weight));
 }
 
@@ -1271,8 +1271,8 @@ function render() {
   const link = linkGroup.selectAll('line').data(dedupedLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}`);
   link.exit().remove();
   const linkEnter = link.enter().append('line')
-    .attr('stroke', '#333')
-    .attr('stroke-opacity', 0.6)
+    .attr('stroke', '#555')
+    .attr('stroke-opacity', 0.35)
     .attr('stroke-width', d => linkWidth(d.weight));
   const linkMerged = linkEnter.merge(link);
 
