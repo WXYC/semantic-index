@@ -62,6 +62,14 @@ class TestParseArgs:
         args = parse_args(["dump.sql", "--compilation-track-artist-dump", "/tmp/cta_dump.sql"])
         assert args.compilation_track_artist_dump == "/tmp/cta_dump.sql"
 
+    def test_discogs_track_json_default(self):
+        args = parse_args(["dump.sql"])
+        assert args.discogs_track_json is None
+
+    def test_discogs_track_json_flag(self):
+        args = parse_args(["dump.sql", "--discogs-track-json", "/path/to/tracks.json"])
+        assert args.discogs_track_json == "/path/to/tracks.json"
+
     def test_deleted_flags_removed(self):
         """Verify deleted flags no longer exist in the parser."""
         with pytest.raises(SystemExit):

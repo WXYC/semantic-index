@@ -1,7 +1,10 @@
-"""Artist name resolution via library catalog and Discogs.
+"""Artist name resolution via library catalog, compilation track data, and Discogs.
 
 Resolution strategies (in order of precedence):
-0. Compilation track: for VA entries, look up per-track artist in COMPILATION_TRACK_ARTIST index
+0a. Compilation track (CTA): for VA entries, look up per-track artist in tubafrenzy
+    COMPILATION_TRACK_ARTIST index (from SQL dump via --compilation-track-artist-dump)
+0b. Compilation track (Discogs): fallback for VA entries not matched by CTA, using
+    pre-computed track credits from compilation_track_artists.json (via --discogs-track-json)
 1. FK chain: LIBRARY_RELEASE_ID → LIBRARY_RELEASE → LIBRARY_CODE → PRESENTATION_NAME
 2. Name match: exact case-insensitive match against LIBRARY_CODE.PRESENTATION_NAME
 3. Normalized match: strip "The ", "&" → "and", bracket removal, slash/aka alias splitting
@@ -127,6 +130,41 @@ def build_cta_index(rows: list[tuple]) -> dict[tuple[int, str], str]:
     return index
 
 
+def build_discogs_track_index(
+    compilations: list[dict],
+) -> dict[tuple[int, str], str]:
+    """Build a lookup index from pre-computed Discogs compilation track artists.
+
+    Args:
+        compilations: Parsed JSON list from compilation_track_artists.json.
+            Each dict has: comp_id (int, = WXYC library_release_id),
+            tracks (list of {position, title, artists: [str]}).
+
+    Returns:
+        Dict keyed on (library_release_id, normalized_track_title) -> artist_name.
+        Tracks with empty/missing artists or title are skipped. For multi-artist
+        tracks, uses artists[0] (the primary credited artist).
+    """
+    index: dict[tuple[int, str], str] = {}
+    for comp in compilations:
+        comp_id = comp["comp_id"]
+        for track in comp.get("tracks", []):
+            title = track.get("title")
+            if not title:
+                continue
+            artists = track.get("artists")
+            if not artists:
+                continue
+            key = (comp_id, title.strip().lower())
+            index[key] = artists[0]
+    logger.info(
+        "Discogs track index: %d entries from %d compilations",
+        len(index),
+        len(compilations),
+    )
+    return index
+
+
 class ArtistResolver:
     """Resolves flowsheet artist names to canonical catalog names.
 
@@ -134,6 +172,8 @@ class ArtistResolver:
         releases: LIBRARY_RELEASE rows (only id and library_code_id needed).
         codes: LIBRARY_CODE rows (only id, genre_id, and presentation_name needed).
         discogs_client: Optional DiscogsClient for Tier 3 resolution.
+        compilation_track_index: Optional CTA lookup index (from build_cta_index).
+        discogs_track_index: Optional Discogs track lookup index (from build_discogs_track_index).
     """
 
     def __init__(
@@ -142,9 +182,11 @@ class ArtistResolver:
         codes: list[LibraryCode],
         discogs_client: DiscogsClient | None = None,
         compilation_track_index: dict[tuple[int, str], str] | None = None,
+        discogs_track_index: dict[tuple[int, str], str] | None = None,
     ) -> None:
         self._discogs_client = discogs_client
         self._compilation_track_index = compilation_track_index
+        self._discogs_track_index = discogs_track_index
         self._release_to_code: dict[int, int] = {r.id: r.library_code_id for r in releases}
         self._code_to_name: dict[int, str] = {c.id: c.presentation_name for c in codes}
         self._code_to_genre: dict[int, int] = {c.id: c.genre_id for c in codes}
@@ -210,7 +252,7 @@ class ArtistResolver:
         then exact name match, then normalized name match, then fuzzy match,
         then falls back to raw.
         """
-        # Tier 0: Compilation track artist (CTA) lookup
+        # Tier 0a: Compilation track artist (CTA) lookup
         if (
             self._compilation_track_index is not None
             and entry.library_release_id > 0
@@ -224,6 +266,22 @@ class ArtistResolver:
                     entry=entry,
                     canonical_name=canonical,
                     resolution_method="compilation_track",
+                )
+
+        # Tier 0b: Discogs track artist fallback
+        if (
+            self._discogs_track_index is not None
+            and entry.library_release_id > 0
+            and is_compilation_artist(entry.artist_name)
+        ):
+            track_key = (entry.library_release_id, entry.song_title.strip().lower())
+            discogs_artist = self._discogs_track_index.get(track_key)
+            if discogs_artist is not None:
+                canonical = self._canonicalize_name(discogs_artist)
+                return ResolvedEntry(
+                    entry=entry,
+                    canonical_name=canonical,
+                    resolution_method="compilation_track_discogs",
                 )
 
         # Strategy 1: FK chain (LIBRARY_RELEASE_ID → LIBRARY_CODE → PRESENTATION_NAME)
