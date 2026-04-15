@@ -10,6 +10,7 @@ from semantic_index.artist_resolver import (
     FUZZY_RELAXED_MIN_PLAYS,
     ArtistResolver,
     build_cta_index,
+    build_discogs_track_index,
 )
 from semantic_index.models import DiscogsSearchResult, ResolvedEntry
 from tests.conftest import make_flowsheet_entry, make_library_code, make_library_release
@@ -576,11 +577,14 @@ class TestBuildCtaIndex:
 class TestCompilationTrackResolution:
     """Tests for Tier 0: compilation track artist resolution (CTA + Discogs)."""
 
-    def _make_resolver(self, releases=None, codes=None, compilation_track_index=None):
+    def _make_resolver(
+        self, releases=None, codes=None, compilation_track_index=None, discogs_track_index=None
+    ):
         return ArtistResolver(
             releases=releases or [],
             codes=codes or [],
             compilation_track_index=compilation_track_index,
+            discogs_track_index=discogs_track_index,
         )
 
     def test_va_entry_resolves_via_cta(self):
@@ -722,3 +726,181 @@ class TestCompilationTrackResolution:
 
         assert resolved.canonical_name == "duke ellington & john coltrane"
         assert resolved.resolution_method == "compilation_track"
+
+    # --- Tier 0b: Discogs track artist fallback ---
+
+    def test_va_falls_through_cta_to_discogs(self):
+        """VA entry with no CTA match falls through to Discogs tier."""
+        cta_index = {}  # empty CTA
+        discogs_index = {(100, "the lost planet"): "Planisphere"}
+        resolver = self._make_resolver(
+            compilation_track_index=cta_index, discogs_track_index=discogs_index
+        )
+
+        entry = make_flowsheet_entry(
+            library_release_id=100,
+            artist_name="Various Artists",
+            song_title="The Lost Planet",
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "planisphere"
+        assert resolved.resolution_method == "compilation_track_discogs"
+
+    def test_discogs_tier_skipped_when_no_index(self):
+        """When no Discogs track index is provided, Discogs tier is a no-op."""
+        resolver = self._make_resolver(compilation_track_index={})
+
+        entry = make_flowsheet_entry(
+            library_release_id=100,
+            artist_name="Various Artists",
+            song_title="Track",
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "raw"
+
+    def test_discogs_name_canonicalized(self):
+        """Discogs artist name is canonicalized through the catalog."""
+        code = make_library_code(id=300, presentation_name="Planisphere")
+        discogs_index = {(100, "the lost planet"): "planisphere"}
+        resolver = self._make_resolver(codes=[code], discogs_track_index=discogs_index)
+
+        entry = make_flowsheet_entry(
+            library_release_id=100,
+            artist_name="Various Artists",
+            song_title="The Lost Planet",
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "Planisphere"
+        assert resolved.resolution_method == "compilation_track_discogs"
+
+    def test_cta_takes_precedence_over_discogs(self):
+        """When both CTA and Discogs have a match, CTA wins."""
+        cta_index = {(100, "track"): "CTA Artist"}
+        discogs_index = {(100, "track"): "Discogs Artist"}
+        resolver = self._make_resolver(
+            compilation_track_index=cta_index, discogs_track_index=discogs_index
+        )
+
+        entry = make_flowsheet_entry(
+            library_release_id=100,
+            artist_name="Various Artists",
+            song_title="Track",
+        )
+        resolved = resolver.resolve(entry)
+
+        assert resolved.canonical_name == "cta artist"
+        assert resolved.resolution_method == "compilation_track"
+
+
+class TestBuildDiscogsTrackIndex:
+    """Tests for build_discogs_track_index() — builds index from compilation_track_artists.json."""
+
+    def test_basic_index_building(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "discogs_release_id": 204068,
+                "tracks": [
+                    {"position": "1-01", "title": "The Lost Planet", "artists": ["Planisphere"]},
+                ],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert index == {(935, "the lost planet"): "Planisphere"}
+
+    def test_multi_artist_uses_first(self):
+        """When a track has multiple credited artists, use artists[0]."""
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [
+                    {
+                        "position": "1-03",
+                        "title": "Standing",
+                        "artists": ["Silvio Ecomo", "Jamie Anderson"],
+                    },
+                ],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert index[(935, "standing")] == "Silvio Ecomo"
+
+    def test_empty_artists_skipped(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [{"position": "1", "title": "Track", "artists": []}],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert len(index) == 0
+
+    def test_missing_artists_key_skipped(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [{"position": "1", "title": "Track"}],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert len(index) == 0
+
+    def test_none_artists_skipped(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [{"position": "1", "title": "Track", "artists": None}],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert len(index) == 0
+
+    def test_missing_title_skipped(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [{"position": "1", "artists": ["Planisphere"]}],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert len(index) == 0
+
+    def test_empty_title_skipped(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [{"position": "1", "title": "", "artists": ["Planisphere"]}],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert len(index) == 0
+
+    def test_case_insensitive_track_title(self):
+        compilations = [
+            {
+                "comp_id": 935,
+                "tracks": [
+                    {"position": "1", "title": "THE LOST PLANET", "artists": ["Planisphere"]},
+                ],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert (935, "the lost planet") in index
+
+    def test_keyed_on_comp_id_not_discogs_release_id(self):
+        """Index keys use comp_id (= library_release_id), not discogs_release_id."""
+        compilations = [
+            {
+                "comp_id": 935,
+                "discogs_release_id": 204068,
+                "tracks": [
+                    {"position": "1", "title": "Track", "artists": ["Artist"]},
+                ],
+            }
+        ]
+        index = build_discogs_track_index(compilations)
+        assert (935, "track") in index
+        assert (204068, "track") not in index

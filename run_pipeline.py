@@ -15,7 +15,11 @@ import time
 from pathlib import Path
 
 from semantic_index.adjacency import extract_adjacency_pairs
-from semantic_index.artist_resolver import ArtistResolver, build_cta_index
+from semantic_index.artist_resolver import (
+    ArtistResolver,
+    build_cta_index,
+    build_discogs_track_index,
+)
 from semantic_index.cross_reference import CrossReferenceExtractor
 from semantic_index.discogs_client import DiscogsClient
 from semantic_index.discogs_edges import (
@@ -180,6 +184,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to a SQL dump file containing the COMPILATION_TRACK_ARTIST table. "
         "When provided, VA entries are resolved to per-track artists before the FK chain.",
+    )
+    parser.add_argument(
+        "--discogs-track-json",
+        default=None,
+        help="Path to compilation_track_artists.json (from LML match_compilations.py) "
+        "for resolving VA compilation entries via Discogs track credits.",
     )
     return parser.parse_args(argv)
 
@@ -357,7 +367,25 @@ def run(args: argparse.Namespace) -> None:
                 cta_index = build_cta_index(cta_rows)
                 log.info("  %d track-artist entries indexed", len(cta_index))
 
-        resolver = ArtistResolver(releases=releases, codes=codes, compilation_track_index=cta_index)
+        discogs_track_index = None
+        if args.discogs_track_json:
+            import json as _json
+
+            discogs_json_path = args.discogs_track_json
+            if not Path(discogs_json_path).exists():
+                log.warning("Discogs track JSON not found: %s — skipping", discogs_json_path)
+            else:
+                log.info("Loading Discogs track artists from %s...", discogs_json_path)
+                with open(discogs_json_path) as f:
+                    compilations = _json.load(f)
+                discogs_track_index = build_discogs_track_index(compilations)
+
+        resolver = ArtistResolver(
+            releases=releases,
+            codes=codes,
+            compilation_track_index=cta_index,
+            discogs_track_index=discogs_track_index,
+        )
 
         # 5. Stream flowsheet entries and resolve
         log.info("Parsing FLOWSHEET_ENTRY_PROD and resolving artists...")
