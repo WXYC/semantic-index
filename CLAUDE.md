@@ -351,6 +351,20 @@ Configuration via environment variables:
 - `ANTHROPIC_API_KEY` — Anthropic API key for narrative generation (optional; narrative endpoint returns 501 when not set)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify API credentials for preview URL lookups (optional; Spotify tier in the preview fallback chain is skipped when not set)
 
+### Railway cron service (nightly sync)
+
+A separate Railway cron service in the same project runs the nightly sync on a schedule. It shares the `/data` volume with the API service so the atomic swap updates the database the API reads from.
+
+**Setup (Railway dashboard):**
+1. Create a new service in the project, type "Cron Job"
+2. Source: same repo, same branch
+3. Override start command: `./scripts/cron_sync.sh`
+4. Schedule: `0 9 * * *` (daily at 9:00 UTC / 5:00 AM ET)
+5. Mount the same `/data` volume as the API service
+6. Set env vars: `DATABASE_URL_BACKEND` (Backend-Service PG DSN), `DB_PATH=/data/wxyc_artist_graph.db`
+
+The cron entrypoint (`scripts/cron_sync.sh`) calls `python -m semantic_index.nightly_sync` which queries PG, recomputes the graph, and atomically swaps the database. Runtime is ~5 minutes.
+
 ## Data
 
 The pipeline parses tubafrenzy MySQL dump files directly (no database required). Production dumps are not committed to git — pass the path as a CLI argument. The fixture dump at `tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql` has minimal data suitable for structural testing only. The `data/` directory contains a committed copy of the latest pipeline output for deployment.

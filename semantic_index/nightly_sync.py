@@ -205,23 +205,31 @@ def nightly_sync(args: argparse.Namespace) -> None:
         resolver = ArtistResolver(releases=releases, codes=codes)
 
         resolved_entries = []
-        catalog_resolved = 0
+        method_counts: dict[str, int] = {}
         for entry in entries:
             resolved = resolver.resolve(entry)
-            if resolved.resolution_method == "catalog":
-                catalog_resolved += 1
+            method_counts[resolved.resolution_method] = (
+                method_counts.get(resolved.resolution_method, 0) + 1
+            )
             resolved_entries.append(resolved)
 
-        pct = (catalog_resolved / len(entries) * 100) if entries else 0
-        logger.info(
-            "  %d entries resolved (%d catalog = %.1f%%)",
-            len(resolved_entries),
-            catalog_resolved,
-            pct,
-        )
+        n = len(entries)
+        for method, count in sorted(method_counts.items(), key=lambda x: -x[1]):
+            logger.info("  %-25s %8d  (%.1f%%)", method, count, count / n * 100)
 
         logger.info("Re-resolving raw entries with play-count-weighted fuzzy matching...")
         resolved_entries = resolver.re_resolve_with_play_counts(resolved_entries)
+
+        # Log post-re-resolve breakdown
+        post_counts: dict[str, int] = {}
+        for r in resolved_entries:
+            post_counts[r.resolution_method] = post_counts.get(r.resolution_method, 0) + 1
+        raw_pct = post_counts.get("raw", 0) / n * 100 if n else 0
+        logger.info(
+            "  After re-resolve: %d raw (%.1f%%)",
+            post_counts.get("raw", 0),
+            raw_pct,
+        )
 
         # --- Step 4: Adjacency + PMI ---
         logger.info("Extracting adjacency pairs...")
