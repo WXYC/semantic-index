@@ -92,6 +92,7 @@
 
   svg { cursor: grab; }
   svg:active { cursor: grabbing; }
+  #graph-container { position: relative; }
 
   /* Sidebar */
   #sidebar {
@@ -222,7 +223,7 @@
     body { overflow: auto; }
 
     #controls {
-      position: sticky; top: 0; right: 0;
+      position: relative; right: auto;
       flex-wrap: wrap; padding: 8px 12px; gap: 8px;
     }
     #controls input[type="text"] { width: 140px; font-size: 12px; }
@@ -231,13 +232,19 @@
     .controls-collapsible.open { display: contents; }
     #status { display: none; }
 
+    #graph-container { height: 50vh; overflow: hidden; }
+
     #sidebar {
       position: static; width: 100%; height: auto;
       border-left: none; border-top: 1px solid #333;
     }
+    .sidebar-header {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(15,15,15,0.97);
+    }
     .sidebar-list { overflow-y: visible; }
 
-    svg#graph { width: 100% !important; height: 50vh !important; display: block; }
+    svg#graph { width: 100% !important; height: 100% !important; display: block; }
   }
   .external-links a:hover { border-color: #6a9fb5; }
 
@@ -348,6 +355,10 @@
   <div class="meta"></div>
 </div>
 
+<div id="graph-container">
+  <svg id="graph"></svg>
+</div>
+
 <div id="sidebar">
   <div class="sidebar-header">
     <span class="artist-name">Select an artist</span>
@@ -376,8 +387,6 @@
     <p style="margin-top:24px;font-size:11px;color:#666;"><a href="https://wxyc.org">WXYC 89.3 FM</a> &middot; Chapel Hill, NC &middot; Student-run freeform radio since 1977</p>
   </div>
 </div>
-
-<svg id="graph"></svg>
 
 <script type="module">
 import { parseURL, buildURL, DEFAULTS } from './url-state.js';
@@ -1544,6 +1553,18 @@ async function loadFacets() {
     opt.textContent = dj.display_name;
     djSelect.appendChild(opt);
   }
+}
+
+// Mobile parallax effect on the graph
+if (isMobile) {
+  const graphContainer = document.getElementById('graph-container');
+  const graphSvg = document.getElementById('graph');
+  window.addEventListener('scroll', () => {
+    const rect = graphContainer.getBoundingClientRect();
+    if (rect.bottom > 0) {
+      graphSvg.style.transform = `translateY(${window.scrollY * 0.4}px)`;
+    }
+  }, { passive: true });
 }
 
 // Initialize from URL or random artist
