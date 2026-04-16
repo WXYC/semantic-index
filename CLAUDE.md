@@ -7,12 +7,12 @@ Builds a semantic artist graph from WXYC DJ transition data. DJs curate transiti
 A batch pipeline that parses a tubafrenzy MySQL dump, resolves artist names via catalog and Discogs, extracts adjacency pairs and cross-reference edges, computes PMI, enriches artists with Discogs metadata, computes Discogs-derived edges, and exports a GEXF graph and SQLite database.
 
 ```
-SQL dump → sql_parser → artist_resolver → adjacency → pmi ──────────────→ graph_export → GEXF
-                       → cross_reference ────────────────────────────────→ sqlite_export → SQLite
-                       → node_attributes ────────────────────────────────→
-         → discogs_client → discogs_enrichment → discogs_edges ─────────→
-         → wikidata_client → wikidata_influence ────────────────────────→
-         → musicbrainz_client → acousticbrainz (feature loader) ───────→ audio_profile + acoustic_similarity
+SQL dump → sql_parser ──→ artist_resolver → adjacency → pmi ────────────→ graph_export → GEXF
+Backend PG → pg_source ─┘ → cross_reference ────────────────────────────→ sqlite_export → SQLite
+                           → node_attributes ───────────────────────────→
+            → discogs_client → discogs_enrichment → discogs_edges ──────→
+            → wikidata_client → wikidata_influence ─────────────────────→
+            → musicbrainz_client → acousticbrainz (feature loader) ────→ audio_profile + acoustic_similarity
 
 SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
@@ -49,7 +49,10 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata, discovery (underplayed sonic fits). |
 | `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
 | `semantic_index/api/preview.py` | Audio preview URL endpoint with multi-source fallback (iTunes lookup, Spotify, Bandcamp, Deezer, iTunes search). Caches results in a sidecar SQLite database. Powers the in-card transition player in the graph explorer. |
-| `run_pipeline.py` | CLI entry point wiring the pipeline. |
+| `semantic_index/pg_source.py` | Query Backend-Service PostgreSQL (`wxyc_schema.*`) for pipeline input data. Returns the same types as `sql_parser.py` (FlowsheetEntry, LibraryCode, LibraryRelease). Used by the nightly sync instead of SQL dump parsing. |
+| `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
+| `run_pipeline.py` | CLI entry point wiring the full pipeline (SQL dump mode). |
+| `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
 
@@ -274,6 +277,32 @@ python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --discogs-
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--db-path` with reconciled Wikidata QIDs.
 - `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--db-path` and enrichment data.
 - `--discogs-track-json PATH` — Path to `compilation_track_artists.json` (from LML `match_compilations.py`). Provides a Discogs-derived fallback (Tier 0b) for VA entries not matched by the CTA table. JSON format: `[{comp_id, discogs_release_id, tracks: [{position, title, artists: [str]}]}]` where `comp_id` = WXYC `LIBRARY_RELEASE_ID`.
+
+### Nightly sync mode
+
+The nightly sync queries Backend-Service PostgreSQL directly instead of parsing a SQL dump. It recomputes the core graph (resolution, PMI, stats, facets, graph metrics) while preserving enrichment data (Discogs, Wikidata, AcousticBrainz) from the existing production database via an atomic copy-and-swap.
+
+```bash
+python scripts/nightly_sync.py --dsn postgresql://... --db-path data/wxyc_artist_graph.db
+```
+
+Or via environment variables (for Railway cron):
+
+```bash
+DATABASE_URL_BACKEND=postgresql://... DB_PATH=data/wxyc_artist_graph.db python scripts/nightly_sync.py
+```
+
+- `--dsn` / `DATABASE_URL_BACKEND` — PostgreSQL DSN for Backend-Service (required).
+- `--db-path` / `DB_PATH` — Production SQLite database path (default: `data/wxyc_artist_graph.db`).
+- `--min-count` / `MIN_COUNT` — Minimum co-occurrence count for DJ transition edges (default: 2).
+- `--dry-run` — Run the full pipeline but skip the atomic swap (writes to a temp file instead).
+- `--verbose` — Enable debug logging.
+
+**PG schema mappings (`wxyc_schema.*` → pipeline types):**
+- `artists` → `LibraryCode` (id, genre_id from `genre_artist_crossreference`, artist_name → presentation_name)
+- `library` → `LibraryRelease` (id, artist_id → library_code_id)
+- `flowsheet` → `FlowsheetEntry` (filtered to `entry_type = 'track'`, `add_time` → epoch, `request_flag` boolean → int)
+- `shows` → show-to-DJ mapping (keyed by `shows.id`, `primary_dj_id` as value)
 
 ## Graph API
 
