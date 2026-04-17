@@ -15,7 +15,14 @@ from semantic_index.api.config import Settings
 logging.basicConfig(level=logging.INFO)
 
 settings = Settings()
-app = create_app(settings.db_path, anthropic_api_key=settings.anthropic_api_key)
+app = create_app(
+    settings.db_path,
+    anthropic_api_key=settings.anthropic_api_key,
+    sync_enabled=settings.sync_enabled,
+    sync_hour_utc=settings.sync_hour_utc,
+    sync_dsn=settings.database_url_backend,
+    sync_min_count=settings.sync_min_count,
+)
 
 
 def find_available_port(host: str, start: int) -> int:

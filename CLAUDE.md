@@ -350,20 +350,22 @@ Configuration via environment variables:
 - `PORT` — port (default: `8000`, set automatically by Railway)
 - `ANTHROPIC_API_KEY` — Anthropic API key for narrative generation (optional; narrative endpoint returns 501 when not set)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify API credentials for preview URL lookups (optional; Spotify tier in the preview fallback chain is skipped when not set)
+- `SYNC_ENABLED` — enable the in-process nightly sync scheduler (default: `false`)
+- `SYNC_HOUR_UTC` — hour (UTC) to run the daily sync (default: `9`)
+- `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN for nightly sync (required when `SYNC_ENABLED=true`)
 
-### Railway cron service (nightly sync)
+### Nightly sync scheduler (in-process)
 
-A separate Railway cron service in the same project runs the nightly sync on a schedule. It shares the `/data` volume with the API service so the atomic swap updates the database the API reads from.
+The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars on the Railway API service:
 
-**Setup (Railway dashboard):**
-1. Create a new service in the project, type "Cron Job"
-2. Source: same repo, same branch
-3. Override start command: `./scripts/cron_sync.sh`
-4. Schedule: `0 9 * * *` (daily at 9:00 UTC / 5:00 AM ET)
-5. Mount the same `/data` volume as the API service
-6. Set env vars: `DATABASE_URL_BACKEND` (Backend-Service PG DSN), `DB_PATH=/data/wxyc_artist_graph.db`
+- `SYNC_ENABLED=true` — enable the scheduler (default: false)
+- `SYNC_HOUR_UTC=9` — hour to run daily sync (default: 9 = 5:00 AM ET)
+- `DATABASE_URL_BACKEND=postgresql://...` — Backend-Service PG DSN (required when sync enabled)
+- `SYNC_MIN_COUNT=2` — minimum co-occurrence count for DJ transition edges
 
-The cron entrypoint (`scripts/cron_sync.sh`) calls `python -m semantic_index.nightly_sync` which queries PG, recomputes the graph, and atomically swaps the database. Runtime is ~5 minutes.
+The scheduler sleeps until the configured hour, runs the full pipeline (PG → resolve → PMI → export → facets → graph metrics), atomically swaps the database, then sleeps until the next day. The API continues serving requests during the rebuild. Runtime is ~5 minutes.
+
+The sync can also be run manually via CLI: `python scripts/nightly_sync.py --dsn postgresql://... --verbose`
 
 ## Data
 
