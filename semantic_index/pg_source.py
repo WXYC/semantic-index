@@ -65,7 +65,7 @@ ORDER BY show_id, play_order
 """
 
 _SHOWS_SQL = """\
-SELECT id, primary_dj_id, legacy_show_id
+SELECT id, primary_dj_id, legacy_dj_name, legacy_show_id
 FROM wxyc_schema.shows
 ORDER BY id
 """
@@ -192,8 +192,8 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
 def load_shows(conn: Any) -> tuple[dict[int, int | str], dict[int, str]]:
     """Load show → DJ mapping from PG.
 
-    Queries ``wxyc_schema.shows`` for ``primary_dj_id``. Shows where
-    ``primary_dj_id`` is NULL are skipped.
+    Queries ``wxyc_schema.shows`` for ``primary_dj_id`` (auth user FK) with
+    ``legacy_dj_name`` as a fallback for shows imported from tubafrenzy.
 
     Args:
         conn: psycopg connection (dict_row factory).
@@ -201,7 +201,7 @@ def load_shows(conn: Any) -> tuple[dict[int, int | str], dict[int, str]]:
     Returns:
         Tuple of (show_to_dj, show_dj_names).
         ``show_to_dj`` maps show ID to DJ identifier (string or int).
-        ``show_dj_names`` maps show ID to display name (currently same as DJ ID).
+        ``show_dj_names`` maps show ID to display name.
     """
     rows = conn.execute(_SHOWS_SQL).fetchall()
     show_to_dj: dict[int, int | str] = {}
@@ -209,10 +209,15 @@ def load_shows(conn: Any) -> tuple[dict[int, int | str], dict[int, str]]:
 
     for row in rows:
         dj_id = row["primary_dj_id"]
+        legacy_name = row.get("legacy_dj_name")
         if dj_id is not None:
             show_id = row["id"]
             show_to_dj[show_id] = dj_id
             show_dj_names[show_id] = str(dj_id)
+        elif legacy_name:
+            show_id = row["id"]
+            show_to_dj[show_id] = legacy_name
+            show_dj_names[show_id] = legacy_name
 
     logger.info("Loaded %d shows, %d with DJ mapping", len(rows), len(show_to_dj))
     return show_to_dj, show_dj_names
