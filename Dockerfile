@@ -35,4 +35,6 @@ COPY start.sh .
 
 ENV DB_PATH=/data/wxyc_artist_graph.db
 
+EXPOSE 8083
+
 CMD ["./start.sh"]

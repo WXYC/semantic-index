@@ -338,25 +338,42 @@ app = create_app("data/wxyc_artist_graph.db")
 
 ### Deployment
 
-Deployed on Railway via Dockerfile. The `data/wxyc_artist_graph.db` file is the committed, deployment-ready copy of the pipeline output. After re-running the pipeline, copy the new database from `output/` to `data/` and commit:
+Deployed on EC2 (us-east-1) as a Docker container alongside Backend-Service. The container runs on port 8083, with nginx reverse proxy and Let's Encrypt TLS for `explore.wxyc.org`.
+
+**GitHub Actions** (`.github/workflows/deploy.yml`) auto-deploys on push to main: builds a Docker image, pushes to ECR, SSHs to EC2 to pull and restart the container. Manual deploys via `workflow_dispatch`.
+
+**EC2 container setup:**
 
 ```bash
-cp output/wxyc_artist_graph.db data/wxyc_artist_graph.db
+docker run -d \
+  --name semantic-index \
+  -p 8083:8083 \
+  -v /home/ec2-user/semantic-index-data:/data \
+  --restart unless-stopped \
+  --env-file .env.semantic-index \
+  $ECR_URI/semantic-index:$TAG
 ```
 
-Configuration via environment variables:
-- `DB_PATH` — path to SQLite database (default: `data/wxyc_artist_graph.db`)
+The SQLite database and sidecar caches live in the bind-mounted `/data` directory and persist across deploys.
+
+**Configuration** via environment variables (`.env.semantic-index` on EC2):
+- `DB_PATH` — path to SQLite database (default: `/data/wxyc_artist_graph.db`)
 - `HOST` — bind address (default: `0.0.0.0`)
-- `PORT` — port (default: `8000`, set automatically by Railway)
+- `PORT` — port (default: `8083`)
 - `ANTHROPIC_API_KEY` — Anthropic API key for narrative generation (optional; narrative endpoint returns 501 when not set)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify API credentials for preview URL lookups (optional; Spotify tier in the preview fallback chain is skipped when not set)
 - `SYNC_ENABLED` — enable the in-process nightly sync scheduler (default: `false`)
-- `SYNC_HOUR_UTC` — hour (UTC) to run the daily sync (default: `9`)
-- `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN for nightly sync (required when `SYNC_ENABLED=true`)
+- `SYNC_HOUR_UTC` — hour (UTC) to run the daily sync (default: `9`, i.e. 5:00 AM ET)
+- `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN for nightly sync (required when `SYNC_ENABLED=true`; uses the RDS private endpoint since EC2 and RDS share a VPC)
+- `SYNC_MIN_COUNT` — minimum co-occurrence count for DJ transition edges (default: `2`)
+
+**GitHub Actions secrets** (shared with Backend-Service, same GitHub org):
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ECR_URI`
+- `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
 
 ### Nightly sync scheduler (in-process)
 
-The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars on the Railway API service:
+The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars in `.env.semantic-index`:
 
 - `SYNC_ENABLED=true` — enable the scheduler (default: false)
 - `SYNC_HOUR_UTC=9` — hour to run daily sync (default: 9 = 5:00 AM ET)
