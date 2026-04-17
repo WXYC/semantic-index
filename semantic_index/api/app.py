@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -15,18 +16,32 @@ from semantic_index.api.narrative import narrative_router
 from semantic_index.api.preview import preview_router
 from semantic_index.api.routes import router
 
+logger = logging.getLogger(__name__)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 EXPLORER_DIR = PROJECT_ROOT / "explorer"
 EXPLORER_HTML = EXPLORER_DIR / "index.html"
 
 
-def create_app(db_path: str, anthropic_api_key: str | None = None) -> FastAPI:
+def create_app(
+    db_path: str,
+    anthropic_api_key: str | None = None,
+    *,
+    sync_enabled: bool = False,
+    sync_hour_utc: int = 9,
+    sync_dsn: str | None = None,
+    sync_min_count: int = 2,
+) -> FastAPI:
     """Create a FastAPI application wired to the given SQLite database.
 
     Args:
         db_path: Path to the SQLite graph database produced by the pipeline.
         anthropic_api_key: Anthropic API key for narrative generation. When None,
             the narrative endpoint returns 501.
+        sync_enabled: Start the nightly sync scheduler on startup.
+        sync_hour_utc: Hour (UTC) to run the daily sync.
+        sync_dsn: PostgreSQL DSN for Backend-Service (required when sync_enabled).
+        sync_min_count: Minimum co-occurrence count for DJ transition edges.
     """
     app = FastAPI(title="WXYC Semantic Graph API", version="0.1.0")
     app.add_middleware(
@@ -63,5 +78,19 @@ def create_app(db_path: str, anthropic_api_key: str | None = None) -> FastAPI:
         return FileResponse(EXPLORER_HTML, media_type="text/html")
 
     app.mount("/", StaticFiles(directory=str(EXPLORER_DIR)), name="explorer")
+
+    # Start nightly sync scheduler if enabled
+    if sync_enabled:
+        if not sync_dsn:
+            logger.error("SYNC_ENABLED=true but DATABASE_URL_BACKEND not set — skipping scheduler")
+        else:
+            from semantic_index.api.sync_scheduler import start_scheduler
+
+            start_scheduler(
+                db_path=db_path,
+                dsn=sync_dsn,
+                min_count=sync_min_count,
+                hour_utc=sync_hour_utc,
+            )
 
     return app

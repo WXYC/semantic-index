@@ -18,3 +18,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     anthropic_api_key: str | None = None
+
+    # Nightly sync scheduler
+    sync_enabled: bool = False
+    sync_hour_utc: int = 9  # 9:00 UTC = 5:00 AM ET
+    database_url_backend: str | None = None
+    sync_min_count: int = 2
