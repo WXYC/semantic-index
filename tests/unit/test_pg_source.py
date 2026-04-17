@@ -379,8 +379,18 @@ class TestLoadShows:
         conn = _mock_conn_with_queries(
             {
                 "shows": [
-                    {"id": 3210, "primary_dj_id": "dj_42", "legacy_show_id": 121},
-                    {"id": 3211, "primary_dj_id": None, "legacy_show_id": 124},
+                    {
+                        "id": 3210,
+                        "primary_dj_id": "dj_42",
+                        "legacy_dj_name": None,
+                        "legacy_show_id": 121,
+                    },
+                    {
+                        "id": 3211,
+                        "primary_dj_id": None,
+                        "legacy_dj_name": None,
+                        "legacy_show_id": 124,
+                    },
                 ],
                 "djs": [],
             }
@@ -390,6 +400,36 @@ class TestLoadShows:
 
         assert show_to_dj[3210] == "dj_42"
         assert 3211 not in show_to_dj
+
+    def test_legacy_dj_name_fallback(self):
+        """When primary_dj_id is NULL, fall back to legacy_dj_name."""
+        from semantic_index.pg_source import load_shows
+
+        conn = _mock_conn_with_queries(
+            {
+                "shows": [
+                    {
+                        "id": 100,
+                        "primary_dj_id": None,
+                        "legacy_dj_name": "Ellie Blake",
+                        "legacy_show_id": 1,
+                    },
+                    {
+                        "id": 200,
+                        "primary_dj_id": "auth_uuid",
+                        "legacy_dj_name": "Old Name",
+                        "legacy_show_id": 2,
+                    },
+                ],
+                "djs": [],
+            }
+        )
+
+        show_to_dj, show_dj_names = load_shows(conn)
+
+        assert show_to_dj[100] == "Ellie Blake"
+        assert show_dj_names[100] == "Ellie Blake"
+        assert show_to_dj[200] == "auth_uuid"
 
     def test_empty_shows_returns_empty_dicts(self):
         from semantic_index.pg_source import load_shows
@@ -401,14 +441,14 @@ class TestLoadShows:
         assert show_to_dj == {}
         assert show_dj_names == {}
 
-    def test_all_null_dj_ids_returns_empty(self):
+    def test_all_null_dj_ids_and_names_returns_empty(self):
         from semantic_index.pg_source import load_shows
 
         conn = _mock_conn_with_queries(
             {
                 "shows": [
-                    {"id": 100, "primary_dj_id": None, "legacy_show_id": 1},
-                    {"id": 200, "primary_dj_id": None, "legacy_show_id": 2},
+                    {"id": 100, "primary_dj_id": None, "legacy_dj_name": None, "legacy_show_id": 1},
+                    {"id": 200, "primary_dj_id": None, "legacy_dj_name": None, "legacy_show_id": 2},
                 ],
                 "djs": [],
             }
