@@ -72,6 +72,8 @@ _COLUMNS = [
 ]
 
 _BATCH_SIZE = 1_000
+_NAS_POLL_INTERVAL = 10  # seconds between NAS reconnection checks
+_NAS_MAX_RETRIES = 3  # max retries per tar before marking failed
 
 
 def parse_recording_json(mbid: str, data: dict, tar_name: str) -> dict:
@@ -144,6 +146,14 @@ def parse_recording_json(mbid: str, data: dict, tar_name: str) -> dict:
         "metadata_tags": json.dumps(tags) if tags else None,
         "tar_file": tar_name,
     }
+
+
+def _wait_for_nas(tar_dir: str) -> None:
+    """Block until the NAS volume is reachable again."""
+    while not Path(tar_dir).exists():
+        logger.warning("NAS unreachable (%s), waiting %ds...", tar_dir, _NAS_POLL_INTERVAL)
+        time.sleep(_NAS_POLL_INTERVAL)
+    logger.info("NAS reconnected (%s)", tar_dir)
 
 
 def process_tar(tar_path: str) -> list[dict]:
@@ -264,6 +274,8 @@ def import_tar(dsn: str, tar_path: str, checkpoint_path: str) -> int:
 
     Reads all JSON files from the tar, then bulk inserts in batches.
     Commits per batch so partial progress is retained on failure.
+    Retries up to _NAS_MAX_RETRIES times on NAS read errors, waiting
+    for the volume to come back between attempts.
 
     Args:
         dsn: PostgreSQL connection string.
@@ -274,15 +286,22 @@ def import_tar(dsn: str, tar_path: str, checkpoint_path: str) -> int:
         Number of rows inserted.
     """
     tar_name = Path(tar_path).name
-    logger.info("Processing %s...", tar_name)
-    t0 = time.time()
+    tar_dir = str(Path(tar_path).parent)
 
-    try:
-        rows = process_tar(tar_path)
-    except (tarfile.TarError, OSError) as e:
-        logger.error("Failed to read %s: %s", tar_name, e)
-        mark_tar_failed(checkpoint_path, tar_name, str(e))
-        return 0
+    for attempt in range(_NAS_MAX_RETRIES):
+        logger.info("Processing %s... (attempt %d/%d)", tar_name, attempt + 1, _NAS_MAX_RETRIES)
+        t0 = time.time()
+
+        try:
+            rows = process_tar(tar_path)
+            break
+        except (tarfile.TarError, OSError) as e:
+            logger.error("Failed to read %s: %s", tar_name, e)
+            if attempt + 1 < _NAS_MAX_RETRIES:
+                _wait_for_nas(tar_dir)
+            else:
+                mark_tar_failed(checkpoint_path, tar_name, str(e))
+                return 0
 
     logger.info("  %d recordings parsed from %s (%.1fs)", len(rows), tar_name, time.time() - t0)
 
