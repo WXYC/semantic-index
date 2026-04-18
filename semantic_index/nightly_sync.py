@@ -54,6 +54,14 @@ def _validate_sqlite(path: Path) -> bool:
         return False
 
 
+def _clean_stale_temp_files(production_path: Path) -> None:
+    """Remove orphaned temp files from previous interrupted runs."""
+    for stale in production_path.parent.glob(f"{production_path.stem}.tmp.*.db"):
+        size_mb = stale.stat().st_size / (1024 * 1024)
+        logger.warning("Removing stale temp file: %s (%.1f MB)", stale.name, size_mb)
+        stale.unlink()
+
+
 def _prepare_working_db(production_path: Path) -> Path:
     """Create a working copy of the production database.
 
@@ -64,6 +72,8 @@ def _prepare_working_db(production_path: Path) -> Path:
     Returns:
         Path to the temp file.
     """
+    _clean_stale_temp_files(production_path)
+
     temp_path = production_path.with_suffix(f".tmp.{os.getpid()}.db")
 
     if _validate_sqlite(production_path):

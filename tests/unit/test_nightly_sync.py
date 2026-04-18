@@ -119,6 +119,56 @@ class TestValidateSqlite:
 
 
 # ===========================================================================
+# _clean_stale_temp_files
+# ===========================================================================
+
+
+class TestCleanStaleTempFiles:
+    def test_removes_orphaned_temp_files(self, tmp_path):
+        from semantic_index.nightly_sync import _clean_stale_temp_files
+
+        prod = tmp_path / "wxyc_artist_graph.db"
+        _create_test_db(prod)
+
+        stale1 = tmp_path / "wxyc_artist_graph.tmp.1234.db"
+        stale2 = tmp_path / "wxyc_artist_graph.tmp.5678.db"
+        stale1.write_bytes(b"stale")
+        stale2.write_bytes(b"stale")
+
+        _clean_stale_temp_files(prod)
+
+        assert not stale1.exists()
+        assert not stale2.exists()
+        assert prod.exists()
+
+    def test_no_op_when_no_temp_files(self, tmp_path):
+        from semantic_index.nightly_sync import _clean_stale_temp_files
+
+        prod = tmp_path / "wxyc_artist_graph.db"
+        _create_test_db(prod)
+
+        _clean_stale_temp_files(prod)
+
+        assert prod.exists()
+
+    def test_does_not_remove_unrelated_files(self, tmp_path):
+        from semantic_index.nightly_sync import _clean_stale_temp_files
+
+        prod = tmp_path / "wxyc_artist_graph.db"
+        _create_test_db(prod)
+
+        cache = tmp_path / "wxyc_artist_graph.db.bio-cache.db"
+        bak = tmp_path / "wxyc_artist_graph.db.bak"
+        cache.write_bytes(b"cache")
+        bak.write_bytes(b"backup")
+
+        _clean_stale_temp_files(prod)
+
+        assert cache.exists()
+        assert bak.exists()
+
+
+# ===========================================================================
 # _prepare_working_db
 # ===========================================================================
 
@@ -159,6 +209,21 @@ class TestPrepareWorkingDb:
         temp = _prepare_working_db(prod)
 
         assert temp.parent == prod.parent
+
+    def test_cleans_stale_temps_before_creating_new(self, tmp_path):
+        from semantic_index.nightly_sync import _prepare_working_db
+
+        prod = tmp_path / "prod.db"
+        _create_test_db(prod)
+
+        stale = tmp_path / "prod.tmp.9999.db"
+        stale.write_bytes(b"orphaned from previous crash")
+
+        temp = _prepare_working_db(prod)
+
+        assert not stale.exists()
+        assert temp.exists()
+        assert ".tmp." in temp.name
 
 
 # ===========================================================================
