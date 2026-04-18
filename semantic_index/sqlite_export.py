@@ -526,11 +526,15 @@ def _insert_enrichments_with_pipeline_db(
     so styles must go through ``persist_artist_styles()``.
     Personnel and labels are inserted into their own tables as usual.
     """
+    # Enrichment keys may be lowercased (from Discogs summary tables) while
+    # name_to_id uses the original-case canonical names.  Build a lowercase
+    # lookup so both cases resolve to the correct artist ID.
+    lower_to_id = {k.lower(): v for k, v in name_to_id.items()}
     personnel_rows = []
     label_rows = []
 
     for name, enrich in enrichments.items():
-        artist_id = name_to_id.get(name)
+        artist_id = name_to_id.get(name) or lower_to_id.get(name.lower())
         if artist_id is None:
             continue
 
@@ -560,11 +564,17 @@ def _resolve_edge_rows(
     rows: list[tuple],
     name_to_id: dict[str, int],
 ) -> list[tuple]:
-    """Map artist names in first two columns to IDs."""
+    """Map artist names in first two columns to IDs.
+
+    Discogs summary tables return lowercased artist names, while the pipeline DB
+    stores mixed-case canonical names.  Build a lowercase fallback so both cases
+    resolve correctly.
+    """
+    lower_to_id = {k.lower(): v for k, v in name_to_id.items()}
     resolved = []
     for row in rows:
-        a_id = name_to_id.get(row[0])
-        b_id = name_to_id.get(row[1])
+        a_id = name_to_id.get(row[0]) or lower_to_id.get(row[0].lower())
+        b_id = name_to_id.get(row[1]) or lower_to_id.get(row[1].lower())
         if a_id is not None and b_id is not None:
             resolved.append((a_id, b_id, *row[2:]))
     return resolved
