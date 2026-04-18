@@ -54,10 +54,6 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
 );
 """
 
-_MIGRATE_EDGE_TYPE_COL = """
-ALTER TABLE narrative_cache ADD COLUMN edge_type TEXT NOT NULL DEFAULT '';
-"""
-
 
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
     """Open a writable connection to the sidecar narrative cache database."""
@@ -65,11 +61,12 @@ def _get_cache_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(cache_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_CACHE_SCHEMA)
-    # Migrate: add edge_type column if missing (old schema)
+    # Migrate: old schema has PK without edge_type — ALTER TABLE can't change
+    # a PK, so drop and recreate.  This is just a cache; entries regenerate.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(narrative_cache)")}
-    if "edge_type" not in cols:
-        conn.executescript(_MIGRATE_EDGE_TYPE_COL)
+    if cols and "edge_type" not in cols:
+        conn.execute("DROP TABLE narrative_cache")
+    conn.executescript(_CACHE_SCHEMA)
     return conn
 
 
