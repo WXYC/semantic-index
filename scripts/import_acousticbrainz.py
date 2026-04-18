@@ -102,8 +102,9 @@ def parse_recording_json(mbid: str, data: dict, tar_name: str) -> dict:
         distributions[key] = classifier.get("all", {})
 
     # Audio properties
-    audio = data.get("metadata", {}).get("audio_properties", {})
-    tags = data.get("metadata", {}).get("tags", {})
+    metadata = data.get("metadata") or {}
+    audio = metadata.get("audio_properties") or {}
+    tags = metadata.get("tags") or {}
 
     return {
         "recording_mbid": mbid,
