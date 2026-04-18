@@ -70,6 +70,13 @@ RHYTHM_LABELS = [
     "Waltz",
 ]
 
+# Labels from AcousticBrainz classifier outputs (verified against data dump)
+GENRE_ELECTRONIC_LABELS = ["ambient", "dnb", "house", "techno", "trance"]
+GENRE_ROSAMERICA_LABELS = ["cla", "dan", "hip", "jaz", "pop", "rhy", "roc", "spe"]
+GENRE_TZANETAKIS_LABELS = ["blu", "cla", "cou", "dis", "hip", "jaz", "met", "pop", "reg", "roc"]
+
+FEATURE_VECTOR_DIM = 59
+
 
 @dataclass
 class RecordingFeatures:
@@ -106,11 +113,14 @@ class RecordingFeatures:
     tonal: float
     voice_instrumental: str
     voice_instrumental_probability: float
+    genre_electronic_vector: list[float]  # 5-element electronic subgenre distribution
+    genre_rosamerica_vector: list[float]  # 8-element rosamerica genre distribution
+    genre_tzanetakis_vector: list[float]  # 10-element tzanetakis genre distribution
 
     def feature_vector(self) -> list[float]:
         """Build a fixed-length numeric feature vector for similarity computation.
 
-        Layout (36 dimensions):
+        Layout (59 dimensions):
             [0:9]   genre_dortmund probability distribution (9 genres)
             [9:16]  mood probabilities (7 binary mood classifiers)
             [16:21] moods_mirex compound mood distribution (5 clusters)
@@ -120,9 +130,12 @@ class RecordingFeatures:
             [33]    tonal probability
             [34]    voice probability (1=voice, 0=instrumental)
             [35]    gender (female probability)
+            [36:41] genre_electronic probability distribution (5 subgenres)
+            [41:49] genre_rosamerica probability distribution (8 genres)
+            [49:59] genre_tzanetakis probability distribution (10 genres)
 
         Returns:
-            List of 36 floats.
+            List of 59 floats.
         """
         timbre_val = 1.0 if self.timbre == "bright" else 0.0
         voice_val = (
@@ -142,6 +155,9 @@ class RecordingFeatures:
                 voice_val,
                 self.gender_female,
             ]
+            + self.genre_electronic_vector
+            + self.genre_rosamerica_vector
+            + self.genre_tzanetakis_vector
         )
 
 
@@ -174,6 +190,24 @@ def _parse_highlevel(mbid: str, data: dict) -> RecordingFeatures:
     rhythm_all = hl.get("ismir04_rhythm", {}).get("all", {})
     rhythm_vector = [rhythm_all.get(label, 0.0) for label in RHYTHM_LABELS]
 
+    # Genre electronic subgenre
+    genre_electronic_all = hl.get("genre_electronic", {}).get("all", {})
+    genre_electronic_vector = [
+        genre_electronic_all.get(label, 0.0) for label in GENRE_ELECTRONIC_LABELS
+    ]
+
+    # Genre rosamerica
+    genre_rosamerica_all = hl.get("genre_rosamerica", {}).get("all", {})
+    genre_rosamerica_vector = [
+        genre_rosamerica_all.get(label, 0.0) for label in GENRE_ROSAMERICA_LABELS
+    ]
+
+    # Genre tzanetakis
+    genre_tzanetakis_all = hl.get("genre_tzanetakis", {}).get("all", {})
+    genre_tzanetakis_vector = [
+        genre_tzanetakis_all.get(label, 0.0) for label in GENRE_TZANETAKIS_LABELS
+    ]
+
     # Gender
     gender_all = hl.get("gender", {}).get("all", {})
     gender_female = gender_all.get("female", 0.5)
@@ -204,6 +238,9 @@ def _parse_highlevel(mbid: str, data: dict) -> RecordingFeatures:
         tonal=tonal,
         voice_instrumental=voice_instrumental,
         voice_instrumental_probability=voice_instrumental_probability,
+        genre_electronic_vector=genre_electronic_vector,
+        genre_rosamerica_vector=genre_rosamerica_vector,
+        genre_tzanetakis_vector=genre_tzanetakis_vector,
     )
 
 
@@ -494,7 +531,7 @@ class ArtistAudioProfile:
     primary_genre: str
     primary_genre_probability: float
     voice_instrumental_ratio: float  # fraction of recordings that are vocal
-    feature_centroid: list[float]  # averaged 36-element feature vector
+    feature_centroid: list[float]  # averaged 59-element feature vector
 
     @classmethod
     def from_recordings(cls, recordings: list[RecordingFeatures]) -> ArtistAudioProfile:
@@ -522,7 +559,7 @@ class ArtistAudioProfile:
         voice_ratio = vocal_count / n
 
         # Average feature vectors
-        vec_len = 36
+        vec_len = FEATURE_VECTOR_DIM
         centroid = [0.0] * vec_len
         for r in recordings:
             vec = r.feature_vector()
@@ -600,6 +637,48 @@ def build_audio_profiles(
             features_map = loader.batch_get_features(mbids)
             recordings = list(features_map.values())
 
+        if len(recordings) < min_recordings:
+            continue
+
+        profiles[artist_id] = ArtistAudioProfile.from_recordings(recordings)
+
+        if i % 500 == 0:
+            logger.info(
+                "  Audio profiles: %d/%d artists processed, %d profiles built",
+                i,
+                total,
+                len(profiles),
+            )
+
+    logger.info(
+        "Audio profiles complete: %d/%d artists have profiles (min_recordings=%d)",
+        len(profiles),
+        total,
+        min_recordings,
+    )
+    return profiles
+
+
+def build_audio_profiles_from_features(
+    artist_features: dict[int, list[RecordingFeatures]],
+    min_recordings: int = 3,
+) -> dict[int, ArtistAudioProfile]:
+    """Build audio profiles from pre-resolved per-artist feature lists.
+
+    Used by the PG-based AcousticBrainz path where features are already
+    grouped by artist from the JOIN query.
+
+    Args:
+        artist_features: Mapping of artist ID → list of RecordingFeatures.
+        min_recordings: Minimum recordings required to create a profile.
+
+    Returns:
+        Dict mapping artist ID to ArtistAudioProfile.
+    """
+    profiles: dict[int, ArtistAudioProfile] = {}
+    total = len(artist_features)
+
+    for i, (artist_id, recordings) in enumerate(artist_features.items(), 1):
         if len(recordings) < min_recordings:
             continue
 

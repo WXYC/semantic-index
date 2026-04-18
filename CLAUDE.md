@@ -12,7 +12,8 @@ Backend PG → pg_source ─┘ → cross_reference ─────────�
                            → node_attributes ───────────────────────────→
             → discogs_client → discogs_enrichment → discogs_edges ──────→
             → wikidata_client → wikidata_influence ─────────────────────→
-            → musicbrainz_client → acousticbrainz (feature loader) ────→ audio_profile + acoustic_similarity
+            → musicbrainz_client → acousticbrainz_client (PG) ─────────→ audio_profile + acoustic_similarity
+            → musicbrainz_client → acousticbrainz (tar loader, deprecated) → audio_profile + acoustic_similarity
 
 SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
@@ -37,7 +38,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
-| `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features from extracted data dump, aggregate per-artist audio profiles, compute cosine similarity edges. |
+| `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features, aggregate per-artist audio profiles (59-dim feature vector across 18 classifiers), compute cosine similarity edges. Supports both PG and tar-based loading. |
+| `semantic_index/acousticbrainz_client.py` | PostgreSQL client for AcousticBrainz features. Queries `ab_recording` in musicbrainz-cache, joining with `mb_artist_recording` for per-artist feature retrieval. Preferred over tar-based loading. |
 | `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: recording MBID resolution via `mb_artist_recording` materialized view. Identity resolution methods (lookup_by_name, batch_lookup) have been moved to LML. |
 | `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Uses `wxyc_etl.text.is_compilation_artist` to filter compilation entries. Idempotent post-processing step runnable standalone or as a pipeline step. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |
@@ -53,6 +55,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
 | `run_pipeline.py` | CLI entry point wiring the full pipeline (SQL dump mode). |
 | `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
+| `scripts/import_acousticbrainz.py` | ETL script: import AcousticBrainz high-level features from tar archives into PostgreSQL `ab_recording` table. Per-tar checkpointing, NAS-resilient, idempotent via `ON CONFLICT DO NOTHING`. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
 
@@ -119,7 +122,7 @@ CREATE TABLE audio_profile (
     primary_genre TEXT,
     primary_genre_probability REAL,
     voice_instrumental_ratio REAL,
-    feature_centroid TEXT,  -- JSON array of 36 floats
+    feature_centroid TEXT,  -- JSON array of 59 floats
     recording_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -277,6 +280,22 @@ python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --discogs-
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--db-path` with reconciled Wikidata QIDs.
 - `--populate-label-hierarchy` — Populate label and label_hierarchy tables from Wikidata P749/P355. Requires `--db-path` and enrichment data.
 - `--discogs-track-json PATH` — Path to `compilation_track_artists.json` (from LML `match_compilations.py`). Provides a Discogs-derived fallback (Tier 0b) for VA entries not matched by the CTA table. JSON format: `[{comp_id, discogs_release_id, tracks: [{position, title, artists: [str]}]}]` where `comp_id` = WXYC `LIBRARY_RELEASE_ID`.
+- `--musicbrainz-cache-dsn` — When set (without `--acousticbrainz-dir`), uses the PostgreSQL `ab_recording` table for audio features. This is the preferred path — a single JOIN query replaces the two-step MusicBrainzClient + tar loader flow. Requires `import_acousticbrainz.py` to have populated `ab_recording`.
+- `--acousticbrainz-dir` — **(Deprecated)** Path to AcousticBrainz tar archives. Requires `--musicbrainz-cache-dsn`. When both `--acousticbrainz-dir` and `--musicbrainz-cache-dsn` are set, the PG path is used and the tar dir is ignored.
+
+### AcousticBrainz import
+
+One-time ETL to populate the `ab_recording` table in the musicbrainz PostgreSQL database from the AcousticBrainz data dump tar archives. The import is resumable — per-tar checkpointing skips completed tars, and `ON CONFLICT DO NOTHING` handles duplicate MBIDs.
+
+```bash
+python scripts/import_acousticbrainz.py \
+    --tar-dir "/Volumes/Peak Twins/acousticbrainz/" \
+    --dsn postgresql://localhost/musicbrainz \
+    --checkpoint output/ab_import_progress.db \
+    [--retry-failed]
+```
+
+The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured columns plus JSONB for probability distributions and metadata tags. The feature vector uses all 18 classifiers for a 59-dimension representation.
 
 ### Nightly sync mode
 
