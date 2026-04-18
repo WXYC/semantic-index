@@ -751,8 +751,10 @@ async function loadNarrative(card, sourceId, targetId, gen) {
   const params = {};
   const monthVal = document.getElementById('monthFilter').value;
   const djVal = document.getElementById('djFilter').value;
+  const edgeVal = document.getElementById('edgeType').value;
   if (monthVal) params.month = monthVal;
   if (djVal) params.dj_id = djVal;
+  if (edgeVal) params.edge_type = edgeVal;
 
   try {
     const data = await api(`/graph/artists/${sourceId}/explain/${targetId}/narrative`, params);

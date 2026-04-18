@@ -236,6 +236,80 @@ class TestNarrativeCaching:
         assert resp_faceted.json()["cached"] is False
 
 
+class TestEdgeTypeFiltering:
+    @pytest.mark.asyncio
+    async def test_edge_type_scopes_prompt_to_single_type(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """When edge_type is provided, only that relationship type appears in the prompt."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(
+            f"/graph/artists/{ae_id}/explain/{sl_id}/narrative",
+            params={"edge_type": "sharedPersonnel"},
+        )
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        rel_types = [r["type"] for r in prompt_data["relationships"]]
+        assert rel_types == ["sharedPersonnel"]
+
+    @pytest.mark.asyncio
+    async def test_edge_type_cache_separate_from_global(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Narratives for different edge types are cached separately."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        # Global narrative (no edge_type)
+        resp1 = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp1.json()["cached"] is False
+        # sharedPersonnel narrative — separate cache entry
+        resp2 = await client.get(
+            f"/graph/artists/{ae_id}/explain/{sl_id}/narrative",
+            params={"edge_type": "sharedPersonnel"},
+        )
+        assert resp2.json()["cached"] is False
+        # sharedStyle narrative — also separate
+        resp3 = await client.get(
+            f"/graph/artists/{ae_id}/explain/{sl_id}/narrative",
+            params={"edge_type": "sharedStyle"},
+        )
+        assert resp3.json()["cached"] is False
+        # Repeat sharedPersonnel — should hit cache
+        resp4 = await client.get(
+            f"/graph/artists/{ae_id}/explain/{sl_id}/narrative",
+            params={"edge_type": "sharedPersonnel"},
+        )
+        assert resp4.json()["cached"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_edge_type_falls_back_to_all(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """An unrecognized edge_type queries all relationship types."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(
+            f"/graph/artists/{ae_id}/explain/{sl_id}/narrative",
+            params={"edge_type": "notARealType"},
+        )
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        rel_types = {r["type"] for r in prompt_data["relationships"]}
+        assert "djTransition" in rel_types
+        assert "sharedPersonnel" in rel_types
+
+
 class TestPairNormalization:
     @pytest.mark.asyncio
     async def test_reversed_pair_shares_cache(
