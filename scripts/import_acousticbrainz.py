@@ -71,7 +71,7 @@ _COLUMNS = [
     "tar_file",
 ]
 
-_BATCH_SIZE = 10_000
+_BATCH_SIZE = 1_000
 
 
 def parse_recording_json(mbid: str, data: dict, tar_name: str) -> dict:
