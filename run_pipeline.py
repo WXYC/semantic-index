@@ -799,9 +799,84 @@ def run(args: argparse.Namespace) -> None:
         log.info("SQLite written to %s", sqlite_path)
 
         # 13b. AcousticBrainz audio profiles (optional)
+        #
+        # Two paths:
+        # - PG path (preferred): --musicbrainz-cache-dsn with ab_recording table populated
+        # - Tar path (deprecated): --acousticbrainz-dir with --musicbrainz-cache-dsn
+        # When both are set, PG path is used and tar dir is ignored.
         audio_profile_count = 0
         acoustic_edge_count = 0
+        use_pg_path = args.musicbrainz_cache_dsn and not args.acousticbrainz_dir
+        use_tar_path = args.acousticbrainz_dir and args.musicbrainz_cache_dsn
         if args.acousticbrainz_dir and args.musicbrainz_cache_dsn:
+            log.warning(
+                "--acousticbrainz-dir is deprecated; use --musicbrainz-cache-dsn with "
+                "PostgreSQL AcousticBrainz data instead. Using PG path, ignoring tar dir."
+            )
+            use_pg_path = True
+            use_tar_path = False
+
+        if use_pg_path:
+            import sqlite3 as _ab_sqlite3
+
+            from semantic_index.acousticbrainz import (
+                build_audio_profiles_from_features,
+                compute_acoustic_similarity,
+                store_audio_profiles,
+            )
+            from semantic_index.acousticbrainz_client import AcousticBrainzClient as _ABClient
+
+            log.info("Building audio profiles from AcousticBrainz (PostgreSQL)...")
+            ab_client = _ABClient(cache_dsn=args.musicbrainz_cache_dsn)
+
+            # Get MB artist IDs from the graph database
+            _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
+            mb_rows = _ab_conn.execute(
+                "SELECT id, musicbrainz_artist_id FROM artist "
+                "WHERE musicbrainz_artist_id IS NOT NULL"
+            ).fetchall()
+            _ab_conn.close()
+
+            if mb_rows:
+                graph_id_to_mb = {row[0]: int(row[1]) for row in mb_rows}
+                mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
+                mb_ids = list(graph_id_to_mb.values())
+                log.info("  %d artists with MusicBrainz IDs", len(mb_ids))
+
+                # Single JOIN query: ab_recording × mb_artist_recording
+                ab_features = ab_client.get_features_for_artists(mb_ids)
+                total_recordings = sum(len(v) for v in ab_features.values())
+                log.info(
+                    "  %d recordings with AB features across %d MB artists",
+                    total_recordings,
+                    len(ab_features),
+                )
+
+                # Remap MB artist IDs → graph artist IDs
+                artist_features: dict[int, list] = {}
+                for mb_id, recordings in ab_features.items():
+                    graph_id = mb_to_graph_id.get(mb_id)
+                    if graph_id is not None:
+                        artist_features[graph_id] = recordings
+
+                profiles = build_audio_profiles_from_features(
+                    artist_features, min_recordings=args.min_recordings
+                )
+                audio_profile_count = len(profiles)
+                log.info("  %d audio profiles built", audio_profile_count)
+
+                if profiles:
+                    _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
+                    store_audio_profiles(_ab_conn, profiles)
+                    acoustic_edge_count = compute_acoustic_similarity(
+                        _ab_conn, profiles, threshold=args.acoustic_similarity_threshold
+                    )
+                    _ab_conn.close()
+                    log.info("  %d acoustic similarity edges", acoustic_edge_count)
+            else:
+                log.warning("  No artists with MusicBrainz IDs — skipping audio profiles")
+
+        elif use_tar_path:
             import sqlite3 as _ab_sqlite3
 
             from semantic_index.acousticbrainz import (
@@ -813,10 +888,13 @@ def run(args: argparse.Namespace) -> None:
             )
             from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
 
-            log.info("Building audio profiles from AcousticBrainz...")
+            log.warning(
+                "--acousticbrainz-dir is deprecated; use --musicbrainz-cache-dsn with "
+                "PostgreSQL AcousticBrainz data instead."
+            )
+            log.info("Building audio profiles from AcousticBrainz (tar files)...")
             mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
 
-            # Get MB artist IDs from the graph database
             _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
             mb_rows = _ab_conn.execute(
                 "SELECT id, musicbrainz_artist_id FROM artist "
@@ -825,27 +903,23 @@ def run(args: argparse.Namespace) -> None:
             _ab_conn.close()
 
             if mb_rows:
-                # Map graph artist IDs → MB artist IDs
                 graph_id_to_mb = {row[0]: int(row[1]) for row in mb_rows}
                 mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
                 mb_ids = list(graph_id_to_mb.values())
                 log.info("  %d artists with MusicBrainz IDs", len(mb_ids))
 
-                # Resolve MB artists → recording MBIDs
                 mb_recordings = mb_client.get_recording_mbids(mb_ids)
                 total_recordings = sum(len(v) for v in mb_recordings.values())
                 log.info(
                     "  %d recording MBIDs across %d artists", total_recordings, len(mb_recordings)
                 )
 
-                # Remap to graph artist IDs
                 artist_recordings: dict[int, list[str]] = {}
                 for mb_id, mbids in mb_recordings.items():
                     graph_id = mb_to_graph_id.get(mb_id)
                     if graph_id is not None:
                         artist_recordings[graph_id] = mbids
 
-                # Create loader: use tar-indexed mode if tar files present, else extracted dir
                 ab_path = Path(args.acousticbrainz_dir)
                 tar_files = list(ab_path.glob("*.tar"))
                 preloaded = None
@@ -859,13 +933,11 @@ def run(args: argparse.Namespace) -> None:
                     ab_loader = TarAcousticBrainzLoader(
                         args.acousticbrainz_dir, wanted_mbids=all_wanted
                     )
-                    # Bulk load all features in a single pass per tar (much faster over NAS)
                     log.info("  Bulk loading features from tar files...")
                     preloaded = ab_loader.bulk_load_all_features()
                 else:
                     ab_loader = AcousticBrainzLoader(args.acousticbrainz_dir)
 
-                # Build profiles
                 profiles = build_audio_profiles(
                     ab_loader,
                     artist_recordings,

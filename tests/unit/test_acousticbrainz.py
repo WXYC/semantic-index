@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from semantic_index.acousticbrainz import (
+    GENRE_ELECTRONIC_LABELS,
+    GENRE_ROSAMERICA_LABELS,
+    GENRE_TZANETAKIS_LABELS,
     AcousticBrainzLoader,
     ArtistAudioProfile,
     TarAcousticBrainzLoader,
@@ -73,6 +76,36 @@ def _make_highlevel_json(
                 "probability": electronic_prob,
                 "value": electronic_subgenre,
             },
+            "genre_rosamerica": {
+                "all": {
+                    "cla": 0.03,
+                    "dan": 0.05,
+                    "hip": 0.02,
+                    "jaz": 0.10,
+                    "pop": 0.15,
+                    "rhy": 0.05,
+                    "roc": 0.50,
+                    "spe": 0.10,
+                },
+                "probability": 0.50,
+                "value": "roc",
+            },
+            "genre_tzanetakis": {
+                "all": {
+                    "blu": 0.06,
+                    "cla": 0.04,
+                    "cou": 0.03,
+                    "dis": 0.05,
+                    "hip": 0.02,
+                    "jaz": 0.10,
+                    "met": 0.05,
+                    "pop": 0.15,
+                    "reg": 0.10,
+                    "roc": 0.40,
+                },
+                "probability": 0.40,
+                "value": "roc",
+            },
             "mood_acoustic": {
                 "all": {"acoustic": mood_acoustic, "not_acoustic": 1 - mood_acoustic},
                 "probability": max(mood_acoustic, 1 - mood_acoustic),
@@ -124,9 +157,9 @@ def _make_highlevel_json(
             "voice_instrumental": {
                 "all": {
                     "voice": 1 - voice_prob if voice_instrumental == "instrumental" else voice_prob,
-                    "instrumental": voice_prob
-                    if voice_instrumental == "instrumental"
-                    else 1 - voice_prob,
+                    "instrumental": (
+                        voice_prob if voice_instrumental == "instrumental" else 1 - voice_prob
+                    ),
                 },
                 "probability": voice_prob,
                 "value": voice_instrumental,
@@ -291,8 +324,50 @@ class TestRecordingFeaturesParsing:
 
         assert features is not None
         vec = features.feature_vector()
-        # 9 genre + 7 mood + 5 mirex + 10 rhythm + 5 scalar
-        assert len(vec) == 36
+        # 9 genre + 7 mood + 5 mirex + 10 rhythm + 5 scalar + 5 electronic + 8 rosamerica + 10 tzanetakis
+        assert len(vec) == 59
+
+    def test_genre_electronic_vector(self, ab_data_dir: Path) -> None:
+        loader = AcousticBrainzLoader(str(ab_data_dir))
+        features = loader.get_features(MBID_AUTECHRE_1)
+
+        assert features is not None
+        assert len(features.genre_electronic_vector) == len(GENRE_ELECTRONIC_LABELS)
+        # Ambient is dominant for this fixture
+        ambient_idx = GENRE_ELECTRONIC_LABELS.index("ambient")
+        assert features.genre_electronic_vector[ambient_idx] == pytest.approx(0.7, abs=0.01)
+
+    def test_genre_rosamerica_vector(self, ab_data_dir: Path) -> None:
+        loader = AcousticBrainzLoader(str(ab_data_dir))
+        features = loader.get_features(MBID_AUTECHRE_1)
+
+        assert features is not None
+        assert len(features.genre_rosamerica_vector) == len(GENRE_ROSAMERICA_LABELS)
+        roc_idx = GENRE_ROSAMERICA_LABELS.index("roc")
+        assert features.genre_rosamerica_vector[roc_idx] == pytest.approx(0.50, abs=0.01)
+
+    def test_genre_tzanetakis_vector(self, ab_data_dir: Path) -> None:
+        loader = AcousticBrainzLoader(str(ab_data_dir))
+        features = loader.get_features(MBID_AUTECHRE_1)
+
+        assert features is not None
+        assert len(features.genre_tzanetakis_vector) == len(GENRE_TZANETAKIS_LABELS)
+        roc_idx = GENRE_TZANETAKIS_LABELS.index("roc")
+        assert features.genre_tzanetakis_vector[roc_idx] == pytest.approx(0.40, abs=0.01)
+
+    def test_feature_vector_layout(self, ab_data_dir: Path) -> None:
+        """New genre classifiers occupy positions [36:59] in the feature vector."""
+        loader = AcousticBrainzLoader(str(ab_data_dir))
+        features = loader.get_features(MBID_AUTECHRE_1)
+        assert features is not None
+
+        vec = features.feature_vector()
+        # Positions [36:41] = genre_electronic (5 elements)
+        assert vec[36:41] == features.genre_electronic_vector
+        # Positions [41:49] = genre_rosamerica (8 elements)
+        assert vec[41:49] == features.genre_rosamerica_vector
+        # Positions [49:59] = genre_tzanetakis (10 elements)
+        assert vec[49:59] == features.genre_tzanetakis_vector
 
 
 # --- Batch lookup ---
@@ -334,8 +409,8 @@ class TestArtistAudioProfile:
         assert profile.avg_danceability == pytest.approx(0.4, abs=0.01)
         # Both recordings are instrumental
         assert profile.voice_instrumental_ratio == pytest.approx(0.0, abs=0.01)
-        # Feature centroid should be length 36
-        assert len(profile.feature_centroid) == 36
+        # Feature centroid should be length 59
+        assert len(profile.feature_centroid) == 59
 
     def test_single_recording_profile(self, ab_data_dir: Path) -> None:
         loader = AcousticBrainzLoader(str(ab_data_dir))
