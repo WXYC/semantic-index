@@ -47,10 +47,15 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
     target_id INTEGER NOT NULL,
     month INTEGER NOT NULL DEFAULT 0,
     dj_id INTEGER NOT NULL DEFAULT 0,
+    edge_type TEXT NOT NULL DEFAULT '',
     narrative TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (source_id, target_id, month, dj_id)
+    PRIMARY KEY (source_id, target_id, month, dj_id, edge_type)
 );
+"""
+
+_MIGRATE_EDGE_TYPE_COL = """
+ALTER TABLE narrative_cache ADD COLUMN edge_type TEXT NOT NULL DEFAULT '';
 """
 
 
@@ -61,6 +66,10 @@ def _get_cache_db(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_CACHE_SCHEMA)
+    # Migrate: add edge_type column if missing (old schema)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(narrative_cache)")}
+    if "edge_type" not in cols:
+        conn.executescript(_MIGRATE_EDGE_TYPE_COL)
     return conn
 
 
@@ -192,6 +201,7 @@ def get_narrative(
     target_id: int,
     month: int | None = Query(default=None, ge=1, le=12),
     dj_id: int | None = Query(default=None, ge=1),
+    edge_type: str | None = Query(default=None),
     request: Request = None,  # type: ignore[assignment]
     db: sqlite3.Connection = Depends(get_db),
 ) -> NarrativeResponse:
@@ -200,6 +210,11 @@ def get_narrative(
     Uses Claude Haiku to produce a concise sentence from the structured explain data.
     Results are cached in a sidecar SQLite database. When ``ANTHROPIC_API_KEY`` is not
     set, returns HTTP 501.
+
+    Args:
+        edge_type: Optional edge type filter (e.g. ``djTransition``,
+            ``sharedPersonnel``).  When provided, the narrative focuses on that
+            relationship dimension only.  Omit for a cross-dimensional summary.
     """
     # Validate both artists exist
     source = _get_artist_or_404(db, source_id)
@@ -209,14 +224,15 @@ def get_narrative(
     lo, hi = min(source_id, target_id), max(source_id, target_id)
     cache_month = month or 0
     cache_dj = dj_id or 0
+    cache_edge_type = edge_type or ""
 
     # Check cache
     cache_db = _get_cache_db(request.app.state.db_path)
     try:
         cached_row = cache_db.execute(
             "SELECT narrative FROM narrative_cache "
-            "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ?",
-            (lo, hi, cache_month, cache_dj),
+            "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? AND edge_type = ?",
+            (lo, hi, cache_month, cache_dj, cache_edge_type),
         ).fetchone()
         if cached_row:
             return NarrativeResponse(
@@ -234,11 +250,17 @@ def get_narrative(
             detail="Narrative generation not available (ANTHROPIC_API_KEY not set)",
         )
 
+    # Determine which edge types to query
+    if edge_type and edge_type in EdgeType.__members__.values():
+        query_types = [EdgeType(edge_type)]
+    else:
+        query_types = list(EdgeType)
+
     # Build the structured data for the prompt
     relationships = []
-    for edge_type in EdgeType:
+    for et in query_types:
         try:
-            rels = _query_explain(db, source_id, target_id, edge_type)
+            rels = _query_explain(db, source_id, target_id, et)
         except sqlite3.OperationalError:
             continue  # table doesn't exist in this database
         for rel in rels:
@@ -283,9 +305,17 @@ def get_narrative(
     try:
         cache_db.execute(
             "INSERT OR REPLACE INTO narrative_cache "
-            "(source_id, target_id, month, dj_id, narrative, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (lo, hi, cache_month, cache_dj, narrative, datetime.now(UTC).isoformat()),
+            "(source_id, target_id, month, dj_id, edge_type, narrative, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                lo,
+                hi,
+                cache_month,
+                cache_dj,
+                cache_edge_type,
+                narrative,
+                datetime.now(UTC).isoformat(),
+            ),
         )
         cache_db.commit()
     finally:
