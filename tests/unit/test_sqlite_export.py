@@ -4,7 +4,16 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from semantic_index.models import ArtistStats, CrossReferenceEdge, PmiEdge, WikidataInfluenceEdge
+from semantic_index.models import (
+    ArtistStats,
+    CompilationEdge,
+    CrossReferenceEdge,
+    LabelFamilyEdge,
+    PmiEdge,
+    SharedPersonnelEdge,
+    SharedStyleEdge,
+    WikidataInfluenceEdge,
+)
 from semantic_index.sqlite_export import export_sqlite
 
 
@@ -292,6 +301,105 @@ class TestWikidataInfluenceInsertion:
         )
         count = conn.execute("SELECT COUNT(*) FROM wikidata_influence").fetchone()[0]
         assert count == 0
+
+
+class TestDiscogsEdgeCaseInsensitive:
+    """Discogs summary tables return lowercase names but artist table may have mixed case."""
+
+    def test_shared_personnel_resolves_lowercase_names(self):
+        stats = {
+            "Yo La Tengo": ArtistStats(canonical_name="Yo La Tengo", total_plays=100),
+            "Stereolab": ArtistStats(canonical_name="Stereolab", total_plays=80),
+        }
+        # Edge names are lowercase (as returned by Discogs summary tables)
+        sp_edges = [
+            SharedPersonnelEdge(
+                artist_a="stereolab",
+                artist_b="yo la tengo",
+                shared_count=3,
+                shared_names=["John McEntire", "Jim O'Rourke", "Roger Moutenot"],
+            )
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            shared_personnel_edges=sp_edges,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM shared_personnel").fetchone()[0]
+        assert count == 1
+        row = conn.execute(
+            "SELECT a.canonical_name, b.canonical_name "
+            "FROM shared_personnel sp "
+            "JOIN artist a ON sp.artist_a_id = a.id "
+            "JOIN artist b ON sp.artist_b_id = b.id"
+        ).fetchone()
+        assert set(row) == {"Yo La Tengo", "Stereolab"}
+
+    def test_shared_style_resolves_lowercase_names(self):
+        stats = {
+            "Beach House": ArtistStats(canonical_name="Beach House", total_plays=50),
+            "Cocteau Twins": ArtistStats(canonical_name="Cocteau Twins", total_plays=40),
+        }
+        ss_edges = [
+            SharedStyleEdge(
+                artist_a="beach house",
+                artist_b="cocteau twins",
+                jaccard=0.6,
+                shared_tags=["Dream Pop", "Shoegaze"],
+            )
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            shared_style_edges=ss_edges,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM shared_style").fetchone()[0]
+        assert count == 1
+
+    def test_label_family_resolves_lowercase_names(self):
+        stats = {
+            "Cat Power": ArtistStats(canonical_name="Cat Power", total_plays=30),
+            "Jessica Pratt": ArtistStats(canonical_name="Jessica Pratt", total_plays=20),
+        }
+        lf_edges = [
+            LabelFamilyEdge(
+                artist_a="cat power",
+                artist_b="jessica pratt",
+                shared_labels=["Matador Records"],
+            )
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            label_family_edges=lf_edges,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM label_family").fetchone()[0]
+        assert count == 1
+
+    def test_compilation_resolves_lowercase_names(self):
+        stats = {
+            "Autechre": ArtistStats(canonical_name="Autechre", total_plays=50),
+            "Aphex Twin": ArtistStats(canonical_name="Aphex Twin", total_plays=45),
+        }
+        comp_edges = [
+            CompilationEdge(
+                artist_a="aphex twin",
+                artist_b="autechre",
+                compilation_count=2,
+                compilation_titles=["Artificial Intelligence", "We Are Reasonable People"],
+            )
+        ]
+        conn, _ = _export_and_connect(
+            artist_stats=stats,
+            pmi_edges=[],
+            xref_edges=[],
+            compilation_edges=comp_edges,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM compilation").fetchone()[0]
+        assert count == 1
 
 
 class TestRoundtrip:
