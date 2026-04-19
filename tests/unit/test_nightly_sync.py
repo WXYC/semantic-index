@@ -470,6 +470,6 @@ class TestNightlySyncDeduplication:
         dedup_idx = call_order.index("deduplicate_by_qid")
         facet_idx = call_order.index("export_facet_tables")
 
-        assert (
-            export_idx < dedup_idx < facet_idx
-        ), f"Expected export < dedup < facets, got: {call_order}"
+        assert export_idx < dedup_idx < facet_idx, (
+            f"Expected export < dedup < facets, got: {call_order}"
+        )
