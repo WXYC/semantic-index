@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from semantic_index.acousticbrainz import (
+    FEATURE_VECTOR_DIM,
     GENRE_ELECTRONIC_LABELS,
     GENRE_ROSAMERICA_LABELS,
     GENRE_TZANETAKIS_LABELS,
@@ -16,6 +17,7 @@ from semantic_index.acousticbrainz import (
     TarAcousticBrainzLoader,
     build_audio_profiles,
     cosine_similarity,
+    load_audio_profiles,
     store_audio_profiles,
 )
 
@@ -542,6 +544,37 @@ class TestStoreAudioProfiles:
 
         count = graph_db.execute("SELECT COUNT(*) FROM audio_profile").fetchone()[0]
         assert count == 2
+
+
+class TestLoadAudioProfiles:
+    """Test loading persisted audio profiles from SQLite."""
+
+    def test_load_round_trip(self, ab_data_dir: Path, graph_db: sqlite3.Connection) -> None:
+        """Profiles stored via store_audio_profiles can be loaded back identically."""
+        loader = AcousticBrainzLoader(str(ab_data_dir))
+        f_ae = loader.get_features(MBID_AUTECHRE_1)
+        f_sl = loader.get_features(MBID_STEREOLAB)
+
+        original = {
+            1: ArtistAudioProfile.from_recordings([f_ae]),
+            2: ArtistAudioProfile.from_recordings([f_sl]),
+        }
+        store_audio_profiles(graph_db, original)
+
+        loaded = load_audio_profiles(graph_db)
+
+        assert set(loaded.keys()) == {1, 2}
+        for artist_id in (1, 2):
+            orig = original[artist_id]
+            read = loaded[artist_id]
+            assert read.recording_count == orig.recording_count
+            assert read.avg_danceability == pytest.approx(orig.avg_danceability)
+            assert read.primary_genre == orig.primary_genre
+            assert read.primary_genre_probability == pytest.approx(orig.primary_genre_probability)
+            assert read.voice_instrumental_ratio == pytest.approx(orig.voice_instrumental_ratio)
+            assert len(read.feature_centroid) == FEATURE_VECTOR_DIM
+            for a, b in zip(read.feature_centroid, orig.feature_centroid, strict=True):
+                assert a == pytest.approx(b)
 
 
 # --- Build profiles pipeline ---
