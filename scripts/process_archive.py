@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -33,13 +33,11 @@ from psycopg.rows import dict_row
 
 from semantic_index.archive_client import (
     ArchiveClient,
-    SearchWindow,
     compute_search_windows,
     merge_overlapping_windows,
     timestamp_to_s3_key,
 )
 from semantic_index.archive_fingerprint import (
-    AcoustIDMatch,
     CheckpointDB,
     _best_match_per_play,
     _generate_fingerprint_offsets,
@@ -104,15 +102,13 @@ def _group_entries_by_hour(entries: list[dict]) -> dict[str, list[dict]]:
     """
     groups: dict[str, list[dict]] = defaultdict(list)
     for entry in entries:
-        ts = datetime.fromtimestamp(entry["add_time_epoch"], tz=timezone.utc)
+        ts = datetime.fromtimestamp(entry["add_time_epoch"], tz=UTC)
         key = timestamp_to_s3_key(ts)
         groups[key].append(entry)
     return dict(groups)
 
 
-def _entries_to_offsets(
-    entries: list[dict], hour_key: str
-) -> tuple[list[int], list[int]]:
+def _entries_to_offsets(entries: list[dict], hour_key: str) -> tuple[list[int], list[int]]:
     """Convert flowsheet entries to offsets within an archive hour.
 
     Args:
@@ -124,7 +120,7 @@ def _entries_to_offsets(
     """
     # Parse hour start from S3 key: "YYYY/MM/DD/YYYYMMDDHH00.mp3"
     filename = Path(hour_key).stem  # "YYYYMMDDHH00"
-    hour_start = datetime.strptime(filename, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+    hour_start = datetime.strptime(filename, "%Y%m%d%H%M").replace(tzinfo=UTC)
     hour_start_epoch = hour_start.timestamp()
 
     offsets_ms = []
@@ -201,9 +197,7 @@ async def process_hour(
                 if window.play_ids:
                     closest_pid = min(
                         window.play_ids,
-                        key=lambda pid: abs(
-                            offsets_ms[play_ids.index(pid)] - fp_offset
-                        ),
+                        key=lambda pid: abs(offsets_ms[play_ids.index(pid)] - fp_offset),
                     )
                     all_play_ids.append(closest_pid)
                 else:
@@ -355,8 +349,8 @@ def main() -> None:
     # Parse date range
     if args.date_range:
         start_str, end_str = args.date_range.split(":")
-        start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
         logger.error("--date-range is required")
         raise SystemExit(1)
