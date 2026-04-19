@@ -52,7 +52,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
 | `semantic_index/api/preview.py` | Audio preview URL endpoint with multi-source fallback (iTunes lookup, Spotify, Bandcamp, Deezer, iTunes search). Caches results in a sidecar SQLite database. Powers the in-card transition player in the graph explorer. |
 | `semantic_index/pg_source.py` | Query Backend-Service PostgreSQL (`wxyc_schema.*`) for pipeline input data. Returns the same types as `sql_parser.py` (FlowsheetEntry, LibraryCode, LibraryRelease). Used by the nightly sync instead of SQL dump parsing. |
-| `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
+| `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → entity dedup → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
 | `run_pipeline.py` | CLI entry point wiring the full pipeline (SQL dump mode). |
 | `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
 | `scripts/import_acousticbrainz.py` | ETL script: import AcousticBrainz high-level features from tar archives into PostgreSQL `ab_recording` table. Per-tar checkpointing, NAS-resilient, idempotent via `ON CONFLICT DO NOTHING`. |
@@ -400,7 +400,7 @@ The API service includes a built-in sync scheduler that runs `nightly_sync()` as
 - `DATABASE_URL_BACKEND=postgresql://...` — Backend-Service PG DSN (required when sync enabled)
 - `SYNC_MIN_COUNT=2` — minimum co-occurrence count for DJ transition edges
 
-The scheduler sleeps until the configured hour, runs the full pipeline (PG → resolve → PMI → export → facets → graph metrics), atomically swaps the database, then sleeps until the next day. The API continues serving requests during the rebuild. Runtime is ~5 minutes.
+The scheduler sleeps until the configured hour, runs the full pipeline (PG → resolve → PMI → export → entity dedup → facets → graph metrics), atomically swaps the database, then sleeps until the next day. The API continues serving requests during the rebuild. Runtime is ~5 minutes.
 
 The sync can also be run manually via CLI: `python scripts/nightly_sync.py --dsn postgresql://... --verbose`
 

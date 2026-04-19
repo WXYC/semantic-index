@@ -5,8 +5,11 @@ _atomic_swap) and verifies enrichment data survives a pipeline re-run on
 a copied database.
 """
 
+import argparse
 import sqlite3
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -324,3 +327,149 @@ class TestAtomicSwap:
         atomic_swap(temp, prod, dry_run=False)
 
         assert prod.exists()
+
+
+# ===========================================================================
+# Entity deduplication in nightly_sync
+# ===========================================================================
+
+
+def _stub_wxyc_etl():
+    """Pre-populate sys.modules with a stub wxyc_etl so lazy imports succeed."""
+    if "wxyc_etl" in sys.modules:
+        return
+    stub = MagicMock()
+    # text sub-module used by artist_resolver and graph_metrics
+    stub.text.normalize_artist_name = lambda name: name.lower().strip()
+    stub.text.is_compilation_artist = lambda name: name.lower() in ("various artists", "v/a")
+    stub.text.split_artist_name = lambda name: [name]
+    for name in (
+        "wxyc_etl",
+        "wxyc_etl.text",
+        "wxyc_etl.parser",
+        "wxyc_etl.schema",
+    ):
+        sys.modules.setdefault(name, stub)
+
+
+class TestNightlySyncDeduplication:
+    """Verify that nightly_sync calls deduplicate_by_qid after export and before facets."""
+
+    def _make_args(self, tmp_path: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            db_path=str(tmp_path / "prod.db"),
+            dsn="postgresql://fake",
+            min_count=2,
+            dry_run=True,
+        )
+
+    def _set_up_mocks(self, mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls):
+        """Configure common mocks for nightly_sync orchestration tests."""
+        from semantic_index.models import DeduplicationReport
+
+        mock_load.return_value = (
+            {},  # genres
+            [],  # codes
+            [],  # releases
+            [MagicMock(artist_name="Autechre", canonical_name="Autechre")],
+            {},  # show_to_dj
+            {},  # show_dj_names
+            [],  # artist_xrefs
+            [],  # release_xrefs
+        )
+
+        resolved = MagicMock()
+        resolved.resolution_method = "name_match"
+        resolved.canonical_name = "Autechre"
+        mock_resolver = mock_resolver_cls.return_value
+        mock_resolver.resolve.return_value = resolved
+        mock_resolver.re_resolve_with_play_counts.return_value = [resolved]
+
+        mock_xref = mock_xref_cls.return_value
+        mock_xref.extract_library_code_xrefs.return_value = []
+        mock_xref.extract_release_xrefs.return_value = []
+
+        mock_pdb = mock_pdb_cls.return_value
+        mock_pdb.bulk_upsert_artists.return_value = {"Autechre": 1}
+        mock_pdb.get_name_to_id_mapping.return_value = {"Autechre": 1}
+        mock_pdb.deduplicate_by_qid.return_value = DeduplicationReport(
+            groups_found=1,
+            entities_merged=1,
+            artists_reassigned=2,
+            edges_rekeyed=3,
+        )
+        return mock_pdb
+
+    def _run_nightly_sync(self, tmp_path, extra_setup=None):
+        """Run nightly_sync with all heavy dependencies mocked out.
+
+        Returns the mock PipelineDB instance for assertions.
+        """
+        _stub_wxyc_etl()
+
+        prod = tmp_path / "prod.db"
+        _create_test_db(prod)
+
+        with (
+            patch("semantic_index.nightly_sync._load_from_pg") as mock_load,
+            patch("semantic_index.pipeline_db.PipelineDB") as mock_pdb_cls,
+            patch("semantic_index.nightly_sync._clear_recomputed_tables"),
+            patch("semantic_index.artist_resolver.ArtistResolver") as mock_resolver_cls,
+            patch("semantic_index.cross_reference.CrossReferenceExtractor") as mock_xref_cls,
+            patch("semantic_index.adjacency.extract_adjacency_pairs", return_value=[]),
+            patch("semantic_index.pmi.compute_pmi", return_value=[]),
+            patch("semantic_index.node_attributes.compute_artist_stats", return_value={}),
+            patch("semantic_index.sqlite_export.export_sqlite") as mock_export,
+            patch("semantic_index.facet_export.export_facet_tables") as mock_facets,
+            patch("semantic_index.graph_metrics.compute_and_persist") as mock_metrics,
+        ):
+            mock_pdb = self._set_up_mocks(mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls)
+            mock_metrics.return_value = MagicMock(community_count=0, artists_scored=0)
+
+            if extra_setup:
+                extra_setup(
+                    mock_pdb=mock_pdb,
+                    mock_export=mock_export,
+                    mock_facets=mock_facets,
+                )
+
+            from semantic_index.nightly_sync import nightly_sync
+
+            args = self._make_args(tmp_path)
+            nightly_sync(args)
+
+        return mock_pdb
+
+    def test_dedup_called_after_export_before_facets(self, tmp_path):
+        mock_pdb = self._run_nightly_sync(tmp_path)
+        mock_pdb.deduplicate_by_qid.assert_called_once()
+
+    def test_dedup_runs_before_facets(self, tmp_path):
+        """Entity dedup must run before facet export so artist IDs are stable."""
+        from semantic_index.models import DeduplicationReport
+
+        call_order = []
+
+        def setup(mock_pdb, mock_export, mock_facets):
+            mock_export.side_effect = lambda *a, **kw: call_order.append("export_sqlite")
+            mock_pdb.deduplicate_by_qid.side_effect = lambda: (
+                call_order.append("deduplicate_by_qid")
+                or DeduplicationReport(
+                    groups_found=0, entities_merged=0, artists_reassigned=0, edges_rekeyed=0
+                )
+            )
+            mock_facets.side_effect = lambda *a, **kw: call_order.append("export_facet_tables")
+
+        self._run_nightly_sync(tmp_path, extra_setup=setup)
+
+        assert "export_sqlite" in call_order
+        assert "deduplicate_by_qid" in call_order
+        assert "export_facet_tables" in call_order
+
+        export_idx = call_order.index("export_sqlite")
+        dedup_idx = call_order.index("deduplicate_by_qid")
+        facet_idx = call_order.index("export_facet_tables")
+
+        assert (
+            export_idx < dedup_idx < facet_idx
+        ), f"Expected export < dedup < facets, got: {call_order}"
