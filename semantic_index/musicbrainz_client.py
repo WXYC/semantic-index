@@ -34,6 +34,43 @@ class MusicBrainzClient:
                 return None
         return self._cache_conn
 
+    def resolve_gids_to_ids(self, gids: list[str]) -> dict[str, int]:
+        """Resolve MusicBrainz artist GIDs (UUIDs) to integer IDs.
+
+        Queries ``mb_artist`` in the musicbrainz-cache to map artist GID
+        strings to the internal integer IDs needed by ``mb_artist_recording``.
+
+        Args:
+            gids: List of MusicBrainz artist GID strings (UUIDs).
+
+        Returns:
+            Dict mapping GID string to integer artist ID. GIDs not found
+            in ``mb_artist`` are omitted.
+        """
+        if not gids:
+            return {}
+
+        conn = self._get_conn()
+        if conn is None:
+            return {}
+
+        try:
+            result: dict[str, int] = {}
+            batch_size = 1000
+            for i in range(0, len(gids), batch_size):
+                batch = gids[i : i + batch_size]
+                rows = conn.execute(
+                    "SELECT id, gid::text FROM mb_artist WHERE gid = ANY(%s)",
+                    (batch,),
+                ).fetchall()
+                for artist_id, gid in rows:
+                    result[gid] = artist_id
+
+            return result
+        except Exception:
+            logger.warning("GID-to-ID resolution failed", exc_info=True)
+            return {}
+
     def get_recording_mbids(self, mb_artist_ids: list[int]) -> dict[int, list[str]]:
         """Get recording MBIDs for a set of MusicBrainz artist IDs.
 
