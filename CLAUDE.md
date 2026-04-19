@@ -39,7 +39,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
 | `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
 | `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features, aggregate per-artist audio profiles (59-dim feature vector across 18 classifiers), compute cosine similarity edges. Supports both PG and tar-based loading. |
-| `semantic_index/acousticbrainz_client.py` | PostgreSQL client for AcousticBrainz features. Queries `ab_recording` in musicbrainz-cache, joining with `mb_artist_recording` for per-artist feature retrieval. Resolves MusicBrainz GIDs (UUIDs) to integer IDs via `mb_artist.gid`. Preferred over tar-based loading. |
+| `semantic_index/acousticbrainz_client.py` | PostgreSQL client for AcousticBrainz features. Queries `ab_recording` in musicbrainz-cache, joining with `mb_artist_recording` for per-artist feature retrieval. Preferred over tar-based loading. |
 | `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: recording MBID resolution via `mb_artist_recording` materialized view. Identity resolution methods (lookup_by_name, batch_lookup) have been moved to LML. |
 | `semantic_index/graph_metrics.py` | Compute and persist Louvain communities, betweenness centrality, PageRank, and discovery scores to the SQLite database. Uses `wxyc_etl.text.is_compilation_artist` to filter compilation entries. Idempotent post-processing step runnable standalone or as a pipeline step. |
 | `semantic_index/graph_export.py` | Build NetworkX graph and export GEXF. |

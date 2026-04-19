@@ -20,8 +20,7 @@ def _create_test_db(path: Path, *, with_enrichment: bool = False) -> None:
     inserts sample data that should survive a nightly sync.
     """
     conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE artist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             canonical_name TEXT NOT NULL UNIQUE,
@@ -45,8 +44,7 @@ def _create_test_db(path: Path, *, with_enrichment: bool = False) -> None:
             source TEXT NOT NULL,
             PRIMARY KEY (artist_a_id, artist_b_id, source)
         );
-        """
-    )
+        """)
 
     # Seed some edge data that should be cleared
     conn.execute("INSERT INTO artist (canonical_name, total_plays) VALUES ('Autechre', 500)")
@@ -55,8 +53,7 @@ def _create_test_db(path: Path, *, with_enrichment: bool = False) -> None:
     conn.execute("INSERT INTO cross_reference VALUES (1, 2, 'see also', 'library_code')")
 
     if with_enrichment:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE entity (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 wikidata_qid TEXT,
@@ -78,8 +75,7 @@ def _create_test_db(path: Path, *, with_enrichment: bool = False) -> None:
                 recording_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '2025-01-01'
             );
-            """
-        )
+            """)
         conn.execute("INSERT INTO entity (wikidata_qid, name) VALUES ('Q210513', 'Autechre')")
         conn.execute("INSERT INTO wikidata_influence VALUES (1, 2, 'Q210513', 'Q484464')")
         conn.execute("INSERT INTO audio_profile VALUES (1, 0.35, 42, '2025-01-01')")
@@ -175,12 +171,12 @@ class TestCleanStaleTempFiles:
 
 class TestPrepareWorkingDb:
     def test_copies_existing_db(self, tmp_path):
-        from semantic_index.nightly_sync import _prepare_working_db
+        from semantic_index.nightly_sync import prepare_working_db
 
         prod = tmp_path / "prod.db"
         _create_test_db(prod)
 
-        temp = _prepare_working_db(prod)
+        temp = prepare_working_db(prod)
 
         assert temp.exists()
         assert temp != prod
@@ -191,27 +187,27 @@ class TestPrepareWorkingDb:
         assert count == 2
 
     def test_first_run_creates_empty_temp(self, tmp_path):
-        from semantic_index.nightly_sync import _prepare_working_db
+        from semantic_index.nightly_sync import prepare_working_db
 
         prod = tmp_path / "nonexistent.db"
-        temp = _prepare_working_db(prod)
+        temp = prepare_working_db(prod)
 
         assert temp.exists()
         assert temp.stat().st_size == 0
 
     def test_temp_in_same_directory_as_production(self, tmp_path):
-        from semantic_index.nightly_sync import _prepare_working_db
+        from semantic_index.nightly_sync import prepare_working_db
 
         prod = tmp_path / "data" / "graph.db"
         prod.parent.mkdir()
         _create_test_db(prod)
 
-        temp = _prepare_working_db(prod)
+        temp = prepare_working_db(prod)
 
         assert temp.parent == prod.parent
 
     def test_cleans_stale_temps_before_creating_new(self, tmp_path):
-        from semantic_index.nightly_sync import _prepare_working_db
+        from semantic_index.nightly_sync import prepare_working_db
 
         prod = tmp_path / "prod.db"
         _create_test_db(prod)
@@ -219,7 +215,7 @@ class TestPrepareWorkingDb:
         stale = tmp_path / "prod.tmp.9999.db"
         stale.write_bytes(b"orphaned from previous crash")
 
-        temp = _prepare_working_db(prod)
+        temp = prepare_working_db(prod)
 
         assert not stale.exists()
         assert temp.exists()
@@ -279,7 +275,7 @@ class TestClearRecomputedTables:
 
 class TestAtomicSwap:
     def test_replaces_production_with_temp(self, tmp_path):
-        from semantic_index.nightly_sync import _atomic_swap
+        from semantic_index.nightly_sync import atomic_swap
 
         prod = tmp_path / "prod.db"
         prod.write_bytes(b"old content")
@@ -287,13 +283,13 @@ class TestAtomicSwap:
         temp = tmp_path / "temp.db"
         temp.write_bytes(b"new content")
 
-        _atomic_swap(temp, prod, dry_run=False)
+        atomic_swap(temp, prod, dry_run=False)
 
         assert prod.read_bytes() == b"new content"
         assert not temp.exists()
 
     def test_dry_run_removes_temp_keeps_production(self, tmp_path):
-        from semantic_index.nightly_sync import _atomic_swap
+        from semantic_index.nightly_sync import atomic_swap
 
         prod = tmp_path / "prod.db"
         prod.write_bytes(b"old content")
@@ -301,30 +297,30 @@ class TestAtomicSwap:
         temp = tmp_path / "temp.db"
         temp.write_bytes(b"new content")
 
-        _atomic_swap(temp, prod, dry_run=True)
+        atomic_swap(temp, prod, dry_run=True)
 
         assert prod.read_bytes() == b"old content"
         assert not temp.exists()
 
     def test_first_run_no_existing_production(self, tmp_path):
-        from semantic_index.nightly_sync import _atomic_swap
+        from semantic_index.nightly_sync import atomic_swap
 
         prod = tmp_path / "prod.db"
         temp = tmp_path / "temp.db"
         temp.write_bytes(b"new content")
 
-        _atomic_swap(temp, prod, dry_run=False)
+        atomic_swap(temp, prod, dry_run=False)
 
         assert prod.read_bytes() == b"new content"
 
     def test_creates_parent_directory(self, tmp_path):
-        from semantic_index.nightly_sync import _atomic_swap
+        from semantic_index.nightly_sync import atomic_swap
 
         prod = tmp_path / "data" / "graph.db"
         temp = tmp_path / "data" / "temp.db"
         temp.parent.mkdir()
         temp.write_bytes(b"new content")
 
-        _atomic_swap(temp, prod, dry_run=False)
+        atomic_swap(temp, prod, dry_run=False)
 
         assert prod.exists()

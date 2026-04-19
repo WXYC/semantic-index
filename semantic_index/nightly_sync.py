@@ -62,7 +62,7 @@ def _clean_stale_temp_files(production_path: Path) -> None:
         stale.unlink()
 
 
-def _prepare_working_db(production_path: Path) -> Path:
+def prepare_working_db(production_path: Path) -> Path:
     """Create a working copy of the production database.
 
     If the production file exists and is valid SQLite, copies it to a
@@ -104,14 +104,14 @@ def _clear_recomputed_tables(db_path: str) -> None:
     conn.close()
 
 
-def _checkpoint_and_close(db_path: str) -> None:
+def checkpoint_and_close(db_path: str) -> None:
     """Truncate WAL journal so the file is self-contained before swap."""
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
 
 
-def _atomic_swap(temp_path: Path, production_path: Path, *, dry_run: bool = False) -> None:
+def atomic_swap(temp_path: Path, production_path: Path, *, dry_run: bool = False) -> None:
     """Atomically replace the production DB with the completed working copy.
 
     Uses ``os.replace`` which is atomic on POSIX when source and
@@ -190,7 +190,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
     min_count = args.min_count
 
     # --- Step 1: Prepare working copy ---
-    temp_path = _prepare_working_db(production_path)
+    temp_path = prepare_working_db(production_path)
     swap_ok = False
 
     try:
@@ -324,13 +324,13 @@ def nightly_sync(args: argparse.Namespace) -> None:
         )
 
         # --- Step 10: Checkpoint + swap ---
-        _checkpoint_and_close(str(temp_path))
+        checkpoint_and_close(str(temp_path))
 
         size_mb = temp_path.stat().st_size / (1024 * 1024)
         elapsed = time.time() - t0
         logger.info("Pipeline complete in %.1fs (%.1f MB)", elapsed, size_mb)
 
-        _atomic_swap(temp_path, production_path, dry_run=args.dry_run)
+        atomic_swap(temp_path, production_path, dry_run=args.dry_run)
         swap_ok = True
 
     finally:

@@ -11,7 +11,6 @@ from semantic_index.acousticbrainz import FEATURE_VECTOR_DIM
 # MusicBrainz GIDs (UUIDs) — the format stored in artist.musicbrainz_artist_id
 GID_AUTECHRE = "410c9baf-5469-44f6-9852-826524b80c61"
 GID_STEREOLAB = "f22942a1-6f70-4f48-866e-238cb2308fbd"
-GID_CAT_POWER = "7a47cd48-1a5e-4f0d-8db1-3985f944c3e4"
 
 
 def _make_test_db(tmp_path: Path, *, with_profiles: dict[int, bool] | None = None) -> Path:
@@ -146,11 +145,13 @@ class TestRecover:
         mock_features = {12345: [_make_mock_recording_features()] * 3}
 
         with (
-            patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_client_cls,
+            patch("semantic_index.musicbrainz_client.MusicBrainzClient") as mock_mb_cls,
+            patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
         ):
-            client = mock_client_cls.return_value
-            client.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
-            client.get_features_for_artists.return_value = mock_features
+            mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
+            mock_mb_cls.return_value._cache_conn = None
+            mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
+            mock_ab_cls.return_value._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -160,7 +161,7 @@ class TestRecover:
             )
 
         # resolve_gids_to_ids was called with UUID strings, not int()
-        call_args = client.resolve_gids_to_ids.call_args[0][0]
+        call_args = mock_mb_cls.return_value.resolve_gids_to_ids.call_args[0][0]
         for gid in call_args:
             assert "-" in gid, f"Expected UUID string, got {gid}"
 
@@ -174,13 +175,17 @@ class TestRecover:
             67890: [_make_mock_recording_features()] * 3,
         }
 
-        with patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_client_cls:
-            client = mock_client_cls.return_value
-            client.resolve_gids_to_ids.return_value = {
+        with (
+            patch("semantic_index.musicbrainz_client.MusicBrainzClient") as mock_mb_cls,
+            patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
+        ):
+            mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {
                 GID_AUTECHRE: 12345,
                 GID_STEREOLAB: 67890,
             }
-            client.get_features_for_artists.return_value = mock_features
+            mock_mb_cls.return_value._cache_conn = None
+            mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
+            mock_ab_cls.return_value._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -200,13 +205,17 @@ class TestRecover:
             67890: [_make_mock_recording_features()] * 3,
         }
 
-        with patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_client_cls:
-            client = mock_client_cls.return_value
-            client.resolve_gids_to_ids.return_value = {
+        with (
+            patch("semantic_index.musicbrainz_client.MusicBrainzClient") as mock_mb_cls,
+            patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
+        ):
+            mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {
                 GID_AUTECHRE: 12345,
                 GID_STEREOLAB: 67890,
             }
-            client.get_features_for_artists.return_value = mock_features
+            mock_mb_cls.return_value._cache_conn = None
+            mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
+            mock_ab_cls.return_value._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -223,10 +232,14 @@ class TestRecover:
         db_path = _make_test_db(tmp_path)
         mock_features = {12345: [_make_mock_recording_features()] * 3}
 
-        with patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_client_cls:
-            client = mock_client_cls.return_value
-            client.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
-            client.get_features_for_artists.return_value = mock_features
+        with (
+            patch("semantic_index.musicbrainz_client.MusicBrainzClient") as mock_mb_cls,
+            patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
+        ):
+            mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
+            mock_mb_cls.return_value._cache_conn = None
+            mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
+            mock_ab_cls.return_value._conn = None
 
             stats = recover(
                 db_path=str(db_path),
