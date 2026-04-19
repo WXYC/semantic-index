@@ -94,3 +94,21 @@ def create_app(
             )
 
     return app
+
+
+def _create_app_from_settings() -> FastAPI:
+    """Create the app from environment-based settings for uvicorn multiworker mode."""
+    from semantic_index.api.config import Settings
+
+    settings = Settings()
+    return create_app(
+        settings.db_path,
+        anthropic_api_key=settings.anthropic_api_key,
+        sync_enabled=settings.sync_enabled,
+        sync_hour_utc=settings.sync_hour_utc,
+        sync_dsn=settings.database_url_backend,
+        sync_min_count=settings.sync_min_count,
+    )
+
+
+app = _create_app_from_settings()
