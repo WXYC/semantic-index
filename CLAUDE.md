@@ -15,6 +15,8 @@ Backend PG → pg_source ─┘ → cross_reference ─────────�
             → musicbrainz_client → acousticbrainz_client (PG) ─────────→ audio_profile + acoustic_similarity
             → musicbrainz_client → acousticbrainz (tar loader, deprecated) → audio_profile + acoustic_similarity
 
+S3 archive → archive_client → archive_fingerprint (Chromaprint + AcoustID) → ab_recording (PG)
+
 SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
 
@@ -55,6 +57,9 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
 | `run_pipeline.py` | CLI entry point wiring the full pipeline (SQL dump mode). |
 | `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
+| `semantic_index/archive_client.py` | S3 client for WXYC hourly audio archives. Downloads MP3 files from `wxyc-archive` S3 bucket, decodes to PCM WAV via ffmpeg, extracts audio segments at specified offsets. Computes S3 keys from timestamps (`YYYY/MM/DD/YYYYMMDDHH00.mp3`). Provides search window computation and overlap merging for flowsheet-guided fingerprinting. |
+| `semantic_index/archive_fingerprint.py` | Archive audio fingerprinting and AcoustID identification. Generates Chromaprint fingerprints for audio segments via `pyacoustid`, submits to AcoustID API (rate-limited to 3 req/sec) to obtain MusicBrainz recording IDs. Includes checkpoint SQLite database for resumable processing. |
+| `scripts/process_archive.py` | CLI entry point for archive audio processing. Queries Backend-Service PG for flowsheet entries, groups by archive hour, orchestrates download -> decode -> fingerprint -> AcoustID lookup pipeline. Per-hour checkpointing, supports `--date-range`, `--max-hours`, `--retry-failed`, `--dry-run`. |
 | `scripts/import_acousticbrainz.py` | ETL script: import AcousticBrainz high-level features from tar archives into PostgreSQL `ab_recording` table. Per-tar checkpointing, NAS-resilient, idempotent via `ON CONFLICT DO NOTHING`. |
 
 ### Column Mappings (0-indexed from SQL INSERT order)
@@ -296,6 +301,35 @@ python scripts/import_acousticbrainz.py \
 ```
 
 The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured columns plus JSONB for probability distributions and metadata tags. The feature vector uses all 18 classifiers for a 59-dimension representation.
+
+### Archive fingerprinting (Phase 1)
+
+Extends audio feature coverage by fingerprinting WXYC's hourly audio archives (S3: `wxyc-archive`) and identifying recordings via AcoustID. Uses flowsheet timestamps as coarse search windows to limit the audio region that needs fingerprinting, bypassing timestamp inaccuracy via Chromaprint audio fingerprints.
+
+```bash
+python scripts/process_archive.py \
+    --backend-dsn postgresql://... \
+    --acoustid-api-key KEY \
+    --checkpoint output/archive_progress.db \
+    --date-range 2020-01-01:2020-12-31 \
+    --max-hours 100 \
+    [--match-threshold 0.7] \
+    [--retry-failed] \
+    [--dry-run]
+```
+
+- `--backend-dsn` / `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN (required). Queries `wxyc_schema.flowsheet` for entry timestamps.
+- `--acoustid-api-key` / `ACOUSTID_API_KEY` — AcoustID API key (required). Rate-limited to 3 req/sec.
+- `--checkpoint` / `ARCHIVE_CHECKPOINT` — Path to checkpoint SQLite database (default: `output/archive_progress.db`).
+- `--bucket` — S3 bucket name (default: `wxyc-archive`).
+- `--date-range` — Date range to process as `START:END` (YYYY-MM-DD:YYYY-MM-DD, required).
+- `--max-hours` — Maximum archive hours to process (0 = unlimited).
+- `--match-threshold` — Minimum AcoustID match score (default: 0.7).
+- `--skip-essentia` — Run fingerprint + AcoustID only, skip Essentia extraction (Phase 2, not yet implemented).
+- `--retry-failed` — Re-attempt previously failed archive hours.
+- `--dry-run` — Log what would be processed without downloading audio.
+
+System dependencies: `ffmpeg`, `libchromaprint-tools` (provides `fpcalc`). Optional Python dependency group: `pip install -e ".[archive]"`.
 
 ### Nightly sync mode
 

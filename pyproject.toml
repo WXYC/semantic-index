@@ -26,6 +26,10 @@ api = [
     "uvicorn>=0.27",
     "anthropic>=0.40",
 ]
+archive = [
+    "pyacoustid>=1.3.0",
+    "boto3>=1.28",
+]
 rust = [
     "wxyc-etl>=0.1.0",
 ]
@@ -76,6 +80,10 @@ strict_optional = true
 module = "wxyc_etl.*"
 ignore_missing_imports = true
 follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+module = ["acoustid", "boto3", "botocore.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 markers = [
