@@ -10,7 +10,7 @@ Atomic swap strategy:
     1. Copy existing production DB to a temp file
     2. Open as PipelineDB (enrichment tables intact)
     3. Clear recomputed edge tables
-    4. Run pipeline: PG → resolve → PMI → export → facets → metrics
+    4. Run pipeline: PG → resolve → PMI → export → entity dedup → facets → metrics
     5. WAL checkpoint, atomic ``os.replace``
 """
 
@@ -174,7 +174,7 @@ def _load_from_pg(dsn: str):
 
 
 def nightly_sync(args: argparse.Namespace) -> None:
-    """Main orchestration: PG → resolve → PMI → export → swap."""
+    """Main orchestration: PG → resolve → PMI → export → dedup → facets → metrics → swap."""
     from semantic_index.adjacency import extract_adjacency_pairs
     from semantic_index.artist_resolver import ArtistResolver
     from semantic_index.cross_reference import CrossReferenceExtractor
@@ -298,6 +298,18 @@ def nightly_sync(args: argparse.Namespace) -> None:
             min_count=min_count,
             pipeline_db=pipeline_db,
         )
+
+        # --- Step 7b: Entity deduplication ---
+        logger.info("Running entity deduplication...")
+        dedup_report = pipeline_db.deduplicate_by_qid()
+        if dedup_report.groups_found:
+            logger.info(
+                "  Dedup: %d groups, %d entities merged, %d artists reassigned, %d edges re-keyed",
+                dedup_report.groups_found,
+                dedup_report.entities_merged,
+                dedup_report.artists_reassigned,
+                dedup_report.edges_rekeyed,
+            )
 
         # --- Step 8: Facet tables ---
         logger.info("Exporting facet tables...")
