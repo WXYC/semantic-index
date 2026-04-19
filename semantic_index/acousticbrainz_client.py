@@ -10,7 +10,6 @@ import json
 import logging
 
 import psycopg
-import psycopg.errors
 
 from semantic_index.acousticbrainz import (
     GENRE_ELECTRONIC_LABELS,
@@ -82,50 +81,6 @@ class AcousticBrainzClient:
                 logger.warning("Failed to connect to musicbrainz database", exc_info=True)
                 return None
         return self._conn
-
-    def resolve_gids_to_ids(self, gids: list[str]) -> dict[str, int]:
-        """Resolve MusicBrainz artist GIDs (UUIDs) to internal integer IDs.
-
-        Queries ``mb_artist`` using the ``gid`` column added by issue #153.
-        Unresolved GIDs are silently omitted from the result.
-
-        Args:
-            gids: List of MusicBrainz artist UUID strings.
-
-        Returns:
-            Dict mapping GID string to internal integer ID.
-        """
-        if not gids:
-            return {}
-
-        conn = self._get_conn()
-        if conn is None:
-            return {}
-
-        try:
-            result: dict[str, int] = {}
-            batch_size = 1000
-            for i in range(0, len(gids), batch_size):
-                batch = gids[i : i + batch_size]
-                rows = conn.execute(
-                    "SELECT id, gid::text FROM mb_artist WHERE gid = ANY(%s::uuid[])",
-                    (batch,),
-                ).fetchall()
-                for int_id, gid_str in rows:
-                    result[gid_str] = int_id
-
-            logger.info(
-                "GID resolution: %d/%d GIDs resolved to integer IDs",
-                len(result),
-                len(gids),
-            )
-            return result
-        except psycopg.errors.UndefinedColumn:
-            logger.warning("mb_artist.gid column not found — run #153 migration first")
-            return {}
-        except Exception:
-            logger.warning("GID resolution failed", exc_info=True)
-            return {}
 
     def get_features_for_artists(
         self, mb_artist_ids: list[int]

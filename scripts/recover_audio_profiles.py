@@ -81,14 +81,15 @@ def recover(
         store_audio_profiles,
     )
     from semantic_index.acousticbrainz_client import AcousticBrainzClient
+    from semantic_index.musicbrainz_client import MusicBrainzClient
     from semantic_index.nightly_sync import (
-        _atomic_swap,
-        _checkpoint_and_close,
-        _prepare_working_db,
+        atomic_swap,
+        checkpoint_and_close,
+        prepare_working_db,
     )
 
     production_path = Path(db_path)
-    temp_path = _prepare_working_db(production_path)
+    temp_path = prepare_working_db(production_path)
     stats: dict[str, int] = {}
 
     try:
@@ -118,9 +119,9 @@ def recover(
             return stats
 
         # Step 2: Resolve GIDs → integer IDs
-        ab_client = AcousticBrainzClient(cache_dsn=musicbrainz_cache_dsn)
+        mb_client = MusicBrainzClient(cache_dsn=musicbrainz_cache_dsn)
         gids = list({row[1] for row in candidates})
-        gid_to_int = ab_client.resolve_gids_to_ids(gids)
+        gid_to_int = mb_client.resolve_gids_to_ids(gids)
         stats["resolved"] = len(gid_to_int)
         logger.info("Resolved %d/%d unique GIDs to integer IDs", len(gid_to_int), len(gids))
 
@@ -147,6 +148,7 @@ def recover(
         logger.info("%d candidate artists with resolved integer IDs", len(mb_ids))
 
         # Step 4: Fetch AcousticBrainz features
+        ab_client = AcousticBrainzClient(cache_dsn=musicbrainz_cache_dsn)
         ab_features = ab_client.get_features_for_artists(mb_ids)
         total_recordings = sum(len(v) for v in ab_features.values())
         logger.info(
@@ -158,9 +160,9 @@ def recover(
         # Step 5: Remap MB integer IDs → graph IDs
         artist_features: dict[int, list] = {}
         for mb_int, recordings in ab_features.items():
-            gid_for_mb = int_to_graph_id.get(mb_int)
-            if gid_for_mb is not None:
-                artist_features[gid_for_mb] = recordings
+            artist_id = int_to_graph_id.get(mb_int)
+            if artist_id is not None:
+                artist_features[artist_id] = recordings
 
         # Step 6: Build and store new profiles
         new_profiles = build_audio_profiles_from_features(
@@ -191,9 +193,15 @@ def recover(
 
         conn.close()
 
+        # Close PG connections
+        if mb_client._cache_conn and not mb_client._cache_conn.closed:
+            mb_client._cache_conn.close()
+        if ab_client._conn and not ab_client._conn.closed:
+            ab_client._conn.close()
+
         # Step 9: Checkpoint and swap
-        _checkpoint_and_close(str(temp_path))
-        _atomic_swap(temp_path, production_path, dry_run=dry_run)
+        checkpoint_and_close(str(temp_path))
+        atomic_swap(temp_path, production_path, dry_run=dry_run)
 
         logger.info(
             "Recovery complete: %d → %d profiles, %d → %d similarity edges",

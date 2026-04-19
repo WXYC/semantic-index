@@ -813,13 +813,49 @@ def compute_acoustic_similarity(
     Returns:
         Number of similarity edges created.
     """
+    import time as _time
+
     conn.executescript(_ACOUSTIC_SIMILARITY_SCHEMA)
 
     artist_ids = sorted(profiles.keys())
+    n = len(artist_ids)
+    total_pairs = n * (n - 1) // 2
     edge_count = 0
 
+    # Estimate runtime from a calibration batch (first 50 artists)
+    t0 = _time.monotonic()
+    calibration_size = min(50, n)
+    calibration_pairs = 0
+    for i in range(calibration_size):
+        for j in range(i + 1, calibration_size):
+            cosine_similarity(
+                profiles[artist_ids[i]].feature_centroid,
+                profiles[artist_ids[j]].feature_centroid,
+            )
+            calibration_pairs += 1
+    calibration_elapsed = _time.monotonic() - t0
+
+    if calibration_pairs > 0 and total_pairs > 0:
+        rate = calibration_pairs / calibration_elapsed if calibration_elapsed > 0 else 0
+        est_seconds = total_pairs / rate if rate > 0 else 0
+        if est_seconds < 60:
+            est_str = f"{est_seconds:.0f}s"
+        else:
+            est_str = f"{est_seconds / 60:.1f}m"
+        logger.info(
+            "Acoustic similarity: %d profiles, %s pairwise comparisons, estimated %s",
+            n,
+            f"{total_pairs:,}",
+            est_str,
+        )
+    else:
+        logger.info(
+            "Acoustic similarity: %d profiles, %s pairwise comparisons", n, f"{total_pairs:,}"
+        )
+
+    t_start = _time.monotonic()
     for i, aid in enumerate(artist_ids):
-        for j in range(i + 1, len(artist_ids)):
+        for j in range(i + 1, n):
             bid = artist_ids[j]
             sim = cosine_similarity(profiles[aid].feature_centroid, profiles[bid].feature_centroid)
             if sim >= threshold:
@@ -830,14 +866,24 @@ def compute_acoustic_similarity(
                 )
                 edge_count += 1
 
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 500 == 0:
+            elapsed = _time.monotonic() - t_start
+            pct = (i + 1) / n * 100
             logger.info(
-                "  Acoustic similarity: %d/%d artists compared, %d edges",
+                "  Acoustic similarity: %d/%d artists (%.0f%%), %d edges, %.0fs elapsed",
                 i + 1,
-                len(artist_ids),
+                n,
+                pct,
                 edge_count,
+                elapsed,
             )
 
+    elapsed = _time.monotonic() - t_start
     conn.commit()
-    logger.info("Acoustic similarity complete: %d edges (threshold=%.2f)", edge_count, threshold)
+    logger.info(
+        "Acoustic similarity complete: %d edges (threshold=%.2f) in %.0fs",
+        edge_count,
+        threshold,
+        elapsed,
+    )
     return edge_count
