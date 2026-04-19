@@ -99,9 +99,31 @@ CREATE TABLE IF NOT EXISTS reconciliation_log (
 CREATE INDEX IF NOT EXISTS idx_reconciliation_artist ON reconciliation_log(artist_id);
 """
 
-# Discogs-derived symmetric edge tables that need re-keying during entity dedup.
+# Symmetric edge tables that need re-keying during entity dedup.
 # Each stores undirected edges as (artist_a_id, artist_b_id) composite PKs.
-_DISCOGS_EDGE_TABLES = ("shared_personnel", "shared_style", "label_family", "compilation")
+_SYMMETRIC_EDGE_TABLES = (
+    "shared_personnel",
+    "shared_style",
+    "label_family",
+    "compilation",
+    "acoustic_similarity",
+)
+
+# Directed edge tables keyed by (source_id, target_id).
+_DIRECTED_EDGE_TABLES = ("wikidata_influence",)
+
+# Single-artist tables with artist_id as sole PK.
+_SINGLE_ARTIST_PK_TABLES = ("audio_profile",)
+
+# Single-artist tables with composite PK including artist_id.
+# Tuples of (table_name, pk_column_besides_artist_id).
+_SINGLE_ARTIST_COMPOSITE_PK_TABLES = (
+    ("artist_style", "style_tag"),
+    ("artist_label", "label_name"),
+)
+
+# Single-artist tables with no PK constraint (just an FK).
+_SINGLE_ARTIST_FK_TABLES = ("artist_personnel",)
 
 _ENTITY_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_entity_spotify ON entity(spotify_artist_id) WHERE spotify_artist_id IS NOT NULL;
@@ -395,10 +417,10 @@ class PipelineDB:
                ORDER BY wikidata_qid""").fetchall()
         return [(row[0], sorted(int(x) for x in row[1].split(","))) for row in rows]
 
-    def _rekey_discogs_edges(self, keep_id: int, merge_id: int) -> int:
-        """Re-key Discogs edge tables, replacing merge_id with keep_id.
+    def _rekey_symmetric_edges(self, keep_id: int, merge_id: int) -> int:
+        """Re-key symmetric edge tables, replacing merge_id with keep_id.
 
-        For each table in ``_DISCOGS_EDGE_TABLES``:
+        For each table in ``_SYMMETRIC_EDGE_TABLES``:
         1. Delete edges between merge_id and keep_id (would become self-referential).
         2. Delete edges that would create PK conflicts after re-keying (checks both
            ``(keep_id, X)`` and ``(X, keep_id)`` since tables are symmetric/unordered).
@@ -408,7 +430,7 @@ class PipelineDB:
         Returns the total number of edge rows re-keyed (step 3 only).
         """
         total = 0
-        for table in _DISCOGS_EDGE_TABLES:
+        for table in _SYMMETRIC_EDGE_TABLES:
             if not self._has_table(table):
                 continue
 
@@ -458,13 +480,128 @@ class PipelineDB:
             self._conn.execute(f"DELETE FROM {table} WHERE artist_a_id = artist_b_id")  # noqa: S608
         return total
 
+    def _rekey_directed_edges(self, keep_id: int, merge_id: int) -> int:
+        """Re-key directed edge tables, replacing merge_id with keep_id.
+
+        For each table in ``_DIRECTED_EDGE_TABLES`` (keyed by ``source_id``/``target_id``):
+        1. Delete edges between merge_id and keep_id (would become self-referential).
+        2. Delete edges that would create PK conflicts after re-keying.
+        3. UPDATE remaining edges to use keep_id.
+        4. Delete any residual self-referential edges (defensive).
+
+        Returns the total number of edge rows re-keyed (step 3 only).
+        """
+        total = 0
+        for table in _DIRECTED_EDGE_TABLES:
+            if not self._has_table(table):
+                continue
+
+            # 1. Delete edges between merge_id and keep_id
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE "  # noqa: S608
+                f"(source_id = ? AND target_id = ?) OR "
+                f"(source_id = ? AND target_id = ?)",
+                (merge_id, keep_id, keep_id, merge_id),
+            )
+
+            # 2a. Delete (merge_id, X) edges that conflict with existing (keep_id, X)
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE source_id = ?1 AND "  # noqa: S608
+                f"EXISTS (SELECT 1 FROM {table} t2"
+                f"  WHERE t2.source_id = ?2 AND t2.target_id = {table}.target_id)",
+                (merge_id, keep_id),
+            )
+
+            # 2b. Delete (X, merge_id) edges that conflict with existing (X, keep_id)
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE target_id = ?1 AND "  # noqa: S608
+                f"EXISTS (SELECT 1 FROM {table} t2"
+                f"  WHERE t2.source_id = {table}.source_id AND t2.target_id = ?2)",
+                (merge_id, keep_id),
+            )
+
+            # 3. Re-key remaining edges
+            cur = self._conn.execute(
+                f"UPDATE {table} SET source_id = ? WHERE source_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+            cur = self._conn.execute(
+                f"UPDATE {table} SET target_id = ? WHERE target_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+
+            # 4. Safety: delete any self-referential edges
+            self._conn.execute(f"DELETE FROM {table} WHERE source_id = target_id")  # noqa: S608
+        return total
+
+    def _rekey_single_artist_tables(self, keep_id: int, merge_id: int) -> int:
+        """Re-key single-artist tables, replacing merge_id with keep_id.
+
+        Handles three table categories:
+        - PK tables (``artist_id`` is the sole PK): delete merge_id row if
+          keep_id already exists, otherwise UPDATE.
+        - Composite PK tables (PK includes ``artist_id`` + another column):
+          delete duplicates, then UPDATE remaining.
+        - FK-only tables (no PK constraint): simple UPDATE.
+
+        Returns the total number of rows re-keyed.
+        """
+        total = 0
+
+        # Tables where artist_id is the sole PK
+        for table in _SINGLE_ARTIST_PK_TABLES:
+            if not self._has_table(table):
+                continue
+            # Delete merge_id's row if keep_id already has one (PK conflict)
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE artist_id = ?1 AND "  # noqa: S608
+                f"EXISTS (SELECT 1 FROM {table} t2 WHERE t2.artist_id = ?2)",
+                (merge_id, keep_id),
+            )
+            cur = self._conn.execute(
+                f"UPDATE {table} SET artist_id = ? WHERE artist_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+
+        # Tables with composite PK (artist_id, other_column)
+        for table, other_col in _SINGLE_ARTIST_COMPOSITE_PK_TABLES:
+            if not self._has_table(table):
+                continue
+            # Delete merge_id rows that would conflict with existing keep_id rows
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE artist_id = ?1 AND "  # noqa: S608
+                f"EXISTS (SELECT 1 FROM {table} t2"
+                f"  WHERE t2.artist_id = ?2 AND t2.{other_col} = {table}.{other_col})",
+                (merge_id, keep_id),
+            )
+            cur = self._conn.execute(
+                f"UPDATE {table} SET artist_id = ? WHERE artist_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+
+        # Tables with no PK constraint (just FK)
+        for table in _SINGLE_ARTIST_FK_TABLES:
+            if not self._has_table(table):
+                continue
+            cur = self._conn.execute(
+                f"UPDATE {table} SET artist_id = ? WHERE artist_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+
+        return total
+
     def _consolidate_entity_edges(self, entity_id: int) -> int:
-        """Re-key Discogs edges so all artists sharing entity_id use one survivor.
+        """Re-key all artist-referencing tables so aliases use one survivor.
 
         Picks the artist with the lowest id as the survivor. For each remaining
-        alias artist, re-keys its Discogs edge references to the survivor.
+        alias artist, re-keys its edge and enrichment references to the survivor.
 
-        Returns the total number of edge rows re-keyed.
+        Returns the total number of rows re-keyed.
         """
         rows = self._conn.execute(
             "SELECT id FROM artist WHERE entity_id = ? ORDER BY id", (entity_id,)
@@ -474,13 +611,16 @@ class PipelineDB:
         keep_artist_id = rows[0][0]
         total = 0
         for row in rows[1:]:
-            total += self._rekey_discogs_edges(keep_artist_id, row[0])
+            merge_artist_id = row[0]
+            total += self._rekey_symmetric_edges(keep_artist_id, merge_artist_id)
+            total += self._rekey_directed_edges(keep_artist_id, merge_artist_id)
+            total += self._rekey_single_artist_tables(keep_artist_id, merge_artist_id)
         return total
 
     def merge_entities(self, keep_id: int, merge_id: int) -> int:
-        """Merge two entities: re-parent artists, re-key edges, delete merged entity.
+        """Merge two entities: re-parent artists, re-key all references, delete merged entity.
 
-        Returns the number of Discogs edge rows re-keyed.
+        Returns the number of rows re-keyed across all artist-referencing tables.
         """
         if keep_id == merge_id:
             raise ValueError("Cannot merge an entity into itself")
