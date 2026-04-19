@@ -144,10 +144,8 @@ async def fingerprint_and_lookup(
     last_request_time = 0.0
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        for offset, pid in zip(offsets_ms, play_ids):
-            segment_path = ArchiveClient.extract_segment(
-                wav_path, offset, segment_duration_ms
-            )
+        for offset, pid in zip(offsets_ms, play_ids, strict=True):
+            segment_path = ArchiveClient.extract_segment(wav_path, offset, segment_duration_ms)
             try:
                 duration, fingerprint = acoustid.fingerprint_file(str(segment_path))
             except Exception:
@@ -178,9 +176,7 @@ async def fingerprint_and_lookup(
                     resp.raise_for_status()
                     data = resp.json()
                 except Exception:
-                    logger.warning(
-                        "AcoustID lookup failed at offset %d", offset, exc_info=True
-                    )
+                    logger.warning("AcoustID lookup failed at offset %d", offset, exc_info=True)
                     continue
 
             for result in data.get("results", []):
