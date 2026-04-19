@@ -604,10 +604,12 @@ def run(args: argparse.Namespace) -> None:
         dedup_report = pipeline_db.deduplicate_by_qid()
         if dedup_report.groups_found > 0:
             log.info(
-                "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
+                "Entity deduplication: %d groups, %d entities merged, "
+                "%d artists reassigned, %d edges re-keyed",
                 dedup_report.groups_found,
                 dedup_report.entities_merged,
                 dedup_report.artists_reassigned,
+                dedup_report.edges_rekeyed,
             )
 
     # 6. Extract adjacency pairs
@@ -1027,6 +1029,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"  Dedup groups:            {dedup_report.groups_found:>12,}")
         print(f"  Entities merged:         {dedup_report.entities_merged:>12,}")
         print(f"  Artists reassigned:      {dedup_report.artists_reassigned:>12,}")
+        print(f"  Edges re-keyed:          {dedup_report.edges_rekeyed:>12,}")
     print(f"  Graph nodes:             {graph.number_of_nodes():>12,}")
     print(f"  Graph edges:             {graph.number_of_edges():>12,}")
     print(f"  GEXF output:             {gexf_path}")
