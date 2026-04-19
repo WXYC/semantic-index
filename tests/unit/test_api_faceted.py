@@ -169,12 +169,19 @@ async def old_client() -> AsyncClient:
 
 class TestFacetsEndpoint:
     @pytest.mark.asyncio
-    async def test_returns_months_and_djs(self, client: AsyncClient) -> None:
+    async def test_returns_months_without_djs_by_default(self, client: AsyncClient) -> None:
         resp = await client.get("/graph/facets")
         assert resp.status_code == 200
         data = resp.json()
         assert 1 in data["months"]
         assert 7 in data["months"]
+        assert data["djs"] == []
+
+    @pytest.mark.asyncio
+    async def test_returns_djs_when_requested(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/facets?include_djs=true")
+        assert resp.status_code == 200
+        data = resp.json()
         dj_names = {d["display_name"] for d in data["djs"]}
         assert "DJ Cool" in dj_names
         assert "DJ Sunshine" in dj_names
