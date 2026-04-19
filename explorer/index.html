@@ -1557,7 +1557,15 @@ async function loadFacets() {
     opt.textContent = monthNames[m - 1];
     monthSelect.appendChild(opt);
   }
+}
 
+// Lazy-load DJ list only when the DJ filter is first opened
+let djsLoaded = false;
+document.getElementById('djFilter').addEventListener('focus', async () => {
+  if (djsLoaded) return;
+  djsLoaded = true;
+  const data = await api('/graph/facets', { include_djs: true });
+  if (!data || !data.djs) return;
   const djSelect = document.getElementById('djFilter');
   for (const dj of data.djs) {
     const opt = document.createElement('option');
@@ -1565,7 +1573,7 @@ async function loadFacets() {
     opt.textContent = dj.display_name;
     djSelect.appendChild(opt);
   }
-}
+});
 
 // Mobile parallax effect on the graph
 if (isMobile) {

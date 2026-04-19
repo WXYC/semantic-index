@@ -213,9 +213,13 @@ def search_artists(
 
 @router.get("/facets", response_model=FacetsResponse)
 def get_facets(
+    include_djs: bool = Query(default=False),
     db: sqlite3.Connection = Depends(get_db),
 ) -> FacetsResponse:
     """Return available facet values (months, DJs) for filtering.
+
+    DJs are excluded by default (4K entries, ~195KB) to keep the initial
+    page load fast. Pass ``include_djs=true`` to populate the DJ dropdown.
 
     Gracefully returns empty lists on databases without facet tables.
     """
@@ -223,10 +227,14 @@ def get_facets(
         months = [
             r[0] for r in db.execute("SELECT month FROM month_total ORDER BY month").fetchall()
         ]
-        djs = [
-            DjSummary(id=r["id"], display_name=r["display_name"])
-            for r in db.execute("SELECT id, display_name FROM dj ORDER BY display_name").fetchall()
-        ]
+        djs = []
+        if include_djs:
+            djs = [
+                DjSummary(id=r["id"], display_name=r["display_name"])
+                for r in db.execute(
+                    "SELECT id, display_name FROM dj ORDER BY display_name"
+                ).fetchall()
+            ]
     except sqlite3.OperationalError:
         logger.debug("Facet tables not found — returning empty facets")
         months = []
