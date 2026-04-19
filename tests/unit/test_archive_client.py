@@ -1,8 +1,6 @@
 """Tests for archive S3 client and audio segment extraction."""
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 from semantic_index.archive_client import (
     SearchWindow,
@@ -11,7 +9,6 @@ from semantic_index.archive_client import (
     timestamp_to_s3_key,
 )
 
-
 # ---------------------------------------------------------------------------
 # S3 key construction
 # ---------------------------------------------------------------------------
@@ -19,21 +16,21 @@ from semantic_index.archive_client import (
 
 class TestTimestampToS3Key:
     def test_basic_key(self):
-        ts = datetime(2020, 3, 14, 19, 30, 0, tzinfo=timezone.utc)
+        ts = datetime(2020, 3, 14, 19, 30, 0, tzinfo=UTC)
         assert timestamp_to_s3_key(ts) == "2020/03/14/202003141900.mp3"
 
     def test_midnight(self):
-        ts = datetime(2021, 1, 1, 0, 15, 0, tzinfo=timezone.utc)
+        ts = datetime(2021, 1, 1, 0, 15, 0, tzinfo=UTC)
         assert timestamp_to_s3_key(ts) == "2021/01/01/202101010000.mp3"
 
     def test_end_of_day(self):
-        ts = datetime(2019, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        ts = datetime(2019, 12, 31, 23, 59, 59, tzinfo=UTC)
         assert timestamp_to_s3_key(ts) == "2019/12/31/201912312300.mp3"
 
     def test_truncates_to_hour(self):
         """Minutes and seconds are ignored — S3 files are hourly."""
-        ts1 = datetime(2020, 6, 15, 14, 0, 0, tzinfo=timezone.utc)
-        ts2 = datetime(2020, 6, 15, 14, 59, 59, tzinfo=timezone.utc)
+        ts1 = datetime(2020, 6, 15, 14, 0, 0, tzinfo=UTC)
+        ts2 = datetime(2020, 6, 15, 14, 59, 59, tzinfo=UTC)
         assert timestamp_to_s3_key(ts1) == timestamp_to_s3_key(ts2)
 
 

@@ -1,9 +1,6 @@
 """Tests for archive fingerprinting and AcoustID lookup."""
 
 import sqlite3
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from semantic_index.archive_fingerprint import (
     AcoustIDMatch,
@@ -11,7 +8,6 @@ from semantic_index.archive_fingerprint import (
     _best_match_per_play,
     _generate_fingerprint_offsets,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fingerprint offset generation
@@ -121,9 +117,7 @@ class TestCheckpointDB:
         conn = sqlite3.connect(str(db_path))
         tables = {
             row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert "hour_progress" in tables
         assert "segment_match" in tables

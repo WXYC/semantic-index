@@ -81,7 +81,7 @@ def compute_search_windows(
         play_ids = list(range(len(play_offsets_ms)))
 
     windows = []
-    for offset, pid in zip(play_offsets_ms, play_ids):
+    for offset, pid in zip(play_offsets_ms, play_ids, strict=True):
         start = max(0, offset - window_half_width_ms)
         end = min(hour_duration_ms, offset + window_half_width_ms)
         windows.append(SearchWindow(start_ms=start, end_ms=end, play_ids=[pid]))
@@ -157,9 +157,7 @@ class ArchiveClient:
             botocore.exceptions.ClientError: If the S3 key does not exist.
         """
         suffix = Path(s3_key).suffix
-        fd = tempfile.NamedTemporaryFile(
-            suffix=suffix, dir=self._temp_dir, delete=False
-        )
+        fd = tempfile.NamedTemporaryFile(suffix=suffix, dir=self._temp_dir, delete=False)
         local_path = Path(fd.name)
         fd.close()
 

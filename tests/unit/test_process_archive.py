@@ -1,10 +1,5 @@
 """Tests for the process_archive CLI helpers."""
 
-from datetime import datetime, timezone
-
-import pytest
-
-# Import the helper functions from the script
 import sys
 from pathlib import Path
 
@@ -42,9 +37,9 @@ class TestEntriesToOffsets:
         hour_key = "2020/03/14/202003141900.mp3"
         # Hour starts at 2020-03-14 19:00:00 UTC = epoch 1584212400
         entries = [
-            {"add_time_epoch": 1584212400, "id": 1},      # +0s
-            {"add_time_epoch": 1584213000, "id": 2},      # +600s = 10 min
-            {"add_time_epoch": 1584214200, "id": 3},      # +1800s = 30 min
+            {"add_time_epoch": 1584212400, "id": 1},  # +0s
+            {"add_time_epoch": 1584213000, "id": 2},  # +600s = 10 min
+            {"add_time_epoch": 1584214200, "id": 3},  # +1800s = 30 min
         ]
         offsets, play_ids = _entries_to_offsets(entries, hour_key)
         assert offsets == [0, 600_000, 1_800_000]
