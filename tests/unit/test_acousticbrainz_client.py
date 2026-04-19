@@ -191,3 +191,85 @@ class TestAcousticBrainzClient:
             result = client.get_features_for_artists([42])
 
         assert result == {}
+
+
+# MusicBrainz artist GIDs used in resolve_gids_to_ids tests
+GID_AUTECHRE = "410c9baf-5469-44f6-9852-826524b80c61"
+GID_STEREOLAB = "f22942a1-6f70-4f48-866e-238cb2308fbd"
+GID_NONEXISTENT = "00000000-0000-0000-0000-000000000000"
+
+
+class TestResolveGidsToIds:
+    """Test GID-to-integer-ID resolution via mb_artist."""
+
+    def test_resolve_gids_to_ids_basic(self) -> None:
+        """GIDs are resolved to integer IDs via mb_artist."""
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/musicbrainz")
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            (12345, GID_AUTECHRE),
+            (67890, GID_STEREOLAB),
+        ]
+
+        with patch.object(client, "_get_conn", return_value=mock_conn):
+            result = client.resolve_gids_to_ids([GID_AUTECHRE, GID_STEREOLAB])
+
+        assert result == {GID_AUTECHRE: 12345, GID_STEREOLAB: 67890}
+
+    def test_resolve_gids_to_ids_missing_gids(self) -> None:
+        """GIDs not found in mb_artist are silently omitted."""
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/musicbrainz")
+        mock_conn = MagicMock()
+        # Only one of two GIDs found
+        mock_conn.execute.return_value.fetchall.return_value = [
+            (12345, GID_AUTECHRE),
+        ]
+
+        with patch.object(client, "_get_conn", return_value=mock_conn):
+            result = client.resolve_gids_to_ids([GID_AUTECHRE, GID_NONEXISTENT])
+
+        assert result == {GID_AUTECHRE: 12345}
+        assert GID_NONEXISTENT not in result
+
+    def test_resolve_gids_to_ids_empty_input(self) -> None:
+        """Empty input returns empty dict without querying."""
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/musicbrainz")
+        result = client.resolve_gids_to_ids([])
+        assert result == {}
+
+    def test_resolve_gids_to_ids_connection_failure(self) -> None:
+        """Connection failure returns empty dict gracefully."""
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/nonexistent")
+
+        with patch.object(client, "_get_conn", return_value=None):
+            result = client.resolve_gids_to_ids([GID_AUTECHRE])
+
+        assert result == {}
+
+    def test_resolve_gids_to_ids_missing_gid_column(self) -> None:
+        """Missing gid column (pre-#153) returns empty dict with warning."""
+        from psycopg.errors import UndefinedColumn
+
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/musicbrainz")
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = UndefinedColumn("column mb_artist.gid does not exist")
+
+        with patch.object(client, "_get_conn", return_value=mock_conn):
+            result = client.resolve_gids_to_ids([GID_AUTECHRE])
+
+        assert result == {}
+
+    def test_resolve_gids_to_ids_batching(self) -> None:
+        """GIDs are resolved in batches of 1,000."""
+        client = AcousticBrainzClient(cache_dsn="postgresql://localhost/musicbrainz")
+        mock_conn = MagicMock()
+        # Return empty for each batch call
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        gids = [f"00000000-0000-0000-0000-{i:012d}" for i in range(2500)]
+
+        with patch.object(client, "_get_conn", return_value=mock_conn):
+            client.resolve_gids_to_ids(gids)
+
+        # 2500 GIDs / 1000 batch size = 3 batches
+        assert mock_conn.execute.call_count == 3

@@ -764,6 +764,37 @@ def store_audio_profiles(
     return len(profiles)
 
 
+def load_audio_profiles(conn: sqlite3.Connection) -> dict[int, ArtistAudioProfile]:
+    """Load all persisted audio profiles from SQLite.
+
+    Reconstructs ``ArtistAudioProfile`` objects from the ``audio_profile``
+    table, deserializing the ``feature_centroid`` JSON column back to a
+    list of floats for similarity computation.
+
+    Args:
+        conn: SQLite connection to the graph database.
+
+    Returns:
+        Dict mapping artist ID to ArtistAudioProfile.
+    """
+    rows = conn.execute(
+        "SELECT artist_id, avg_danceability, primary_genre, "
+        "primary_genre_probability, voice_instrumental_ratio, "
+        "feature_centroid, recording_count FROM audio_profile"
+    ).fetchall()
+    return {
+        row[0]: ArtistAudioProfile(
+            recording_count=row[6],
+            avg_danceability=row[1],
+            primary_genre=row[2],
+            primary_genre_probability=row[3],
+            voice_instrumental_ratio=row[4],
+            feature_centroid=json.loads(row[5]),
+        )
+        for row in rows
+    }
+
+
 def compute_acoustic_similarity(
     conn: sqlite3.Connection,
     profiles: dict[int, ArtistAudioProfile],
