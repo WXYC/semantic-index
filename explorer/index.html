@@ -749,12 +749,13 @@ function populateSidebar(centerArtist, neighbors) {
     observer.observe(card);
   }
 
-  // Eager-load top 5
+  // Eager-load top 5 narratives (non-blocking — don't await)
   const eagerCards = list.querySelectorAll('.sidebar-card');
   for (let i = 0; i < Math.min(5, eagerCards.length); i++) {
     observer.unobserve(eagerCards[i]);
     loadNarrative(eagerCards[i], centerArtist.id, parseInt(eagerCards[i].dataset.neighborId), gen);
   }
+  // Narratives load in background; sidebar is interactive immediately
 }
 
 async function loadNarrative(card, sourceId, targetId, gen) {
@@ -1580,7 +1581,8 @@ if (isMobile) {
 
 // Initialize from URL or random artist
 (async () => {
-  await loadFacets();
+  // Load facets in background — don't block artist loading
+  loadFacets();
 
   const state = parseURL(window.location.search);
   document.getElementById('edgeType').value = state.edge;
