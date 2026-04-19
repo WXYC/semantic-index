@@ -476,6 +476,18 @@ async function api(path, params = {}, signal) {
   return res.json();
 }
 
+async function apiBatchNeighbors(artistIds, params = {}) {
+  const url = new URL('/graph/artists/neighbors/batch', API_BASE);
+  const body = { artist_ids: artistIds, ...params };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 
 const EXCLUDED_ARTISTS = new Set([
   'various', 'various artists', 'v/a', 'va', 'various artist',
@@ -1198,33 +1210,30 @@ async function loadNeighborhood(artistId, artistName, depth = 2) {
     });
   }
 
-  // Depth 2: fetch neighbors of neighbors
+  // Depth 2: fetch neighbors of neighbors in a single batch request
   if (depth >= 2) {
-    const secondHopIds = data.neighbors.map(n => n.artist.id);
+    const secondHopIds = data.neighbors.map(n => n.artist.id).slice(0, 10);
     const secondHopLimit = Math.max(3, Math.floor(limit / 2));
-    const secondHopParams = { type: edgeType, limit: secondHopLimit };
-    if (monthVal) secondHopParams.month = monthVal;
-    if (djVal) secondHopParams.dj_id = djVal;
-    secondHopParams.heat = heat;
-    const promises = secondHopIds.slice(0, 10).map(id =>
-      api(`/graph/artists/${id}/neighbors`, secondHopParams)
-    );
-    const results = await Promise.all(promises);
-    for (const res of results) {
-      if (!res || !res.neighbors) continue;
-      const sourceId = res.artist.id;
-      for (const n of res.neighbors) {
-        if (isExcludedArtist(n.artist.canonical_name)) continue;
-        if (!nodeMap.has(n.artist.id)) {
-          nodes.push(n.artist);
-          nodeMap.set(n.artist.id, n.artist);
+    const batchParams = { type: edgeType, limit: secondHopLimit, heat: heat };
+    if (monthVal) batchParams.month = parseInt(monthVal);
+    if (djVal) batchParams.dj_id = parseInt(djVal);
+    const batchData = await apiBatchNeighbors(secondHopIds, batchParams);
+    if (batchData && batchData.results) {
+      for (const [sourceIdStr, res] of Object.entries(batchData.results)) {
+        const sourceId = parseInt(sourceIdStr);
+        for (const n of res.neighbors) {
+          if (isExcludedArtist(n.artist.canonical_name)) continue;
+          if (!nodeMap.has(n.artist.id)) {
+            nodes.push(n.artist);
+            nodeMap.set(n.artist.id, n.artist);
+          }
+          links.push({
+            source: sourceId,
+            target: n.artist.id,
+            weight: n.weight || 1,
+            edgeType: res.edge_type || edgeType,
+          });
         }
-        links.push({
-          source: sourceId,
-          target: n.artist.id,
-          weight: n.weight || 1,
-          edgeType: res.edge_type || edgeType,
-        });
       }
     }
   }

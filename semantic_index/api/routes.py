@@ -12,12 +12,14 @@ from enum import StrEnum
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
     ArtistDetail,
     ArtistSummary,
     AudioProfileResponse,
+    BatchNeighborsResponse,
     CommunitiesResponse,
     CommunityDetail,
     DiscoveryEntry,
@@ -391,6 +393,51 @@ def get_neighbors(
     else:
         neighbors = _query_neighbors(db, artist_id, type, limit, heat=heat)
     return NeighborsResponse(artist=artist, edge_type=type.value, neighbors=neighbors)
+
+
+class BatchNeighborsRequest(BaseModel):
+    """Request body for batch neighbor lookups."""
+
+    artist_ids: list[int]
+    type: str = "djTransition"
+    limit: int = 10
+    heat: float = 0.5
+    month: int | None = None
+    dj_id: int | None = None
+
+
+@router.post("/artists/neighbors/batch", response_model=BatchNeighborsResponse)
+def get_neighbors_batch(
+    body: BatchNeighborsRequest,
+    db: sqlite3.Connection = Depends(get_db),
+) -> BatchNeighborsResponse:
+    """Return neighbors for multiple artists in a single request.
+
+    Replaces N separate GET /neighbors calls with one POST, eliminating
+    HTTP connection waterfall on depth-2 graph expansion.
+    """
+    edge_type = EdgeType(body.type)
+    results: dict[str, NeighborsResponse] = {}
+    has_facets = body.month is not None or body.dj_id is not None
+
+    for artist_id in body.artist_ids[:20]:  # cap at 20 to prevent abuse
+        try:
+            artist = _get_artist_or_404(db, artist_id)
+        except HTTPException:
+            continue
+        if has_facets and edge_type == EdgeType.DJ_TRANSITION:
+            neighbors = _neighbors_dj_transition_faceted(
+                db, artist_id, body.limit, body.month, body.dj_id, heat=body.heat
+            )
+        elif edge_type == EdgeType.AFFINITY:
+            neighbors = _neighbors_affinity(db, artist_id, body.limit, heat=body.heat)
+        else:
+            neighbors = _query_neighbors(db, artist_id, edge_type, body.limit, heat=body.heat)
+        results[str(artist_id)] = NeighborsResponse(
+            artist=artist, edge_type=edge_type.value, neighbors=neighbors
+        )
+
+    return BatchNeighborsResponse(results=results)
 
 
 @router.get("/artists/{artist_id}/explain/{target_id}", response_model=ExplainResponse)

@@ -40,6 +40,12 @@ class NeighborsResponse(BaseModel):
     neighbors: list[NeighborEntry]
 
 
+class BatchNeighborsResponse(BaseModel):
+    """Response for POST /graph/artists/neighbors/batch."""
+
+    results: dict[str, NeighborsResponse]
+
+
 class Relationship(BaseModel):
     """A single relationship type between two artists."""
 
