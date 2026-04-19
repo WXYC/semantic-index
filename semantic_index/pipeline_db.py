@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS reconciliation_log (
 CREATE INDEX IF NOT EXISTS idx_reconciliation_artist ON reconciliation_log(artist_id);
 """
 
+# Discogs-derived symmetric edge tables that need re-keying during entity dedup.
+# Each stores undirected edges as (artist_a_id, artist_b_id) composite PKs.
+_DISCOGS_EDGE_TABLES = ("shared_personnel", "shared_style", "label_family", "compilation")
+
 _ENTITY_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_entity_spotify ON entity(spotify_artist_id) WHERE spotify_artist_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_entity_apple_music ON entity(apple_music_artist_id) WHERE apple_music_artist_id IS NOT NULL;
@@ -208,16 +212,14 @@ class PipelineDB:
         logger.info("Rebuilding entity table to remove UNIQUE constraint on wikidata_qid")
         self._conn.execute("PRAGMA foreign_keys=OFF")
         self._conn.execute("ALTER TABLE entity RENAME TO _entity_old")
-        self._conn.execute(
-            """CREATE TABLE entity (
+        self._conn.execute("""CREATE TABLE entity (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 wikidata_qid TEXT,
                 name TEXT NOT NULL,
                 entity_type TEXT NOT NULL DEFAULT 'artist',
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"""
-        )
+            )""")
         self._conn.execute("INSERT INTO entity SELECT * FROM _entity_old")
         self._conn.execute("DROP TABLE _entity_old")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -258,11 +260,9 @@ class PipelineDB:
         added = _ensure_columns(self._conn, "artist", _NEW_ARTIST_COLUMNS)
 
         if "created_at" in added or "updated_at" in added:
-            self._conn.execute(
-                """UPDATE artist
+            self._conn.execute("""UPDATE artist
                    SET created_at = COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                       updated_at = COALESCE(updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"""
-            )
+                       updated_at = COALESCE(updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))""")
 
     # ------------------------------------------------------------------
     # Artist CRUD
@@ -387,18 +387,101 @@ class PipelineDB:
 
     def find_duplicate_qid_groups(self) -> list[tuple[str, list[int]]]:
         """Find groups of entities sharing the same non-NULL Wikidata QID."""
-        rows = self._conn.execute(
-            """SELECT wikidata_qid, GROUP_CONCAT(id)
+        rows = self._conn.execute("""SELECT wikidata_qid, GROUP_CONCAT(id)
                FROM entity
                WHERE wikidata_qid IS NOT NULL
                GROUP BY wikidata_qid
                HAVING COUNT(*) > 1
-               ORDER BY wikidata_qid"""
-        ).fetchall()
+               ORDER BY wikidata_qid""").fetchall()
         return [(row[0], sorted(int(x) for x in row[1].split(","))) for row in rows]
 
-    def merge_entities(self, keep_id: int, merge_id: int) -> None:
-        """Merge two entities: re-parent artists from merge_id to keep_id, then delete merge_id."""
+    def _rekey_discogs_edges(self, keep_id: int, merge_id: int) -> int:
+        """Re-key Discogs edge tables, replacing merge_id with keep_id.
+
+        For each table in ``_DISCOGS_EDGE_TABLES``:
+        1. Delete edges between merge_id and keep_id (would become self-referential).
+        2. Delete edges that would create PK conflicts after re-keying (checks both
+           ``(keep_id, X)`` and ``(X, keep_id)`` since tables are symmetric/unordered).
+        3. UPDATE remaining edges to use keep_id.
+        4. Delete any residual self-referential edges (defensive).
+
+        Returns the total number of edge rows re-keyed (step 3 only).
+        """
+        total = 0
+        for table in _DISCOGS_EDGE_TABLES:
+            if not self._has_table(table):
+                continue
+
+            # 1. Delete edges between merge_id and keep_id (would become self-loops)
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE "  # noqa: S608
+                f"(artist_a_id = ? AND artist_b_id = ?) OR "
+                f"(artist_a_id = ? AND artist_b_id = ?)",
+                (merge_id, keep_id, keep_id, merge_id),
+            )
+
+            # 2a. Delete (merge_id, X) edges that would conflict with existing keep_id edges
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE artist_a_id = ?1 AND ("  # noqa: S608
+                f"  EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.artist_a_id = ?2 AND t2.artist_b_id = {table}.artist_b_id)"
+                f"  OR EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.artist_a_id = {table}.artist_b_id AND t2.artist_b_id = ?2)"
+                f")",
+                (merge_id, keep_id),
+            )
+
+            # 2b. Delete (X, merge_id) edges that would conflict with existing keep_id edges
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE artist_b_id = ?1 AND ("  # noqa: S608
+                f"  EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.artist_a_id = {table}.artist_a_id AND t2.artist_b_id = ?2)"
+                f"  OR EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.artist_a_id = ?2 AND t2.artist_b_id = {table}.artist_a_id)"
+                f")",
+                (merge_id, keep_id),
+            )
+
+            # 3. Re-key remaining edges
+            cur = self._conn.execute(
+                f"UPDATE {table} SET artist_a_id = ? WHERE artist_a_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+            cur = self._conn.execute(
+                f"UPDATE {table} SET artist_b_id = ? WHERE artist_b_id = ?",  # noqa: S608
+                (keep_id, merge_id),
+            )
+            total += cur.rowcount
+
+            # 4. Safety: delete any self-referential edges
+            self._conn.execute(f"DELETE FROM {table} WHERE artist_a_id = artist_b_id")  # noqa: S608
+        return total
+
+    def _consolidate_entity_edges(self, entity_id: int) -> int:
+        """Re-key Discogs edges so all artists sharing entity_id use one survivor.
+
+        Picks the artist with the lowest id as the survivor. For each remaining
+        alias artist, re-keys its Discogs edge references to the survivor.
+
+        Returns the total number of edge rows re-keyed.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM artist WHERE entity_id = ? ORDER BY id", (entity_id,)
+        ).fetchall()
+        if len(rows) <= 1:
+            return 0
+        keep_artist_id = rows[0][0]
+        total = 0
+        for row in rows[1:]:
+            total += self._rekey_discogs_edges(keep_artist_id, row[0])
+        return total
+
+    def merge_entities(self, keep_id: int, merge_id: int) -> int:
+        """Merge two entities: re-parent artists, re-key edges, delete merged entity.
+
+        Returns the number of Discogs edge rows re-keyed.
+        """
         if keep_id == merge_id:
             raise ValueError("Cannot merge an entity into itself")
 
@@ -410,14 +493,17 @@ class PipelineDB:
         self._conn.execute(
             "UPDATE artist SET entity_id = ? WHERE entity_id = ?", (keep_id, merge_id)
         )
+        edges_rekeyed = self._consolidate_entity_edges(keep_id)
         self._conn.execute("DELETE FROM entity WHERE id = ?", (merge_id,))
         self._conn.commit()
+        return edges_rekeyed
 
     def deduplicate_by_qid(self) -> DeduplicationReport:
         """Find entities sharing a Wikidata QID and merge duplicates."""
         groups = self.find_duplicate_qid_groups()
         entities_merged = 0
         artists_reassigned = 0
+        edges_rekeyed = 0
 
         for qid, entity_ids in groups:
             keep_id = entity_ids[0]
@@ -426,7 +512,7 @@ class PipelineDB:
                     "SELECT COUNT(*) FROM artist WHERE entity_id = ?", (merge_id,)
                 ).fetchone()[0]
                 artists_reassigned += count
-                self.merge_entities(keep_id, merge_id)
+                edges_rekeyed += self.merge_entities(keep_id, merge_id)
                 entities_merged += 1
             logger.info(
                 "Deduplicated QID %s: kept entity %d, merged %d entities",
@@ -437,10 +523,12 @@ class PipelineDB:
 
         if groups:
             logger.info(
-                "Entity deduplication: %d groups, %d entities merged, %d artists reassigned",
+                "Entity deduplication: %d groups, %d entities merged, "
+                "%d artists reassigned, %d edges re-keyed",
                 len(groups),
                 entities_merged,
                 artists_reassigned,
+                edges_rekeyed,
             )
         else:
             logger.info("Entity deduplication: no duplicate QIDs found")
@@ -449,6 +537,7 @@ class PipelineDB:
             groups_found=len(groups),
             entities_merged=entities_merged,
             artists_reassigned=artists_reassigned,
+            edges_rekeyed=edges_rekeyed,
         )
 
     # ------------------------------------------------------------------

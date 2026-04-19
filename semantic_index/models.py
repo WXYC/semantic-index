@@ -288,3 +288,4 @@ class DeduplicationReport(BaseModel):
     groups_found: int  # QIDs with 2+ entities
     entities_merged: int  # Total entities merged (deleted)
     artists_reassigned: int  # Total artist rows re-parented
+    edges_rekeyed: int = 0  # Discogs edge table rows re-keyed during consolidation
