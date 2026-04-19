@@ -827,11 +827,12 @@ def run(args: argparse.Namespace) -> None:
                 store_audio_profiles,
             )
             from semantic_index.acousticbrainz_client import AcousticBrainzClient as _ABClient
+            from semantic_index.musicbrainz_client import MusicBrainzClient as _MBClient
 
             log.info("Building audio profiles from AcousticBrainz (PostgreSQL)...")
             ab_client = _ABClient(cache_dsn=args.musicbrainz_cache_dsn)
 
-            # Get MB artist IDs from the graph database
+            # Get MB artist GIDs from the graph database
             _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
             mb_rows = _ab_conn.execute(
                 "SELECT id, musicbrainz_artist_id FROM artist "
@@ -840,10 +841,26 @@ def run(args: argparse.Namespace) -> None:
             _ab_conn.close()
 
             if mb_rows:
-                graph_id_to_mb = {row[0]: int(row[1]) for row in mb_rows}
+                # Resolve GIDs (UUIDs) to MB integer IDs via mb_artist table
+                gids = [row[1] for row in mb_rows]
+                mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
+                gid_to_int = mb_client.resolve_gids_to_ids(gids)
+
+                graph_id_to_mb: dict[int, int] = {}
+                for row in mb_rows:
+                    graph_id, gid = row[0], row[1]
+                    if gid in gid_to_int:
+                        graph_id_to_mb[graph_id] = gid_to_int[gid]
                 mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
                 mb_ids = list(graph_id_to_mb.values())
-                log.info("  %d artists with MusicBrainz IDs", len(mb_ids))
+
+                skipped = len(mb_rows) - len(graph_id_to_mb)
+                log.info(
+                    "  Resolved %d/%d GIDs to MB integer IDs (%d skipped)",
+                    len(graph_id_to_mb),
+                    len(mb_rows),
+                    skipped,
+                )
 
                 # Single JOIN query: ab_recording × mb_artist_recording
                 ab_features = ab_client.get_features_for_artists(mb_ids)
@@ -905,10 +922,25 @@ def run(args: argparse.Namespace) -> None:
             _ab_conn.close()
 
             if mb_rows:
-                graph_id_to_mb = {row[0]: int(row[1]) for row in mb_rows}
+                # Resolve GIDs (UUIDs) to MB integer IDs via mb_artist table
+                gids = [row[1] for row in mb_rows]
+                gid_to_int = mb_client.resolve_gids_to_ids(gids)
+
+                graph_id_to_mb: dict[int, int] = {}
+                for row in mb_rows:
+                    graph_id, gid = row[0], row[1]
+                    if gid in gid_to_int:
+                        graph_id_to_mb[graph_id] = gid_to_int[gid]
                 mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
                 mb_ids = list(graph_id_to_mb.values())
-                log.info("  %d artists with MusicBrainz IDs", len(mb_ids))
+
+                skipped = len(mb_rows) - len(graph_id_to_mb)
+                log.info(
+                    "  Resolved %d/%d GIDs to MB integer IDs (%d skipped)",
+                    len(graph_id_to_mb),
+                    len(mb_rows),
+                    skipped,
+                )
 
                 mb_recordings = mb_client.get_recording_mbids(mb_ids)
                 total_recordings = sum(len(v) for v in mb_recordings.values())
