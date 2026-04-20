@@ -162,7 +162,7 @@ def _lookup_artist_metadata(
             top_moods = sorted(
                 zip(mood_labels, mood_vector, strict=True), key=lambda x: x[1], reverse=True
             )
-            meta["audio"] = {
+            audio_meta: dict = {
                 "primary_genre": profile["primary_genre"],
                 "danceability": round(profile["avg_danceability"], 2),
                 "voice_instrumental": (
@@ -171,6 +171,20 @@ def _lookup_artist_metadata(
                 "top_moods": [m for m, v in top_moods[:3] if v > 0.3],
                 "recording_count": profile["recording_count"],
             }
+            # Add BPM and key if available (columns may not exist on older DBs)
+            try:
+                bpm_row = db.execute(
+                    "SELECT avg_bpm, primary_key FROM audio_profile WHERE artist_id = ?",
+                    (artist_id,),
+                ).fetchone()
+                if bpm_row:
+                    if bpm_row["avg_bpm"]:
+                        audio_meta["bpm"] = round(bpm_row["avg_bpm"])
+                    if bpm_row["primary_key"]:
+                        audio_meta["key"] = bpm_row["primary_key"]
+            except sqlite3.OperationalError:
+                pass  # avg_bpm/primary_key columns may not exist
+            meta["audio"] = audio_meta
     except sqlite3.OperationalError:
         pass  # audio_profile table may not exist
 
