@@ -1,28 +1,32 @@
-"""Process WXYC audio archives: fingerprint and identify recordings via AcoustID.
+"""Process WXYC audio archives: classify segments via Essentia TF.
 
-Downloads hourly MP3 files from the wxyc-archive S3 bucket, generates
-Chromaprint fingerprints for audio segments around flowsheet timestamps,
-and submits them to the AcoustID API to obtain MusicBrainz recording IDs.
+Downloads hourly MP3 files from the wxyc-archive S3 bucket, extracts
+audio segments at flowsheet timestamps, and runs Essentia TF classifiers
+(VGGish embeddings + classification heads) to produce per-segment audio
+features. Aggregated per-artist profiles are written to the pipeline
+SQLite database's audio_profile table.
 
 Uses a checkpoint SQLite database for resumable processing. Each archive
-hour is processed atomically: download -> decode -> fingerprint -> lookup.
+hour is processed atomically: download → decode → classify → checkpoint.
 
 Usage:
     python scripts/process_archive.py \
         --backend-dsn postgresql://localhost/backend \
-        --acoustid-api-key KEY \
+        --model-dir /path/to/essentia-models \
+        --db-path data/wxyc_artist_graph.db \
         --checkpoint output/archive_progress.db \
-        --date-range 2020-01-01:2020-01-07 \
-        --max-hours 24 \
-        [--skip-essentia] \
+        --date-range 2021-06-01:2026-01-01 \
+        --max-hours 100 \
+        [--segment-duration 30] \
         [--retry-failed] \
         [--dry-run]
 """
 
 import argparse
-import asyncio
+import json
 import logging
 import os
+import sqlite3
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -31,17 +35,13 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 
-from semantic_index.archive_client import (
-    ArchiveClient,
-    compute_search_windows,
-    merge_overlapping_windows,
-    timestamp_to_s3_key,
-)
-from semantic_index.archive_fingerprint import (
-    CheckpointDB,
-    _best_match_per_play,
-    _generate_fingerprint_offsets,
-    fingerprint_and_lookup,
+from semantic_index.archive_client import ArchiveClient, timestamp_to_s3_key
+from semantic_index.archive_essentia import (
+    CLASSIFIERS,
+    EssentiaClassifier,
+    SegmentFeatures,
+    _build_recording_features,
+    aggregate_artist_profile,
 )
 
 logging.basicConfig(
@@ -50,6 +50,9 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_SEGMENT_DURATION_S = 30
+VGGISH_SAMPLE_RATE = 16000
 
 
 # ---------------------------------------------------------------------------
@@ -108,30 +111,202 @@ def _group_entries_by_hour(entries: list[dict]) -> dict[str, list[dict]]:
     return dict(groups)
 
 
-def _entries_to_offsets(entries: list[dict], hour_key: str) -> tuple[list[int], list[int]]:
-    """Convert flowsheet entries to offsets within an archive hour.
+def _entry_offset_in_hour(entry: dict, hour_key: str) -> float:
+    """Compute an entry's offset in seconds from the start of its archive hour.
 
     Args:
-        entries: Flowsheet entries for a single hour.
-        hour_key: S3 key for the hour (used to determine hour start time).
+        entry: Flowsheet entry with ``add_time_epoch``.
+        hour_key: S3 key for the hour.
 
     Returns:
-        Tuple of (offsets_ms, play_ids).
+        Offset in seconds (clamped to [0, 3600]).
     """
-    # Parse hour start from S3 key: "YYYY/MM/DD/YYYYMMDDHH00.mp3"
     filename = Path(hour_key).stem  # "YYYYMMDDHH00"
     hour_start = datetime.strptime(filename, "%Y%m%d%H%M").replace(tzinfo=UTC)
-    hour_start_epoch = hour_start.timestamp()
+    offset_s = entry["add_time_epoch"] - hour_start.timestamp()
+    return max(0.0, min(offset_s, 3600.0))
 
-    offsets_ms = []
-    play_ids = []
-    for entry in entries:
-        offset_s = entry["add_time_epoch"] - hour_start_epoch
-        offset_ms = int(offset_s * 1000)
-        offset_ms = max(0, min(offset_ms, 3_600_000))
-        offsets_ms.append(offset_ms)
-        play_ids.append(entry["id"])
-    return offsets_ms, play_ids
+
+# ---------------------------------------------------------------------------
+# Checkpoint database
+# ---------------------------------------------------------------------------
+
+
+class ArchiveCheckpointDB:
+    """SQLite checkpoint database for archive Essentia processing.
+
+    Tracks which archive hours have been processed and stores
+    per-segment classification results.
+
+    Args:
+        db_path: Path to the SQLite checkpoint file.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn: sqlite3.Connection | None = None
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._db_path)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
+
+    def initialize(self) -> None:
+        """Create checkpoint tables if they don't exist."""
+        conn = self._get_conn()
+        conn.executescript(
+            """\
+            CREATE TABLE IF NOT EXISTS hour_progress (
+                archive_key TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                play_count INTEGER,
+                segments_classified INTEGER,
+                started_at TEXT,
+                completed_at TEXT,
+                error_msg TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS segment_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                archive_key TEXT NOT NULL,
+                play_id INTEGER NOT NULL,
+                artist_name TEXT NOT NULL,
+                offset_s REAL NOT NULL,
+                duration_s REAL NOT NULL,
+                danceability REAL,
+                genre TEXT,
+                genre_probability REAL,
+                voice_instrumental TEXT,
+                voice_instrumental_probability REAL,
+                feature_vector TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (archive_key, play_id)
+            );
+            """
+        )
+        conn.commit()
+
+    def is_hour_complete(self, archive_key: str) -> bool:
+        """Check if an archive hour has been fully processed."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT status FROM hour_progress WHERE archive_key = ?",
+            (archive_key,),
+        ).fetchone()
+        return row is not None and row[0] == "complete"
+
+    def mark_hour_started(self, archive_key: str, play_count: int) -> None:
+        """Record that processing has started for an archive hour."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO hour_progress "
+            "(archive_key, status, play_count, started_at) "
+            "VALUES (?, 'processing', ?, ?)",
+            (archive_key, play_count, now),
+        )
+        conn.commit()
+
+    def mark_hour_complete(self, archive_key: str, segments_classified: int) -> None:
+        """Record that an archive hour has been fully processed."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "UPDATE hour_progress SET status = 'complete', "
+            "segments_classified = ?, completed_at = ? "
+            "WHERE archive_key = ?",
+            (segments_classified, now, archive_key),
+        )
+        conn.commit()
+
+    def mark_hour_failed(self, archive_key: str, error_msg: str) -> None:
+        """Record that processing failed for an archive hour."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "UPDATE hour_progress SET status = 'failed', "
+            "error_msg = ?, completed_at = ? "
+            "WHERE archive_key = ?",
+            (error_msg, now, archive_key),
+        )
+        conn.commit()
+
+    def get_failed_hours(self) -> list[str]:
+        """Get archive keys for all failed hours."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT archive_key FROM hour_progress WHERE status = 'failed'"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def save_segment(
+        self,
+        seg: SegmentFeatures,
+        archive_key: str,
+        play_id: int,
+        offset_s: float,
+        duration_s: float,
+    ) -> None:
+        """Save classified segment features. Idempotent via UNIQUE constraint."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO segment_features "
+            "(archive_key, play_id, artist_name, offset_s, duration_s, "
+            "danceability, genre, genre_probability, voice_instrumental, "
+            "voice_instrumental_probability, feature_vector, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                archive_key,
+                play_id,
+                seg.artist_name,
+                offset_s,
+                duration_s,
+                seg.danceability,
+                seg.genre,
+                seg.genre_probability,
+                seg.voice_instrumental,
+                seg.voice_instrumental_probability,
+                json.dumps(seg.feature_vector),
+                now,
+            ),
+        )
+        conn.commit()
+
+    def load_all_segments(self) -> list[SegmentFeatures]:
+        """Load all successfully classified segments from the checkpoint."""
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT sf.* FROM segment_features sf "
+            "JOIN hour_progress hp ON sf.archive_key = hp.archive_key "
+            "WHERE hp.status = 'complete'"
+        ).fetchall()
+        segments = []
+        for row in rows:
+            fv = json.loads(row["feature_vector"])
+            segments.append(
+                SegmentFeatures(
+                    artist_name=row["artist_name"],
+                    danceability=row["danceability"],
+                    genre=row["genre"],
+                    genre_probability=row["genre_probability"],
+                    genre_vector=fv[:9],
+                    mood_vector=fv[9:16],
+                    voice_instrumental=row["voice_instrumental"],
+                    voice_instrumental_probability=row["voice_instrumental_probability"],
+                    feature_vector=fv,
+                )
+            )
+        conn.row_factory = None
+        return segments
+
+    def close(self) -> None:
+        """Close the database connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,26 +314,29 @@ def _entries_to_offsets(entries: list[dict], hour_key: str) -> tuple[list[int], 
 # ---------------------------------------------------------------------------
 
 
-async def process_hour(
+def process_hour(
+    classifier: EssentiaClassifier,
     archive_client: ArchiveClient,
-    checkpoint: CheckpointDB,
+    checkpoint: ArchiveCheckpointDB,
     hour_key: str,
     entries: list[dict],
-    api_key: str,
-    match_threshold: float,
-) -> tuple[int, int]:
-    """Process a single archive hour: download, fingerprint, lookup.
+    segment_duration_s: int,
+) -> int:
+    """Process a single archive hour: download, classify segments.
+
+    Loads the full hour audio once, then slices and classifies each
+    flowsheet entry's segment without repeated disk I/O.
 
     Args:
+        classifier: Pre-loaded Essentia classifier pipeline.
         archive_client: S3 client for downloading archive audio.
         checkpoint: Checkpoint database for progress tracking.
         hour_key: S3 key for the archive hour.
         entries: Flowsheet entries in this hour.
-        api_key: AcoustID API key.
-        match_threshold: Minimum AcoustID score to accept.
+        segment_duration_s: Duration of each segment in seconds.
 
     Returns:
-        Tuple of (segments_fingerprinted, segments_matched).
+        Number of segments successfully classified.
     """
     checkpoint.mark_hour_started(hour_key, play_count=len(entries))
 
@@ -168,97 +346,161 @@ async def process_hour(
     except Exception as e:
         logger.error("Failed to download %s: %s", hour_key, e)
         checkpoint.mark_hour_failed(hour_key, f"download: {e}")
-        return 0, 0
+        return 0
 
     wav_path = None
     try:
-        wav_path = ArchiveClient.decode_to_wav(mp3_path)
+        wav_path = ArchiveClient.decode_to_wav(mp3_path, sample_rate=VGGISH_SAMPLE_RATE)
     except Exception as e:
         logger.error("Failed to decode %s: %s", hour_key, e)
         checkpoint.mark_hour_failed(hour_key, f"decode: {e}")
         mp3_path.unlink(missing_ok=True)
-        return 0, 0
+        return 0
 
     try:
-        # Compute search windows
-        offsets_ms, play_ids = _entries_to_offsets(entries, hour_key)
-        windows = compute_search_windows(offsets_ms, play_ids=play_ids)
-        windows = merge_overlapping_windows(windows)
+        from essentia.standard import MonoLoader
 
-        # Build fingerprint offset list with play_id mapping
-        all_offsets: list[int] = []
-        all_play_ids: list[int | None] = []
-        for window in windows:
-            fp_offsets = _generate_fingerprint_offsets(window.start_ms, window.end_ms)
-            # Map each fingerprint offset to the nearest play entry
-            for fp_offset in fp_offsets:
-                all_offsets.append(fp_offset)
-                # Assign to the closest play_id in this window
-                if window.play_ids:
-                    closest_pid = min(
-                        window.play_ids,
-                        key=lambda pid: abs(offsets_ms[play_ids.index(pid)] - fp_offset),
-                    )
-                    all_play_ids.append(closest_pid)
-                else:
-                    all_play_ids.append(None)
+        audio = MonoLoader(filename=str(wav_path), sampleRate=VGGISH_SAMPLE_RATE)()
+        total_samples = len(audio)
+        classified = 0
 
-        logger.info(
-            "  %s: %d entries, %d windows, %d fingerprint offsets",
-            hour_key,
-            len(entries),
-            len(windows),
-            len(all_offsets),
-        )
-
-        # Fingerprint and lookup
-        matches = await fingerprint_and_lookup(
-            wav_path,
-            all_offsets,
-            api_key,
-            match_threshold=match_threshold,
-            play_ids=all_play_ids,
-        )
-
-        # Deduplicate: best match per play entry
-        best_matches = _best_match_per_play(matches)
-
-        # Save matches to checkpoint
-        entry_lookup = {e["id"]: e for e in entries}
-        for match in best_matches:
-            artist_name = None
-            if match.play_id and match.play_id in entry_lookup:
-                artist_name = entry_lookup[match.play_id].get("artist_name")
-            checkpoint.save_segment_match(
-                archive_key=hour_key,
-                match=match,
-                duration_ms=15_000,
-                artist_name=artist_name,
+        for entry in entries:
+            offset_s = _entry_offset_in_hour(entry, hour_key)
+            start_sample = int(offset_s * VGGISH_SAMPLE_RATE)
+            end_sample = min(
+                start_sample + segment_duration_s * VGGISH_SAMPLE_RATE,
+                total_samples,
             )
 
-        checkpoint.mark_hour_complete(
-            hour_key,
-            segments_fingerprinted=len(all_offsets),
-            segments_matched=len(best_matches),
-            segments_extracted=0,
-        )
+            if end_sample - start_sample < VGGISH_SAMPLE_RATE:
+                continue  # less than 1 second — skip
 
+            segment_audio = audio[start_sample:end_sample]
+            results = classifier.classify_array(segment_audio)
+
+            if len(results) < len(CLASSIFIERS):
+                missing_names = set(CLASSIFIERS) - set(results)
+                logger.debug(
+                    "Skipping play %d: missing classifiers %s",
+                    entry["id"],
+                    missing_names,
+                )
+                continue
+
+            rf = _build_recording_features(results)
+            fv = rf.feature_vector()
+            seg = SegmentFeatures(
+                artist_name=entry["artist_name"],
+                danceability=rf.danceability,
+                genre=rf.genre,
+                genre_probability=rf.genre_probability,
+                genre_vector=rf.genre_vector,
+                mood_vector=rf.mood_vector,
+                voice_instrumental=rf.voice_instrumental,
+                voice_instrumental_probability=rf.voice_instrumental_probability,
+                feature_vector=fv,
+            )
+            checkpoint.save_segment(
+                seg, hour_key, entry["id"], offset_s, segment_duration_s,
+            )
+            classified += 1
+
+        checkpoint.mark_hour_complete(hour_key, classified)
         logger.info(
-            "  %s: %d fingerprinted, %d matched",
+            "  %s: %d/%d entries classified",
             hour_key,
-            len(all_offsets),
-            len(best_matches),
+            classified,
+            len(entries),
         )
-        return len(all_offsets), len(best_matches)
+        return classified
 
     except Exception as e:
         logger.error("Error processing %s: %s", hour_key, e, exc_info=True)
         checkpoint.mark_hour_failed(hour_key, str(e))
-        return 0, 0
+        return 0
     finally:
         if wav_path:
             wav_path.unlink(missing_ok=True)
         mp3_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Profile aggregation and DB write
+# ---------------------------------------------------------------------------
+
+
+def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
+    """Aggregate per-artist profiles and write to the audio_profile table.
+
+    Only writes profiles for artists that exist in the ``artist`` table
+    and don't already have a profile (preserves existing AcousticBrainz data).
+
+    Args:
+        db_path: Path to the pipeline SQLite database.
+        segments: All classified segments from the checkpoint.
+
+    Returns:
+        Number of profiles written.
+    """
+    by_artist: dict[str, list[SegmentFeatures]] = defaultdict(list)
+    for seg in segments:
+        by_artist[seg.artist_name].append(seg)
+
+    logger.info(
+        "Aggregating profiles for %d artists from %d segments",
+        len(by_artist),
+        len(segments),
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    written = 0
+
+    try:
+        for artist_name, artist_segments in sorted(by_artist.items()):
+            row = conn.execute(
+                "SELECT id FROM artist WHERE canonical_name = ?",
+                (artist_name,),
+            ).fetchone()
+            if row is None:
+                continue
+            artist_id = row["id"]
+
+            # Don't overwrite existing profiles (AcousticBrainz data)
+            existing = conn.execute(
+                "SELECT recording_count FROM audio_profile WHERE artist_id = ?",
+                (artist_id,),
+            ).fetchone()
+            if existing is not None:
+                continue
+
+            profile = aggregate_artist_profile(artist_name, artist_segments)
+            now = datetime.now(UTC).isoformat()
+
+            conn.execute(
+                "INSERT OR IGNORE INTO audio_profile "
+                "(artist_id, avg_danceability, primary_genre, primary_genre_probability, "
+                "voice_instrumental_ratio, feature_centroid, recording_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    artist_id,
+                    profile["avg_danceability"],
+                    profile["primary_genre"],
+                    profile["primary_genre_probability"],
+                    profile["voice_instrumental_ratio"],
+                    json.dumps(profile["feature_centroid"]),
+                    profile["recording_count"],
+                    now,
+                ),
+            )
+            written += 1
+
+        conn.commit()
+        logger.info("Wrote %d new audio profiles", written)
+    finally:
+        conn.close()
+
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +511,8 @@ async def process_hour(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Process WXYC audio archives: fingerprint recordings via "
-            "Chromaprint and identify them via AcoustID."
+            "Process WXYC audio archives: classify segments via Essentia TF "
+            "and build per-artist audio profiles."
         )
     )
     parser.add_argument(
@@ -279,9 +521,14 @@ def parse_args() -> argparse.Namespace:
         help="PostgreSQL DSN for Backend-Service (default: DATABASE_URL_BACKEND env var).",
     )
     parser.add_argument(
-        "--acoustid-api-key",
-        default=os.environ.get("ACOUSTID_API_KEY"),
-        help="AcoustID API key (default: ACOUSTID_API_KEY env var).",
+        "--model-dir",
+        default=os.environ.get("ESSENTIA_MODEL_DIR"),
+        help="Directory containing Essentia TF models (default: ESSENTIA_MODEL_DIR env var).",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("DB_PATH"),
+        help="Pipeline SQLite database for writing audio profiles (default: DB_PATH env var).",
     )
     parser.add_argument(
         "--checkpoint",
@@ -304,15 +551,15 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of archive hours to process (0 = unlimited).",
     )
     parser.add_argument(
-        "--match-threshold",
-        type=float,
-        default=0.7,
-        help="Minimum AcoustID match score (0-1, default: 0.7).",
+        "--segment-duration",
+        type=int,
+        default=DEFAULT_SEGMENT_DURATION_S,
+        help=f"Duration of each segment in seconds (default: {DEFAULT_SEGMENT_DURATION_S}).",
     )
     parser.add_argument(
-        "--skip-essentia",
+        "--aggregate-only",
         action="store_true",
-        help="Run fingerprint + AcoustID only, skip Essentia feature extraction.",
+        help="Skip processing; aggregate existing checkpoint data into the DB.",
     )
     parser.add_argument(
         "--retry-failed",
@@ -338,104 +585,122 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if not args.backend_dsn:
-        logger.error("--backend-dsn or DATABASE_URL_BACKEND is required")
-        raise SystemExit(1)
-
-    if not args.acoustid_api_key:
-        logger.error("--acoustid-api-key or ACOUSTID_API_KEY is required")
-        raise SystemExit(1)
-
-    # Parse date range
-    if args.date_range:
-        start_str, end_str = args.date_range.split(":")
-        start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=UTC)
-        end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    else:
-        logger.error("--date-range is required")
-        raise SystemExit(1)
-
     # Initialize checkpoint
     checkpoint_dir = Path(args.checkpoint).parent
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = CheckpointDB(args.checkpoint)
+    checkpoint = ArchiveCheckpointDB(args.checkpoint)
     checkpoint.initialize()
 
-    # Load flowsheet entries from Backend PG
-    logger.info("Loading flowsheet entries from %s...", start_date.date())
-    conn = psycopg.connect(args.backend_dsn, row_factory=dict_row)
-    try:
-        entries = _load_flowsheet_entries(conn, start_date, end_date)
-    finally:
-        conn.close()
+    if not args.aggregate_only:
+        if not args.backend_dsn:
+            logger.error("--backend-dsn or DATABASE_URL_BACKEND is required")
+            raise SystemExit(1)
 
-    if not entries:
-        logger.info("No flowsheet entries found in date range")
-        return
+        if not args.model_dir:
+            logger.error("--model-dir or ESSENTIA_MODEL_DIR is required")
+            raise SystemExit(1)
 
-    # Group by archive hour
-    hour_groups = _group_entries_by_hour(entries)
-    logger.info("%d archive hours to consider", len(hour_groups))
+        if not args.date_range:
+            logger.error("--date-range is required")
+            raise SystemExit(1)
 
-    # Filter out completed hours
-    to_process = {}
-    for key, hour_entries in sorted(hour_groups.items()):
-        if checkpoint.is_hour_complete(key):
-            continue
-        if not args.retry_failed:
-            # Skip failed hours unless --retry-failed
-            pass
-        to_process[key] = hour_entries
+        # Parse date range
+        start_str, end_str = args.date_range.split(":")
+        start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=UTC)
 
-    if args.retry_failed:
-        failed = set(checkpoint.get_failed_hours())
+        # Load flowsheet entries
+        logger.info(
+            "Loading flowsheet entries %s to %s...",
+            start_date.date(),
+            end_date.date(),
+        )
+        conn = psycopg.connect(args.backend_dsn, row_factory=dict_row)
+        try:
+            entries = _load_flowsheet_entries(conn, start_date, end_date)
+        finally:
+            conn.close()
+
+        if not entries:
+            logger.info("No flowsheet entries found in date range")
+            return
+
+        # Group by archive hour
+        hour_groups = _group_entries_by_hour(entries)
+        logger.info("%d archive hours to consider", len(hour_groups))
+
+        # Filter out completed hours
         to_process = {
             k: v
             for k, v in sorted(hour_groups.items())
-            if not checkpoint.is_hour_complete(k) or k in failed
+            if not checkpoint.is_hour_complete(k)
         }
 
-    if args.max_hours > 0:
-        keys = list(to_process.keys())[: args.max_hours]
-        to_process = {k: to_process[k] for k in keys}
+        if args.retry_failed:
+            failed = set(checkpoint.get_failed_hours())
+            to_process.update(
+                {k: v for k, v in sorted(hour_groups.items()) if k in failed}
+            )
 
-    logger.info("%d archive hours to process", len(to_process))
+        if args.max_hours > 0:
+            keys = list(to_process.keys())[: args.max_hours]
+            to_process = {k: to_process[k] for k in keys}
 
-    if args.dry_run:
-        for key, hour_entries in to_process.items():
-            logger.info("  [dry-run] %s: %d entries", key, len(hour_entries))
-        logger.info("Dry run complete. %d hours would be processed.", len(to_process))
-        return
+        logger.info("%d archive hours to process", len(to_process))
 
-    # Process each hour
-    archive_client = ArchiveClient(bucket=args.bucket)
-    total_fingerprinted = 0
-    total_matched = 0
+        if args.dry_run:
+            total_entries = sum(len(v) for v in to_process.values())
+            for key, hour_entries in to_process.items():
+                logger.info("  [dry-run] %s: %d entries", key, len(hour_entries))
+            logger.info(
+                "Dry run complete. %d hours, %d entries would be processed.",
+                len(to_process),
+                total_entries,
+            )
+            return
 
-    for i, (key, hour_entries) in enumerate(to_process.items(), 1):
-        logger.info("=== Hour %d/%d: %s ===", i, len(to_process), key)
-        t0 = time.time()
-        fp_count, match_count = asyncio.run(
-            process_hour(
+        # Initialize classifier and S3 client
+        classifier = EssentiaClassifier(args.model_dir)
+        archive_client = ArchiveClient(bucket=args.bucket)
+        total_classified = 0
+
+        for i, (key, hour_entries) in enumerate(to_process.items(), 1):
+            logger.info(
+                "=== Hour %d/%d: %s (%d entries) ===",
+                i,
+                len(to_process),
+                key,
+                len(hour_entries),
+            )
+            t0 = time.time()
+            classified = process_hour(
+                classifier,
                 archive_client,
                 checkpoint,
                 key,
                 hour_entries,
-                args.acoustid_api_key,
-                args.match_threshold,
+                args.segment_duration,
             )
-        )
-        elapsed = time.time() - t0
-        total_fingerprinted += fp_count
-        total_matched += match_count
-        logger.info("  Done in %.1fs", elapsed)
+            elapsed = time.time() - t0
+            total_classified += classified
+            logger.info("  Done in %.1fs", elapsed)
 
-    logger.info(
-        "Processing complete: %d hours, %d fingerprinted, %d matched",
-        len(to_process),
-        total_fingerprinted,
-        total_matched,
-    )
+        logger.info(
+            "Processing complete: %d hours, %d segments classified",
+            len(to_process),
+            total_classified,
+        )
+
+    # Aggregate and write to production DB
+    if args.db_path:
+        segments = checkpoint.load_all_segments()
+        if segments:
+            written = write_profiles_to_db(args.db_path, segments)
+            logger.info("Wrote %d audio profiles to %s", written, args.db_path)
+        else:
+            logger.info("No segments to aggregate")
+    else:
+        logger.info("No --db-path specified; skipping profile aggregation")
 
     checkpoint.close()
 

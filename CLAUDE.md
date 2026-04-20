@@ -15,7 +15,7 @@ Backend PG → pg_source ─┘ → cross_reference ─────────�
             → musicbrainz_client → acousticbrainz_client (PG) ─────────→ audio_profile + acoustic_similarity
             → musicbrainz_client → acousticbrainz (tar loader, deprecated) → audio_profile + acoustic_similarity
 
-S3 archive → archive_client → archive_fingerprint (Chromaprint + AcoustID) → ab_recording (PG)
+S3 archive → archive_client → archive_essentia (VGGish + classification heads) → audio_profile
 
 SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 ```
@@ -49,17 +49,18 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/facet_export.py` | Export play-level data and pre-materialized aggregate tables for dynamic faceted PMI computation. Creates dj, play, artist_month_count, artist_dj_count, month_total, and dj_total tables. |
 | `semantic_index/api/app.py` | FastAPI application factory. Takes a SQLite database path, returns a configured app. |
 | `semantic_index/api/database.py` | Request-scoped SQLite connection dependency for FastAPI. |
-| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, PreviewResponse). |
-| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata. |
-| `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. |
+| `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, DiscoveryResponse, PreviewResponse). |
+| `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata, discovery (underplayed sonic fits). |
+| `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. Enriches prompts with audio profile features (genre, mood, danceability) when available. |
 | `semantic_index/api/preview.py` | Audio preview URL endpoint with multi-source fallback (iTunes lookup, Spotify, Bandcamp, Deezer, iTunes search). Caches results in a sidecar SQLite database. Powers the in-card transition player in the graph explorer. |
 | `semantic_index/pg_source.py` | Query Backend-Service PostgreSQL (`wxyc_schema.*`) for pipeline input data. Returns the same types as `sql_parser.py` (FlowsheetEntry, LibraryCode, LibraryRelease). Used by the nightly sync instead of SQL dump parsing. |
 | `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → entity dedup → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
 | `run_pipeline.py` | CLI entry point wiring the full pipeline (SQL dump mode). |
 | `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
-| `semantic_index/archive_client.py` | S3 client for WXYC hourly audio archives. Downloads MP3 files from `wxyc-archive` S3 bucket, decodes to PCM WAV via ffmpeg, extracts audio segments at specified offsets. Computes S3 keys from timestamps (`YYYY/MM/DD/YYYYMMDDHH00.mp3`). Provides search window computation and overlap merging for flowsheet-guided fingerprinting. |
-| `semantic_index/archive_fingerprint.py` | Archive audio fingerprinting and AcoustID identification. Generates Chromaprint fingerprints for audio segments via `pyacoustid`, submits to AcoustID API (rate-limited to 3 req/sec) to obtain MusicBrainz recording IDs. Includes checkpoint SQLite database for resumable processing. |
-| `scripts/process_archive.py` | CLI entry point for archive audio processing. Queries Backend-Service PG for flowsheet entries, groups by archive hour, orchestrates download -> decode -> fingerprint -> AcoustID lookup pipeline. Per-hour checkpointing, supports `--date-range`, `--max-hours`, `--retry-failed`, `--dry-run`. |
+| `semantic_index/archive_client.py` | S3 client for WXYC hourly audio archives. Downloads MP3 files from `wxyc-archive` S3 bucket, decodes to PCM WAV via ffmpeg, extracts audio segments at specified offsets. Computes S3 keys from timestamps (`YYYY/MM/DD/YYYYMMDDHH00.mp3`). |
+| `semantic_index/archive_essentia.py` | Essentia TF audio classification. Runs VGGish embeddings through 15 classification heads (genre, mood, danceability, voice/instrumental, tonal, gender, MIREX) to produce per-segment features compatible with the 59-dim RecordingFeatures layout. Three AB classifiers lack VGGish heads and are zero-filled (ismir04_rhythm, genre_electronic, timbre). |
+| `semantic_index/archive_fingerprint.py` | Archive audio fingerprinting and AcoustID identification. Generates Chromaprint fingerprints for audio segments via `pyacoustid`, submits to AcoustID API. **(Deprecated — AcoustID has zero coverage of WXYC's catalog. Replaced by archive_essentia.py.)** |
+| `scripts/process_archive.py` | CLI entry point for archive audio processing. Queries Backend-Service PG for flowsheet entries, groups by archive hour, downloads from S3, classifies segments via Essentia TF, aggregates per-artist profiles, writes to audio_profile table. Per-hour checkpointing, `--date-range`, `--max-hours`, `--aggregate-only`, `--retry-failed`, `--dry-run`. |
 | `scripts/import_acousticbrainz.py` | ETL script: import AcousticBrainz high-level features from tar archives into PostgreSQL `ab_recording` table. Per-tar checkpointing, NAS-resilient, idempotent via `ON CONFLICT DO NOTHING`. |
 | `scripts/recover_audio_profiles.py` | Recovery ETL: restore audio profiles for artists with MusicBrainz GIDs. Resolves GID -> integer ID via PostgreSQL `mb_artist`, fetches AcousticBrainz features, builds 59-dim profiles, recomputes acoustic similarity. Atomic swap, dry-run support. |
 
@@ -300,34 +301,55 @@ python scripts/import_acousticbrainz.py \
 
 The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured columns plus JSONB for probability distributions and metadata tags. The feature vector uses all 18 classifiers for a 59-dimension representation.
 
-### Archive fingerprinting (Phase 1)
+### Archive audio classification
 
-Extends audio feature coverage by fingerprinting WXYC's hourly audio archives (S3: `wxyc-archive`) and identifying recordings via AcoustID. Uses flowsheet timestamps as coarse search windows to limit the audio region that needs fingerprinting, bypassing timestamp inaccuracy via Chromaprint audio fingerprints.
+Extends audio feature coverage beyond AcousticBrainz (which covers only ~13% of WXYC artists) by classifying WXYC's hourly audio archives directly. Uses flowsheet timestamps to locate each play within the S3 archive, extracts 30-second segments, and runs Essentia TF classifiers (VGGish + 15 classification heads) to produce per-segment features. Results are aggregated per-artist and written to the `audio_profile` table, enriching narrative generation with genre, mood, and danceability data.
+
+AcoustID was evaluated first but has zero coverage of WXYC's catalog (too obscure for crowdsourced fingerprint databases). The Essentia approach skips identification entirely — flowsheet timestamps already tell us the artist.
 
 ```bash
 python scripts/process_archive.py \
     --backend-dsn postgresql://... \
-    --acoustid-api-key KEY \
+    --model-dir /path/to/essentia-models \
+    --db-path data/wxyc_artist_graph.db \
     --checkpoint output/archive_progress.db \
-    --date-range 2020-01-01:2020-12-31 \
+    --date-range 2021-06-01:2026-01-01 \
     --max-hours 100 \
-    [--match-threshold 0.7] \
+    [--segment-duration 30] \
     [--retry-failed] \
     [--dry-run]
 ```
 
 - `--backend-dsn` / `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN (required). Queries `wxyc_schema.flowsheet` for entry timestamps.
-- `--acoustid-api-key` / `ACOUSTID_API_KEY` — AcoustID API key (required). Rate-limited to 3 req/sec.
+- `--model-dir` / `ESSENTIA_MODEL_DIR` — Directory containing Essentia TF models: `audioset-vggish-3.pb` (275 MB feature extractor) + 15 classification heads (~50 KB each).
+- `--db-path` / `DB_PATH` — Pipeline SQLite database for writing aggregated audio profiles (optional; omit to skip aggregation).
 - `--checkpoint` / `ARCHIVE_CHECKPOINT` — Path to checkpoint SQLite database (default: `output/archive_progress.db`).
 - `--bucket` — S3 bucket name (default: `wxyc-archive`).
-- `--date-range` — Date range to process as `START:END` (YYYY-MM-DD:YYYY-MM-DD, required).
+- `--date-range` — Date range to process as `START:END` (YYYY-MM-DD:YYYY-MM-DD, required unless `--aggregate-only`).
 - `--max-hours` — Maximum archive hours to process (0 = unlimited).
-- `--match-threshold` — Minimum AcoustID match score (default: 0.7).
-- `--skip-essentia` — Run fingerprint + AcoustID only, skip Essentia extraction (Phase 2, not yet implemented).
+- `--segment-duration` — Duration of each segment in seconds (default: 30).
+- `--aggregate-only` — Skip processing; aggregate existing checkpoint data into the DB.
 - `--retry-failed` — Re-attempt previously failed archive hours.
 - `--dry-run` — Log what would be processed without downloading audio.
 
-System dependencies: `ffmpeg`, `libchromaprint-tools` (provides `fpcalc`). Optional Python dependency group: `pip install -e ".[archive]"`.
+System dependencies: `ffmpeg`. Python: `pip install -e ".[archive]"` (essentia-tensorflow requires Python 3.13, not 3.14).
+
+**Essentia model setup:**
+
+```bash
+# Download VGGish feature extractor (275 MB)
+curl -o models/audioset-vggish-3.pb https://essentia.upf.edu/models/feature-extractors/vggish/audioset-vggish-3.pb
+
+# Download 15 classification heads (~50 KB each)
+for cat in danceability genre_dortmund mood_acoustic mood_aggressive mood_electronic \
+  mood_happy mood_party mood_relaxed mood_sad moods_mirex tonal_atonal \
+  voice_instrumental gender genre_rosamerica genre_tzanetakis; do
+  curl -o "models/${cat}-audioset-vggish-1.pb" \
+    "https://essentia.upf.edu/models/classification-heads/${cat}/${cat}-audioset-vggish-1.pb"
+done
+```
+
+**Processing estimate:** 41,578 hourly MP3s (June 2021–present), 330K–620K segments at ~3s each. 8-core EC2: 1.5–3 days, ~$12–22.
 
 ### Nightly sync mode
 

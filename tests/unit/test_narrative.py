@@ -425,3 +425,88 @@ class TestPromptContent:
         assert prompt_data["target"]["name"] == "Cat Power"
         assert prompt_data["target"]["styles"] == []
         assert prompt_data["target"]["total_plays"] == 20
+
+
+class TestAudioProfileEnrichment:
+    @pytest.mark.asyncio
+    async def test_prompt_includes_audio_profile(
+        self, narrative_db_path: str, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """When an audio profile exists, the prompt includes audio features."""
+        _clear_narrative_cache(narrative_db_path)
+
+        # Insert an audio profile for Autechre
+        ae_id = narrative_artist_ids["Autechre"]
+        conn = sqlite3.connect(narrative_db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS audio_profile ("
+            "artist_id INTEGER PRIMARY KEY, avg_danceability REAL, "
+            "primary_genre TEXT, primary_genre_probability REAL, "
+            "voice_instrumental_ratio REAL, feature_centroid TEXT, "
+            "recording_count INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL DEFAULT '')"
+        )
+        # Build a 59-dim feature vector with known mood values
+        centroid = [0.0] * 59
+        # Moods at indices 9-15: acoustic=0.2, aggressive=0.6, electronic=0.8,
+        # happy=0.1, party=0.3, relaxed=0.1, sad=0.2
+        centroid[9:16] = [0.2, 0.6, 0.8, 0.1, 0.3, 0.1, 0.2]
+        conn.execute(
+            "INSERT OR REPLACE INTO audio_profile "
+            "(artist_id, avg_danceability, primary_genre, primary_genre_probability, "
+            "voice_instrumental_ratio, feature_centroid, recording_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ae_id,
+                0.35,
+                "electronic",
+                0.7,
+                0.15,
+                json.dumps(centroid),
+                12,
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_client = _mock_anthropic_client()
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        sl_id = narrative_artist_ids["Stereolab"]
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        source_audio = prompt_data["source"].get("audio")
+        assert source_audio is not None
+        assert source_audio["primary_genre"] == "electronic"
+        assert source_audio["danceability"] == 0.35
+        assert source_audio["voice_instrumental"] == "instrumental"
+        assert "electronic" in source_audio["top_moods"]
+        assert "aggressive" in source_audio["top_moods"]
+        assert source_audio["recording_count"] == 12
+
+    @pytest.mark.asyncio
+    async def test_prompt_graceful_without_audio_profile(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Artists without audio profiles should not have an 'audio' key."""
+        ae_id = narrative_artist_ids["Autechre"]
+        cp_id = narrative_artist_ids["Cat Power"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{cp_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        # Cat Power has no audio profile
+        assert "audio" not in prompt_data["target"]
