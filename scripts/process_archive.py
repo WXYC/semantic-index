@@ -42,6 +42,7 @@ from semantic_index.archive_essentia import (
     SegmentFeatures,
     _build_recording_features,
     aggregate_artist_profile,
+    extract_rhythm_and_key,
 )
 
 logging.basicConfig(
@@ -155,8 +156,7 @@ class ArchiveCheckpointDB:
     def initialize(self) -> None:
         """Create checkpoint tables if they don't exist."""
         conn = self._get_conn()
-        conn.executescript(
-            """\
+        conn.executescript("""\
             CREATE TABLE IF NOT EXISTS hour_progress (
                 archive_key TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -180,11 +180,14 @@ class ArchiveCheckpointDB:
                 voice_instrumental TEXT,
                 voice_instrumental_probability REAL,
                 feature_vector TEXT,
+                bpm REAL,
+                key TEXT,
+                scale TEXT,
+                key_strength REAL,
                 created_at TEXT NOT NULL,
                 UNIQUE (archive_key, play_id)
             );
-            """
-        )
+            """)
         conn.commit()
 
     def is_hour_complete(self, archive_key: str) -> bool:
@@ -255,8 +258,9 @@ class ArchiveCheckpointDB:
             "INSERT OR IGNORE INTO segment_features "
             "(archive_key, play_id, artist_name, offset_s, duration_s, "
             "danceability, genre, genre_probability, voice_instrumental, "
-            "voice_instrumental_probability, feature_vector, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "voice_instrumental_probability, feature_vector, "
+            "bpm, key, scale, key_strength, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 archive_key,
                 play_id,
@@ -269,6 +273,10 @@ class ArchiveCheckpointDB:
                 seg.voice_instrumental,
                 seg.voice_instrumental_probability,
                 json.dumps(seg.feature_vector),
+                seg.bpm,
+                seg.key,
+                seg.scale,
+                seg.key_strength,
                 now,
             ),
         )
@@ -297,6 +305,10 @@ class ArchiveCheckpointDB:
                     voice_instrumental=row["voice_instrumental"],
                     voice_instrumental_probability=row["voice_instrumental_probability"],
                     feature_vector=fv,
+                    bpm=row["bpm"] or 0.0,
+                    key=row["key"] or "",
+                    scale=row["scale"] or "",
+                    key_strength=row["key_strength"] or 0.0,
                 )
             )
         conn.row_factory = None
@@ -389,6 +401,7 @@ def process_hour(
 
             rf = _build_recording_features(results)
             fv = rf.feature_vector()
+            rk = extract_rhythm_and_key(segment_audio)
             seg = SegmentFeatures(
                 artist_name=entry["artist_name"],
                 danceability=rf.danceability,
@@ -399,9 +412,17 @@ def process_hour(
                 voice_instrumental=rf.voice_instrumental,
                 voice_instrumental_probability=rf.voice_instrumental_probability,
                 feature_vector=fv,
+                bpm=rk["bpm"],
+                key=rk["key"],
+                scale=rk["scale"],
+                key_strength=rk["key_strength"],
             )
             checkpoint.save_segment(
-                seg, hour_key, entry["id"], offset_s, segment_duration_s,
+                seg,
+                hour_key,
+                entry["id"],
+                offset_s,
+                segment_duration_s,
             )
             classified += 1
 
@@ -454,6 +475,14 @@ def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+
+    # Migrate: add bpm/key columns if missing
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(audio_profile)")}
+    for col, ctype in [("avg_bpm", "REAL"), ("primary_key", "TEXT")]:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE audio_profile ADD COLUMN {col} {ctype}")
+    conn.commit()
+
     written = 0
 
     try:
@@ -480,8 +509,9 @@ def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
             conn.execute(
                 "INSERT OR IGNORE INTO audio_profile "
                 "(artist_id, avg_danceability, primary_genre, primary_genre_probability, "
-                "voice_instrumental_ratio, feature_centroid, recording_count, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "voice_instrumental_ratio, feature_centroid, recording_count, "
+                "avg_bpm, primary_key, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     artist_id,
                     profile["avg_danceability"],
@@ -490,6 +520,8 @@ def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
                     profile["voice_instrumental_ratio"],
                     json.dumps(profile["feature_centroid"]),
                     profile["recording_count"],
+                    profile["avg_bpm"],
+                    profile["primary_key"],
                     now,
                 ),
             )
@@ -631,16 +663,12 @@ def main() -> None:
 
         # Filter out completed hours
         to_process = {
-            k: v
-            for k, v in sorted(hour_groups.items())
-            if not checkpoint.is_hour_complete(k)
+            k: v for k, v in sorted(hour_groups.items()) if not checkpoint.is_hour_complete(k)
         }
 
         if args.retry_failed:
             failed = set(checkpoint.get_failed_hours())
-            to_process.update(
-                {k: v for k, v in sorted(hour_groups.items()) if k in failed}
-            )
+            to_process.update({k: v for k, v in sorted(hour_groups.items()) if k in failed})
 
         if args.max_hours > 0:
             keys = list(to_process.keys())[: args.max_hours]
