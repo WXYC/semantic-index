@@ -841,24 +841,33 @@ def run(args: argparse.Namespace) -> None:
             _ab_conn.close()
 
             if mb_rows:
-                # Resolve GIDs (UUIDs) to MB integer IDs via mb_artist table
-                gids = [row[1] for row in mb_rows]
-                mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
-                gid_to_int = mb_client.resolve_gids_to_ids(gids)
-
+                # Resolve MB IDs to integer IDs. The column contains a mix:
+                # - UUID/GID strings (from LML): need resolution via mb_artist
+                # - Integer strings (legacy): already are MB integer IDs
                 graph_id_to_mb: dict[int, int] = {}
+                uuid_rows: list[tuple] = []
                 for row in mb_rows:
-                    graph_id, gid = row[0], row[1]
-                    if gid in gid_to_int:
-                        graph_id_to_mb[graph_id] = gid_to_int[gid]
+                    if row[1].isdigit():
+                        graph_id_to_mb[row[0]] = int(row[1])
+                    else:
+                        uuid_rows.append(row)
+
+                if uuid_rows:
+                    mb_client = _MBClient(cache_dsn=args.musicbrainz_cache_dsn)
+                    gid_to_int = mb_client.resolve_gids_to_ids([r[1] for r in uuid_rows])
+                    for row in uuid_rows:
+                        if row[1] in gid_to_int:
+                            graph_id_to_mb[row[0]] = gid_to_int[row[1]]
+
                 mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
                 mb_ids = list(graph_id_to_mb.values())
 
                 skipped = len(mb_rows) - len(graph_id_to_mb)
                 log.info(
-                    "  Resolved %d/%d GIDs to MB integer IDs (%d skipped)",
+                    "  %d MB IDs resolved (%d legacy int, %d UUID; %d skipped)",
                     len(graph_id_to_mb),
-                    len(mb_rows),
+                    len(mb_rows) - len(uuid_rows),
+                    len(graph_id_to_mb) - (len(mb_rows) - len(uuid_rows)),
                     skipped,
                 )
 
@@ -922,23 +931,30 @@ def run(args: argparse.Namespace) -> None:
             _ab_conn.close()
 
             if mb_rows:
-                # Resolve GIDs (UUIDs) to MB integer IDs via mb_artist table
-                gids = [row[1] for row in mb_rows]
-                gid_to_int = mb_client.resolve_gids_to_ids(gids)
-
+                # Resolve MB IDs to integer IDs (mixed format — see PG path above)
                 graph_id_to_mb: dict[int, int] = {}
+                uuid_rows: list[tuple] = []
                 for row in mb_rows:
-                    graph_id, gid = row[0], row[1]
-                    if gid in gid_to_int:
-                        graph_id_to_mb[graph_id] = gid_to_int[gid]
+                    if row[1].isdigit():
+                        graph_id_to_mb[row[0]] = int(row[1])
+                    else:
+                        uuid_rows.append(row)
+
+                if uuid_rows:
+                    gid_to_int = mb_client.resolve_gids_to_ids([r[1] for r in uuid_rows])
+                    for row in uuid_rows:
+                        if row[1] in gid_to_int:
+                            graph_id_to_mb[row[0]] = gid_to_int[row[1]]
+
                 mb_to_graph_id = {v: k for k, v in graph_id_to_mb.items()}
                 mb_ids = list(graph_id_to_mb.values())
 
                 skipped = len(mb_rows) - len(graph_id_to_mb)
                 log.info(
-                    "  Resolved %d/%d GIDs to MB integer IDs (%d skipped)",
+                    "  %d MB IDs resolved (%d legacy int, %d UUID; %d skipped)",
                     len(graph_id_to_mb),
-                    len(mb_rows),
+                    len(mb_rows) - len(uuid_rows),
+                    len(graph_id_to_mb) - (len(mb_rows) - len(uuid_rows)),
                     skipped,
                 )
 

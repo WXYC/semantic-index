@@ -60,6 +60,7 @@ def recover(
     min_recordings: int = DEFAULT_MIN_RECORDINGS,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     dry_run: bool = False,
+    rebuild_all: bool = False,
 ) -> dict[str, int]:
     """Run the audio profile recovery pipeline.
 
@@ -69,6 +70,7 @@ def recover(
         min_recordings: Minimum recordings to build a profile.
         similarity_threshold: Cosine similarity threshold for edges.
         dry_run: If True, write to temp but skip the atomic swap.
+        rebuild_all: If True, clear existing profiles before finding candidates.
 
     Returns:
         Dict with recovery statistics (profiles_before, profiles_after,
@@ -101,6 +103,17 @@ def recover(
             "SELECT COUNT(*) FROM acoustic_similarity"
         ).fetchone()[0]
 
+        # Clear existing profiles if rebuilding all (e.g. for dimension migration)
+        if rebuild_all:
+            conn.execute("DELETE FROM acoustic_similarity")
+            conn.execute("DELETE FROM audio_profile")
+            conn.commit()
+            logger.info(
+                "Cleared %d profiles and %d similarity edges for rebuild",
+                stats["profiles_before"],
+                stats["similarity_before"],
+            )
+
         # Step 1: Find candidates
         candidates = find_recovery_candidates(conn)
         stats["candidates"] = len(candidates)
@@ -118,15 +131,40 @@ def recover(
             )
             return stats
 
-        # Step 2: Resolve GIDs → integer IDs
-        mb_client = MusicBrainzClient(cache_dsn=musicbrainz_cache_dsn)
-        gids = list({row[1] for row in candidates})
-        gid_to_int = mb_client.resolve_gids_to_ids(gids)
-        stats["resolved"] = len(gid_to_int)
-        logger.info("Resolved %d/%d unique GIDs to integer IDs", len(gid_to_int), len(gids))
+        # Step 2: Resolve MB IDs → integer IDs
+        # The musicbrainz_artist_id column contains a mix of formats:
+        # - UUID/GID strings (from LML identity import): need resolution via mb_artist
+        # - Integer strings (legacy, pre-LML): already are MB integer IDs
+        graph_id_to_int: dict[int, int] = {}
+        uuid_candidates: list[tuple[int, str]] = []
 
-        if not gid_to_int:
-            logger.warning("No GIDs resolved — check mb_artist.gid column (#153)")
+        for graph_id, mb_id in candidates:
+            if mb_id.isdigit():
+                graph_id_to_int[graph_id] = int(mb_id)
+            else:
+                uuid_candidates.append((graph_id, mb_id))
+
+        logger.info(
+            "%d legacy integer IDs, %d UUID GIDs to resolve",
+            len(graph_id_to_int),
+            len(uuid_candidates),
+        )
+
+        if uuid_candidates:
+            mb_client = MusicBrainzClient(cache_dsn=musicbrainz_cache_dsn)
+            gids = list({row[1] for row in uuid_candidates})
+            gid_to_int = mb_client.resolve_gids_to_ids(gids)
+            logger.info("Resolved %d/%d unique GIDs to integer IDs", len(gid_to_int), len(gids))
+
+            for graph_id, gid in uuid_candidates:
+                int_id = gid_to_int.get(gid)
+                if int_id is not None:
+                    graph_id_to_int[graph_id] = int_id
+
+        stats["resolved"] = len(graph_id_to_int)
+
+        if not graph_id_to_int:
+            logger.warning("No MB IDs resolved — check mb_artist.gid column (#153)")
             conn.close()
             temp_path.unlink(missing_ok=True)
             stats.update(
@@ -137,12 +175,6 @@ def recover(
             return stats
 
         # Step 3: Map graph IDs to MB integer IDs
-        graph_id_to_int: dict[int, int] = {}
-        for graph_id, gid in candidates:
-            int_id = gid_to_int.get(gid)
-            if int_id is not None:
-                graph_id_to_int[graph_id] = int_id
-
         int_to_graph_id = {v: k for k, v in graph_id_to_int.items()}
         mb_ids = list(graph_id_to_int.values())
         logger.info("%d candidate artists with resolved integer IDs", len(mb_ids))
@@ -248,6 +280,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Cosine similarity threshold for edges (default: {DEFAULT_SIMILARITY_THRESHOLD})",
     )
     parser.add_argument(
+        "--rebuild-all",
+        action="store_true",
+        help="Clear existing profiles and rebuild from scratch (e.g. for dimension migration)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run recovery but skip the atomic swap",
@@ -282,6 +319,7 @@ def main(argv: list[str] | None = None) -> None:
         min_recordings=args.min_recordings,
         similarity_threshold=args.acoustic_similarity_threshold,
         dry_run=args.dry_run,
+        rebuild_all=args.rebuild_all,
     )
     elapsed = time.time() - t0
     logger.info("Done in %.1fs: %s", elapsed, stats)
