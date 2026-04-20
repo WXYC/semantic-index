@@ -171,7 +171,7 @@ class ArchiveClient:
 
         Args:
             mp3_path: Path to the input MP3 file.
-            sample_rate: Output sample rate in Hz (default 16000 for Chromaprint).
+            sample_rate: Output sample rate in Hz (default 16000 for Essentia VGGish).
 
         Returns:
             Path to the output WAV file (same directory as input, ``.wav`` suffix).

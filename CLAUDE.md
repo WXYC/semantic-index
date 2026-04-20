@@ -59,7 +59,6 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `scripts/nightly_sync.py` | CLI wrapper for `semantic_index.nightly_sync.main()`. |
 | `semantic_index/archive_client.py` | S3 client for WXYC hourly audio archives. Downloads MP3 files from `wxyc-archive` S3 bucket, decodes to PCM WAV via ffmpeg, extracts audio segments at specified offsets. Computes S3 keys from timestamps (`YYYY/MM/DD/YYYYMMDDHH00.mp3`). |
 | `semantic_index/archive_essentia.py` | Essentia TF audio classification. Runs VGGish embeddings through 15 classification heads (genre, mood, danceability, voice/instrumental, tonal, gender, MIREX) to produce per-segment features compatible with the 59-dim RecordingFeatures layout. Three AB classifiers lack VGGish heads and are zero-filled (ismir04_rhythm, genre_electronic, timbre). |
-| `semantic_index/archive_fingerprint.py` | Archive audio fingerprinting and AcoustID identification. Generates Chromaprint fingerprints for audio segments via `pyacoustid`, submits to AcoustID API. **(Deprecated — AcoustID has zero coverage of WXYC's catalog. Replaced by archive_essentia.py.)** |
 | `scripts/process_archive.py` | CLI entry point for archive audio processing. Queries Backend-Service PG for flowsheet entries, groups by archive hour, downloads from S3, classifies segments via Essentia TF, aggregates per-artist profiles, writes to audio_profile table. Per-hour checkpointing, `--date-range`, `--max-hours`, `--aggregate-only`, `--retry-failed`, `--dry-run`. |
 | `scripts/import_acousticbrainz.py` | ETL script: import AcousticBrainz high-level features from tar archives into PostgreSQL `ab_recording` table. Per-tar checkpointing, NAS-resilient, idempotent via `ON CONFLICT DO NOTHING`. |
 | `scripts/recover_audio_profiles.py` | Recovery ETL: restore audio profiles for artists with MusicBrainz GIDs. Resolves GID -> integer ID via PostgreSQL `mb_artist`, fetches AcousticBrainz features, builds 59-dim profiles, recomputes acoustic similarity. Atomic swap, dry-run support. |
@@ -304,8 +303,6 @@ The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured 
 ### Archive audio classification
 
 Extends audio feature coverage beyond AcousticBrainz (which covers only ~13% of WXYC artists) by classifying WXYC's hourly audio archives directly. Uses flowsheet timestamps to locate each play within the S3 archive, extracts 30-second segments, and runs Essentia TF classifiers (VGGish + 15 classification heads) to produce per-segment features. Results are aggregated per-artist and written to the `audio_profile` table, enriching narrative generation with genre, mood, and danceability data.
-
-AcoustID was evaluated first but has zero coverage of WXYC's catalog (too obscure for crowdsourced fingerprint databases). The Essentia approach skips identification entirely — flowsheet timestamps already tell us the artist.
 
 ```bash
 python scripts/process_archive.py \
