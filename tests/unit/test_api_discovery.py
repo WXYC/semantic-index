@@ -145,41 +145,6 @@ class TestCommunities:
         assert resp.json()["communities"] == []
 
 
-class TestDiscovery:
-    @pytest.mark.asyncio
-    async def test_returns_scored_artists(self, client):
-        resp = await client.get("/graph/discovery", params={"limit": 10})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "results" in data
-        assert len(data["results"]) > 0
-        # Scores should be descending
-        scores = [r["discovery_score"] for r in data["results"]]
-        assert scores == sorted(scores, reverse=True)
-
-    @pytest.mark.asyncio
-    async def test_entry_has_expected_fields(self, client):
-        resp = await client.get("/graph/discovery", params={"limit": 1})
-        entry = resp.json()["results"][0]
-        assert "artist" in entry
-        assert "discovery_score" in entry
-        assert "dj_edge_count" in entry
-        assert "acoustic_neighbor_count" in entry
-        assert entry["discovery_score"] > 0
-
-    @pytest.mark.asyncio
-    async def test_community_filter(self, client):
-        resp = await client.get("/graph/discovery", params={"community_id": 9999})
-        assert resp.status_code == 200
-        assert resp.json()["results"] == []
-
-    @pytest.mark.asyncio
-    async def test_graceful_on_old_schema(self, plain_client):
-        resp = await plain_client.get("/graph/discovery")
-        assert resp.status_code == 200
-        assert resp.json()["results"] == []
-
-
 class TestArtistSummaryIncludesMetrics:
     @pytest.mark.asyncio
     async def test_search_includes_community_id(self, client):

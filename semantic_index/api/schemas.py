@@ -163,21 +163,6 @@ class CommunitiesResponse(BaseModel):
     total_artists: int = 0
 
 
-class DiscoveryEntry(BaseModel):
-    """An underplayed artist with high acoustic similarity."""
-
-    artist: ArtistSummary
-    discovery_score: float
-    dj_edge_count: int
-    acoustic_neighbor_count: int
-
-
-class DiscoveryResponse(BaseModel):
-    """Response for GET /graph/discovery."""
-
-    results: list[DiscoveryEntry]
-
-
 class PreviewResponse(BaseModel):
     """Response for GET /graph/artists/{id}/preview.
 

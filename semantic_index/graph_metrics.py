@@ -30,9 +30,6 @@ _GRAPH_METRIC_COLUMNS = [
     ("community_id", "INTEGER"),
     ("betweenness", "REAL"),
     ("pagerank", "REAL"),
-    ("discovery_score", "REAL"),
-    ("dj_edge_count", "INTEGER"),
-    ("acoustic_neighbor_count", "INTEGER"),
 ]
 
 _COMMUNITY_TABLE_SCHEMA = """\
@@ -45,9 +42,6 @@ CREATE TABLE IF NOT EXISTS community (
 );
 CREATE INDEX IF NOT EXISTS idx_artist_community ON artist(community_id);
 """
-
-# Acoustic similarity threshold for discovery scoring
-_ACOUSTIC_DISCOVERY_THRESHOLD = 0.95
 
 
 @dataclass
@@ -118,45 +112,6 @@ def _compute_centrality(
     logger.info("  done in %.1fs", time.time() - t0)
 
     return betweenness, pagerank
-
-
-def _compute_discovery_scores(
-    conn: sqlite3.Connection,
-    g_undirected: nx.Graph,
-    graph_nodes: set[int],
-) -> dict[int, tuple[float, int, int]]:
-    """Compute discovery scores: acoustic_neighbor_count / (dj_degree + 1).
-
-    Returns {artist_id: (score, dj_edge_count, acoustic_neighbor_count)}.
-
-    acoustic_neighbor_count is computed by querying acoustic_similarity with
-    similarity >= 0.95. dj_edge_count is the undirected degree in the transition
-    graph. If acoustic_similarity table is empty or missing, all scores are 0.
-    """
-    # Count acoustic neighbors per artist (above threshold)
-    acoustic_degree: Counter[int] = Counter()
-    try:
-        rows = conn.execute(
-            "SELECT artist_a_id, artist_b_id FROM acoustic_similarity WHERE similarity >= ?",
-            (_ACOUSTIC_DISCOVERY_THRESHOLD,),
-        ).fetchall()
-        for a, b in rows:
-            if a in graph_nodes:
-                acoustic_degree[a] += 1
-            if b in graph_nodes:
-                acoustic_degree[b] += 1
-    except sqlite3.OperationalError:
-        # Table doesn't exist
-        logger.info("No acoustic_similarity table found, discovery scores will be 0")
-
-    results: dict[int, tuple[float, int, int]] = {}
-    for node in graph_nodes:
-        dj_deg = g_undirected.degree(node)
-        ac_deg = acoustic_degree.get(node, 0)
-        score = ac_deg / (dj_deg + 1) if ac_deg > 0 else 0.0
-        results[node] = (score, dj_deg, ac_deg)
-
-    return results
 
 
 def _build_community_metadata(
@@ -233,24 +188,17 @@ def _persist(
     communities_meta: list[dict],
     betweenness: dict[int, float],
     pagerank: dict[int, float],
-    discovery: dict[int, tuple[float, int, int]],
 ) -> None:
     """Clear old metrics and write new values."""
-    conn.execute(
-        "UPDATE artist SET community_id = NULL, betweenness = NULL, pagerank = NULL, "
-        "discovery_score = NULL, dj_edge_count = NULL, acoustic_neighbor_count = NULL"
-    )
+    conn.execute("UPDATE artist SET community_id = NULL, betweenness = NULL, pagerank = NULL")
     conn.execute("DELETE FROM community")
 
     for artist_id, comm_id in node_community.items():
         bc = betweenness.get(artist_id, 0.0)
         pr = pagerank.get(artist_id, 0.0)
-        score, dj_deg, ac_deg = discovery.get(artist_id, (0.0, 0, 0))
         conn.execute(
-            "UPDATE artist SET community_id = ?, betweenness = ?, pagerank = ?, "
-            "discovery_score = ?, dj_edge_count = ?, acoustic_neighbor_count = ? "
-            "WHERE id = ?",
-            (comm_id, bc, pr, score, dj_deg, ac_deg, artist_id),
+            "UPDATE artist SET community_id = ?, betweenness = ?, pagerank = ? WHERE id = ?",
+            (comm_id, bc, pr, artist_id),
         )
 
     # Insert community metadata
@@ -295,14 +243,11 @@ def compute_and_persist(db_path: str, *, seed: int = 42, bc_k: int = 2000) -> Gr
     logger.info("Computing centrality...")
     betweenness, pagerank = _compute_centrality(directed, undirected, bc_k=bc_k)
 
-    logger.info("Computing discovery scores...")
-    discovery = _compute_discovery_scores(conn, undirected, graph_nodes)
-
     logger.info("Building community metadata...")
     communities_meta = _build_community_metadata(communities, artists, conn)
 
     logger.info("Persisting results...")
-    _persist(conn, node_community, communities_meta, betweenness, pagerank, discovery)
+    _persist(conn, node_community, communities_meta, betweenness, pagerank)
 
     conn.close()
 
