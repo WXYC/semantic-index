@@ -25,10 +25,12 @@ Usage:
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import sqlite3
 import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -322,59 +324,62 @@ class ArchiveCheckpointDB:
 
 
 # ---------------------------------------------------------------------------
-# Processing pipeline
+# Processing pipeline (parallel)
 # ---------------------------------------------------------------------------
 
+# Per-process state for multiprocessing workers
+_worker_classifier: EssentiaClassifier | None = None
+_worker_bucket: str = "wxyc-archive"
 
-def process_hour(
-    classifier: EssentiaClassifier,
-    archive_client: ArchiveClient,
-    checkpoint: ArchiveCheckpointDB,
-    hour_key: str,
-    entries: list[dict],
-    segment_duration_s: int,
-) -> int:
-    """Process a single archive hour: download, classify segments.
 
-    Loads the full hour audio once, then slices and classifies each
-    flowsheet entry's segment without repeated disk I/O.
+def _init_worker(model_dir: str, bucket: str) -> None:
+    """Initialize per-process Essentia classifier and S3 client."""
+    global _worker_classifier, _worker_bucket  # noqa: PLW0603
+    _worker_classifier = EssentiaClassifier(model_dir)
+    _worker_bucket = bucket
+
+
+def _process_hour_worker(
+    args: tuple[str, list[dict], int],
+) -> tuple[str, list[tuple[SegmentFeatures, int, float, int]], str | None]:
+    """Worker function: download, classify, return results.
+
+    Runs in a child process. Does NOT write to the checkpoint DB —
+    returns results to the main process for serialized writes.
 
     Args:
-        classifier: Pre-loaded Essentia classifier pipeline.
-        archive_client: S3 client for downloading archive audio.
-        checkpoint: Checkpoint database for progress tracking.
-        hour_key: S3 key for the archive hour.
-        entries: Flowsheet entries in this hour.
-        segment_duration_s: Duration of each segment in seconds.
+        args: Tuple of (hour_key, entries, segment_duration_s).
 
     Returns:
-        Number of segments successfully classified.
+        Tuple of (hour_key, segment_results, error_msg).
+        segment_results is a list of (SegmentFeatures, play_id, offset_s, duration_s).
+        error_msg is None on success.
     """
-    checkpoint.mark_hour_started(hour_key, play_count=len(entries))
+    hour_key, entries, segment_duration_s = args
+    assert _worker_classifier is not None
 
-    # Download and decode
+    client = ArchiveClient(bucket=_worker_bucket)
+
+    # Download
     try:
-        mp3_path = archive_client.download_hour(hour_key)
+        mp3_path = client.download_hour(hour_key)
     except Exception as e:
-        logger.error("Failed to download %s: %s", hour_key, e)
-        checkpoint.mark_hour_failed(hour_key, f"download: {e}")
-        return 0
+        return hour_key, [], f"download: {e}"
 
+    # Decode
     wav_path = None
     try:
         wav_path = ArchiveClient.decode_to_wav(mp3_path, sample_rate=VGGISH_SAMPLE_RATE)
     except Exception as e:
-        logger.error("Failed to decode %s: %s", hour_key, e)
-        checkpoint.mark_hour_failed(hour_key, f"decode: {e}")
         mp3_path.unlink(missing_ok=True)
-        return 0
+        return hour_key, [], f"decode: {e}"
 
     try:
         from essentia.standard import MonoLoader
 
         audio = MonoLoader(filename=str(wav_path), sampleRate=VGGISH_SAMPLE_RATE)()
         total_samples = len(audio)
-        classified = 0
+        results_list: list[tuple[SegmentFeatures, int, float, int]] = []
 
         for entry in entries:
             offset_s = _entry_offset_in_hour(entry, hour_key)
@@ -385,21 +390,15 @@ def process_hour(
             )
 
             if end_sample - start_sample < VGGISH_SAMPLE_RATE:
-                continue  # less than 1 second — skip
-
-            segment_audio = audio[start_sample:end_sample]
-            results = classifier.classify_array(segment_audio)
-
-            if len(results) < len(CLASSIFIERS):
-                missing_names = set(CLASSIFIERS) - set(results)
-                logger.debug(
-                    "Skipping play %d: missing classifiers %s",
-                    entry["id"],
-                    missing_names,
-                )
                 continue
 
-            rf = _build_recording_features(results)
+            segment_audio = audio[start_sample:end_sample]
+            clf_results = _worker_classifier.classify_array(segment_audio)
+
+            if len(clf_results) < len(CLASSIFIERS):
+                continue
+
+            rf = _build_recording_features(clf_results)
             fv = rf.feature_vector()
             rk = extract_rhythm_and_key(segment_audio)
             seg = SegmentFeatures(
@@ -417,28 +416,12 @@ def process_hour(
                 scale=rk["scale"],
                 key_strength=rk["key_strength"],
             )
-            checkpoint.save_segment(
-                seg,
-                hour_key,
-                entry["id"],
-                offset_s,
-                segment_duration_s,
-            )
-            classified += 1
+            results_list.append((seg, entry["id"], offset_s, segment_duration_s))
 
-        checkpoint.mark_hour_complete(hour_key, classified)
-        logger.info(
-            "  %s: %d/%d entries classified",
-            hour_key,
-            classified,
-            len(entries),
-        )
-        return classified
+        return hour_key, results_list, None
 
     except Exception as e:
-        logger.error("Error processing %s: %s", hour_key, e, exc_info=True)
-        checkpoint.mark_hour_failed(hour_key, str(e))
-        return 0
+        return hour_key, [], str(e)
     finally:
         if wav_path:
             wav_path.unlink(missing_ok=True)
@@ -589,6 +572,12 @@ def parse_args() -> argparse.Namespace:
         help=f"Duration of each segment in seconds (default: {DEFAULT_SEGMENT_DURATION_S}).",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of parallel workers (default: CPU count).",
+    )
+    parser.add_argument(
         "--aggregate-only",
         action="store_true",
         help="Skip processing; aggregate existing checkpoint data into the DB.",
@@ -687,35 +676,68 @@ def main() -> None:
             )
             return
 
-        # Initialize classifier and S3 client
-        classifier = EssentiaClassifier(args.model_dir)
-        archive_client = ArchiveClient(bucket=args.bucket)
+        # Parallel processing with worker pool
+        num_workers = args.workers or multiprocessing.cpu_count()
+        logger.info("Starting %d workers", num_workers)
         total_classified = 0
+        total_hours_done = 0
+        t_start = time.time()
 
-        for i, (key, hour_entries) in enumerate(to_process.items(), 1):
-            logger.info(
-                "=== Hour %d/%d: %s (%d entries) ===",
-                i,
-                len(to_process),
-                key,
-                len(hour_entries),
-            )
-            t0 = time.time()
-            classified = process_hour(
-                classifier,
-                archive_client,
-                checkpoint,
-                key,
-                hour_entries,
-                args.segment_duration,
-            )
-            elapsed = time.time() - t0
-            total_classified += classified
-            logger.info("  Done in %.1fs", elapsed)
+        work_items = [(key, entries, args.segment_duration) for key, entries in to_process.items()]
 
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_worker,
+            initargs=(args.model_dir, args.bucket),
+        ) as pool:
+            for hour_key, seg_results, error_msg in pool.map(
+                _process_hour_worker, work_items, chunksize=4
+            ):
+                total_hours_done += 1
+                if error_msg:
+                    checkpoint.mark_hour_started(hour_key, 0)
+                    checkpoint.mark_hour_failed(hour_key, error_msg)
+                    if total_hours_done % 500 == 0:
+                        logger.info(
+                            "  [%d/%d] %s: failed (%s)",
+                            total_hours_done,
+                            len(to_process),
+                            hour_key,
+                            error_msg,
+                        )
+                    continue
+
+                checkpoint.mark_hour_started(
+                    hour_key,
+                    len(seg_results),
+                )
+                for seg, play_id, offset_s, duration_s in seg_results:
+                    checkpoint.save_segment(
+                        seg,
+                        hour_key,
+                        play_id,
+                        offset_s,
+                        duration_s,
+                    )
+                checkpoint.mark_hour_complete(hour_key, len(seg_results))
+                total_classified += len(seg_results)
+
+                elapsed = time.time() - t_start
+                rate = total_hours_done / elapsed if elapsed > 0 else 0
+                logger.info(
+                    "  [%d/%d] %s: %d classified (%.1f hours/s)",
+                    total_hours_done,
+                    len(to_process),
+                    hour_key,
+                    len(seg_results),
+                    rate,
+                )
+
+        elapsed_total = time.time() - t_start
         logger.info(
-            "Processing complete: %d hours, %d segments classified",
+            "Processing complete: %d hours in %.0fs, %d segments classified",
             len(to_process),
+            elapsed_total,
             total_classified,
         )
 
