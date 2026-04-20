@@ -120,7 +120,7 @@ def _build_prompt(
 def _lookup_artist_metadata(
     db: sqlite3.Connection, artist_id: int, artist_name: str, genre: str | None, total_plays: int
 ) -> dict:
-    """Build an artist metadata dict with genre, total_plays, and Discogs style tags."""
+    """Build an artist metadata dict with genre, total_plays, Discogs styles, and audio profile."""
     styles: list[str] = []
     try:
         rows = db.execute(
@@ -130,12 +130,51 @@ def _lookup_artist_metadata(
         styles = [r["style_tag"] for r in rows]
     except sqlite3.OperationalError:
         pass  # artist_style table may not exist
-    return {
+
+    meta: dict = {
         "name": artist_name,
         "genre": genre,
         "total_plays": total_plays,
         "styles": styles,
     }
+
+    # Audio profile: add descriptive features when available
+    try:
+        profile = db.execute(
+            "SELECT avg_danceability, primary_genre, primary_genre_probability, "
+            "voice_instrumental_ratio, feature_centroid, recording_count "
+            "FROM audio_profile WHERE artist_id = ?",
+            (artist_id,),
+        ).fetchone()
+        if profile and profile["feature_centroid"]:
+            centroid = json.loads(profile["feature_centroid"])
+            # Extract narratively useful features from the 59-dim centroid
+            mood_labels = [
+                "acoustic",
+                "aggressive",
+                "electronic",
+                "happy",
+                "party",
+                "relaxed",
+                "sad",
+            ]
+            mood_vector = centroid[9:16]
+            top_moods = sorted(
+                zip(mood_labels, mood_vector, strict=True), key=lambda x: x[1], reverse=True
+            )
+            meta["audio"] = {
+                "primary_genre": profile["primary_genre"],
+                "danceability": round(profile["avg_danceability"], 2),
+                "voice_instrumental": (
+                    "vocal" if profile["voice_instrumental_ratio"] > 0.5 else "instrumental"
+                ),
+                "top_moods": [m for m, v in top_moods[:3] if v > 0.3],
+                "recording_count": profile["recording_count"],
+            }
+    except sqlite3.OperationalError:
+        pass  # audio_profile table may not exist
+
+    return meta
 
 
 def _lookup_dj_name(db: sqlite3.Connection, dj_id: int) -> str | None:
