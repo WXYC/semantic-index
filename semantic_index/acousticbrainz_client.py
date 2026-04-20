@@ -9,8 +9,6 @@ JOIN query.
 import json
 import logging
 
-import psycopg
-
 from semantic_index.acousticbrainz import (
     GENRE_ELECTRONIC_LABELS,
     GENRE_LABELS,
@@ -20,6 +18,7 @@ from semantic_index.acousticbrainz import (
     RHYTHM_LABELS,
     RecordingFeatures,
 )
+from semantic_index.utils import LazyPgConnection, batched_with_log
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +68,11 @@ class AcousticBrainzClient:
     """
 
     def __init__(self, cache_dsn: str) -> None:
-        self._cache_dsn = cache_dsn
-        self._conn: psycopg.Connection | None = None
+        self._pg = LazyPgConnection(cache_dsn, "musicbrainz database")
 
-    def _get_conn(self) -> psycopg.Connection | None:
+    def _get_conn(self):
         """Get or create the PostgreSQL connection."""
-        if self._conn is None or self._conn.closed:
-            try:
-                self._conn = psycopg.connect(self._cache_dsn, autocommit=True)
-            except Exception:
-                logger.warning("Failed to connect to musicbrainz database", exc_info=True)
-                return None
-        return self._conn
+        return self._pg.get()
 
     def get_features_for_artists(
         self, mb_artist_ids: list[int]
@@ -105,9 +97,7 @@ class AcousticBrainzClient:
 
         try:
             result: dict[int, list[RecordingFeatures]] = {}
-            batch_size = 1000
-            for i in range(0, len(mb_artist_ids), batch_size):
-                batch = mb_artist_ids[i : i + batch_size]
+            for batch in batched_with_log(mb_artist_ids, label="AB feature lookup"):
                 rows = conn.execute(
                     f"SELECT {_SELECT_COLS} "
                     "FROM mb_artist_recording mar "
@@ -120,13 +110,6 @@ class AcousticBrainzClient:
                     artist_id = row[0]
                     features = _parse_row(row)
                     result.setdefault(artist_id, []).append(features)
-
-                if (i + batch_size) % 5000 == 0:
-                    logger.info(
-                        "  AB feature lookup: %d/%d artist batches",
-                        i // batch_size + 1,
-                        (len(mb_artist_ids) + batch_size - 1) // batch_size,
-                    )
 
             total_recordings = sum(len(v) for v in result.values())
             logger.info(

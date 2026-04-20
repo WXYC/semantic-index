@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from semantic_index.api.database import get_db
+from semantic_index.api.database import get_db, open_cache_db
 from semantic_index.api.schemas import BandcampAlbumResponse, BioResponse
 
 logger = logging.getLogger(__name__)
@@ -197,12 +197,7 @@ _WIKI_USER_AGENT = "WXYCSemanticIndex/0.1 (https://wxyc.org; engineering@wxyc.or
 
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
     """Open a writable connection to the sidecar bio cache database."""
-    cache_path = db_path + ".bio-cache.db"
-    conn = sqlite3.connect(cache_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_CACHE_SCHEMA)
-    return conn
+    return open_cache_db(db_path, "bio", _CACHE_SCHEMA)
 
 
 def _generated_summary(detail: dict) -> str:

@@ -32,6 +32,7 @@ from semantic_index.models import (
     SharedPersonnelEdge,
     SharedStyleEdge,
 )
+from semantic_index.utils import LazyPgConnection
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +50,13 @@ class DiscogsClient:
     """
 
     def __init__(self, cache_dsn: str | None, api_base_url: str | None) -> None:
-        self._cache_dsn = cache_dsn
         self._api_base_url = api_base_url.rstrip("/") if api_base_url else None
         self._last_api_call: float = 0
-        self._cache_conn: psycopg.Connection | None = None
+        self._pg = LazyPgConnection(cache_dsn, "discogs-cache")
 
     def _get_cache_conn(self) -> psycopg.Connection | None:
         """Get or create the cache PostgreSQL connection."""
-        if self._cache_dsn is None:
-            return None
-        if self._cache_conn is None or self._cache_conn.closed:
-            try:
-                self._cache_conn = psycopg.connect(self._cache_dsn, autocommit=True)
-            except Exception:
-                logger.warning("Failed to connect to discogs-cache", exc_info=True)
-                return None
-        return self._cache_conn
+        return self._pg.get()
 
     def _get_http_client(self) -> httpx.Client | None:
         """Create an HTTP client for the API."""
@@ -211,39 +203,52 @@ class DiscogsClient:
             return False
 
     @staticmethod
+    def _fetch_grouped(execute, query: str, params: tuple, value_fn) -> dict[str, list]:
+        """Run *query* and group results by the first column.
+
+        Args:
+            execute: Callable that accepts ``(query, params)`` and returns a
+                cursor with ``.fetchall()``.
+            query: SQL query whose first column is the grouping key.
+            params: Bind parameters for *query*.
+            value_fn: Extracts the value(s) from each row (receives the full row tuple).
+
+        Returns:
+            Dict mapping the first column's value to a list of extracted values.
+        """
+        rows = execute(query, params).fetchall()
+        grouped: dict[str, list] = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(value_fn(row))
+        return grouped
+
+    @staticmethod
     def _enrich_from_summaries(conn: object, batch: list[str]) -> dict[str, dict]:
         """Fast enrichment using pre-joined summary tables."""
         execute = conn.execute  # type: ignore[attr-defined]
-        result: dict[str, dict] = {}
+        fg = DiscogsClient._fetch_grouped
 
-        # Styles: artist_name → style
-        style_rows = execute(
+        artist_styles = fg(
+            execute,
             "SELECT artist_name, style FROM artist_style_summary WHERE artist_name = ANY(%s)",
             (batch,),
-        ).fetchall()
-        artist_styles: dict[str, list[str]] = {}
-        for name, style in style_rows:
-            artist_styles.setdefault(name, []).append(style)
-
-        # Personnel: artist_name → personnel_name, role
-        extra_rows = execute(
+            lambda row: row[1],
+        )
+        artist_extras = fg(
+            execute,
             "SELECT artist_name, personnel_name, role FROM artist_personnel_summary WHERE artist_name = ANY(%s)",
             (batch,),
-        ).fetchall()
-        artist_extras: dict[str, list[tuple[str, str | None]]] = {}
-        for name, personnel, role in extra_rows:
-            artist_extras.setdefault(name, []).append((personnel, role))
-
-        # Labels: artist_name → label_id, label_name
-        label_rows = execute(
+            lambda row: (row[1], row[2]),
+        )
+        artist_labels = fg(
+            execute,
             "SELECT artist_name, label_id, label_name FROM artist_label_summary WHERE artist_name = ANY(%s)",
             (batch,),
-        ).fetchall()
-        artist_labels: dict[str, list[tuple[int | None, str]]] = {}
-        for name, label_id, label_name in label_rows:
-            artist_labels.setdefault(name, []).append((label_id, label_name))
+            lambda row: (row[1], row[2]),
+        )
 
         # Build result for all artists that had any data
+        result: dict[str, dict] = {}
         all_names = set(artist_styles) | set(artist_extras) | set(artist_labels)
         for name in all_names:
             result[name] = {
@@ -260,51 +265,43 @@ class DiscogsClient:
         """Slow enrichment path: join release tables by release_id."""
         execute = conn.execute  # type: ignore[attr-defined]
         result: dict[str, dict] = {}
+        fg = DiscogsClient._fetch_grouped
 
-        rows = execute(
+        artist_releases = fg(
+            execute,
             f"SELECT ra.artist_name, ra.release_id FROM {RELEASE_ARTIST_TABLE} ra WHERE ra.extra = 0 AND lower(ra.artist_name) = ANY(%s)",  # noqa: S608
             (batch,),
-        ).fetchall()
-
-        artist_releases: dict[str, list[int]] = {}
-        for artist_name, release_id in rows:
-            artist_releases.setdefault(artist_name, []).append(release_id)
+            lambda row: row[1],
+        )
 
         all_release_ids = list({rid for rids in artist_releases.values() for rid in rids})
         if not all_release_ids:
             return {}
 
-        style_rows = execute(
+        release_styles = fg(
+            execute,
             f"SELECT release_id, style FROM {RELEASE_STYLE_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
-        ).fetchall()
-        release_styles: dict[int, list[str]] = {}
-        for rid, style in style_rows:
-            release_styles.setdefault(rid, []).append(style)
-
-        extra_rows = execute(
+            lambda row: row[1],
+        )
+        release_extras = fg(
+            execute,
             f"SELECT release_id, artist_name, role FROM {RELEASE_ARTIST_TABLE} WHERE extra = 1 AND release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
-        ).fetchall()
-        release_extras: dict[int, list[tuple[str, str | None]]] = {}
-        for rid, name, role in extra_rows:
-            release_extras.setdefault(rid, []).append((name, role))
-
-        label_rows = execute(
+            lambda row: (row[1], row[2]),
+        )
+        release_labels = fg(
+            execute,
             f"SELECT release_id, label_id, label_name FROM {RELEASE_LABEL_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
-        ).fetchall()
-        release_labels: dict[int, list[tuple[int | None, str]]] = {}
-        for rid, label_id, label_name in label_rows:
-            release_labels.setdefault(rid, []).append((label_id, label_name))
-
-        track_artist_rows = execute(
+            lambda row: (row[1], row[2]),
+        )
+        release_track_artists = fg(
+            execute,
             f"SELECT release_id, artist_name FROM {RELEASE_TRACK_ARTIST_TABLE} WHERE release_id = ANY(%s)",  # noqa: S608
             (all_release_ids,),
-        ).fetchall()
-        release_track_artists: dict[int, list[str]] = {}
-        for rid, name in track_artist_rows:
-            release_track_artists.setdefault(rid, []).append(name)
+            lambda row: row[1],
+        )
 
         for artist_name, rids in artist_releases.items():
             styles: set[str] = set()

@@ -14,13 +14,13 @@ import re
 import time
 
 import httpx
-import psycopg
 
 from semantic_index.models import (
     WikidataEntity,
     WikidataInfluence,
     WikidataLabelHierarchy,
 )
+from semantic_index.utils import LazyPgConnection
 
 logger = logging.getLogger(__name__)
 
@@ -84,20 +84,11 @@ class WikidataClient:
         self._user_agent = user_agent or self._DEFAULT_USER_AGENT
         self._batch_size = batch_size
         self._last_request: float = 0
-        self._cache_dsn = cache_dsn
-        self._cache_conn: psycopg.Connection | None = None
+        self._pg = LazyPgConnection(cache_dsn, "wikidata-cache")
 
-    def _get_cache_conn(self) -> psycopg.Connection | None:
+    def _get_cache_conn(self):
         """Get or create the wikidata-cache PostgreSQL connection."""
-        if self._cache_dsn is None:
-            return None
-        if self._cache_conn is None or self._cache_conn.closed:
-            try:
-                self._cache_conn = psycopg.connect(self._cache_dsn, autocommit=True)
-            except Exception:
-                logger.warning("Failed to connect to wikidata-cache", exc_info=True)
-                return None
-        return self._cache_conn
+        return self._pg.get()
 
     def _rate_limit(self) -> None:
         """Sleep to respect Wikidata's rate limit (~1 req/s)."""

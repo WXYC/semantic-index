@@ -56,7 +56,11 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
 
 
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
-    """Open a writable connection to the sidecar narrative cache database."""
+    """Open a writable connection to the sidecar narrative cache database.
+
+    Includes a migration that drops the old schema (PK without ``edge_type``)
+    before creating the current one. Safe because this is a regenerable cache.
+    """
     cache_path = db_path + ".narrative-cache.db"
     conn = sqlite3.connect(cache_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row

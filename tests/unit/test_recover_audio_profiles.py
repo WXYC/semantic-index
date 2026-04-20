@@ -149,9 +149,9 @@ class TestRecover:
             patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
         ):
             mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
-            mock_mb_cls.return_value._cache_conn = None
+            mock_mb_cls.return_value._pg._conn = None
             mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
-            mock_ab_cls.return_value._conn = None
+            mock_ab_cls.return_value._pg._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -183,9 +183,9 @@ class TestRecover:
                 GID_AUTECHRE: 12345,
                 GID_STEREOLAB: 67890,
             }
-            mock_mb_cls.return_value._cache_conn = None
+            mock_mb_cls.return_value._pg._conn = None
             mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
-            mock_ab_cls.return_value._conn = None
+            mock_ab_cls.return_value._pg._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -213,9 +213,9 @@ class TestRecover:
                 GID_AUTECHRE: 12345,
                 GID_STEREOLAB: 67890,
             }
-            mock_mb_cls.return_value._cache_conn = None
+            mock_mb_cls.return_value._pg._conn = None
             mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
-            mock_ab_cls.return_value._conn = None
+            mock_ab_cls.return_value._pg._conn = None
 
             stats = recover(
                 db_path=str(db_path),
@@ -237,9 +237,9 @@ class TestRecover:
             patch("semantic_index.acousticbrainz_client.AcousticBrainzClient") as mock_ab_cls,
         ):
             mock_mb_cls.return_value.resolve_gids_to_ids.return_value = {GID_AUTECHRE: 12345}
-            mock_mb_cls.return_value._cache_conn = None
+            mock_mb_cls.return_value._pg._conn = None
             mock_ab_cls.return_value.get_features_for_artists.return_value = mock_features
-            mock_ab_cls.return_value._conn = None
+            mock_ab_cls.return_value._pg._conn = None
 
             stats = recover(
                 db_path=str(db_path),
