@@ -158,6 +158,10 @@ class SegmentFeatures:
         voice_instrumental: "voice" or "instrumental".
         voice_instrumental_probability: Confidence of the prediction.
         feature_vector: Full 59-dim feature vector for similarity.
+        bpm: Estimated tempo in beats per minute.
+        key: Musical key (e.g. "A", "C#").
+        scale: Musical scale ("major" or "minor").
+        key_strength: Confidence of key estimation (0-1).
     """
 
     artist_name: str
@@ -169,6 +173,10 @@ class SegmentFeatures:
     voice_instrumental: str
     voice_instrumental_probability: float
     feature_vector: list[float]
+    bpm: float = 0.0
+    key: str = ""
+    scale: str = ""
+    key_strength: float = 0.0
 
 
 def _parse_classifier_output(
@@ -284,6 +292,42 @@ def _build_recording_features(
     )
 
 
+def extract_rhythm_and_key(audio_array, sample_rate: int = VGGISH_SAMPLE_RATE) -> dict:
+    """Extract BPM and musical key from an audio array via Essentia DSP.
+
+    Uses ``RhythmExtractor2013`` for tempo and ``KeyExtractor`` for
+    tonal analysis. Both operate on the raw audio signal (no TF models).
+
+    Args:
+        audio_array: Mono float32 audio array.
+        sample_rate: Sample rate in Hz (default 16000).
+
+    Returns:
+        Dict with ``bpm``, ``key``, ``scale``, ``key_strength``.
+    """
+    from essentia.standard import KeyExtractor, RhythmExtractor2013
+
+    result: dict = {"bpm": 0.0, "key": "", "scale": "", "key_strength": 0.0}
+
+    try:
+        rhythm = RhythmExtractor2013()
+        bpm, _beats, _confidence, _estimates, _intervals = rhythm(audio_array)
+        result["bpm"] = float(bpm)
+    except Exception:
+        logger.debug("RhythmExtractor2013 failed", exc_info=True)
+
+    try:
+        key_ext = KeyExtractor(sampleRate=sample_rate)
+        key, scale, strength = key_ext(audio_array)
+        result["key"] = key
+        result["scale"] = scale
+        result["key_strength"] = float(strength)
+    except Exception:
+        logger.debug("KeyExtractor failed", exc_info=True)
+
+    return result
+
+
 def aggregate_artist_profile(
     artist_name: str,
     segments: list[SegmentFeatures],
@@ -330,6 +374,18 @@ def aggregate_artist_profile(
         sum(s.feature_vector[i] for s in segments) / n for i in range(FEATURE_VECTOR_DIM)
     ]
 
+    # Average BPM (weighted by key_strength as a proxy for estimate quality)
+    bpm_segments = [s for s in segments if s.bpm > 0]
+    avg_bpm = sum(s.bpm for s in bpm_segments) / len(bpm_segments) if bpm_segments else 0.0
+
+    # Most common key: vote weighted by key_strength
+    key_votes: dict[str, float] = {}
+    for s in segments:
+        if s.key and s.key_strength > 0:
+            label = f"{s.key} {s.scale}"
+            key_votes[label] = key_votes.get(label, 0.0) + s.key_strength
+    primary_key = max(key_votes, key=key_votes.get) if key_votes else ""  # type: ignore[arg-type]
+
     return {
         "avg_danceability": avg_danceability,
         "primary_genre": primary_genre,
@@ -337,6 +393,8 @@ def aggregate_artist_profile(
         "voice_instrumental_ratio": voice_instrumental_ratio,
         "feature_centroid": feature_centroid,
         "recording_count": n,
+        "avg_bpm": avg_bpm,
+        "primary_key": primary_key,
     }
 
 
