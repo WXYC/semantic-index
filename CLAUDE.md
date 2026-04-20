@@ -247,7 +247,7 @@ Summary tables (`artist_style_summary`, `artist_personnel_summary`, `artist_labe
 ### Code Style
 
 - Python 3.12+
-- black (100 char line length)
+- ruff format (100 char line length)
 - ruff (100 char, rules: E, W, F, I, N, UP, B, C4)
 - mypy with pydantic plugin
 - TDD: write failing test first, then implement
