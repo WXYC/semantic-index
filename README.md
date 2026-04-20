@@ -83,7 +83,7 @@ The pipeline depends on `wxyc-etl`, a shared Rust/PyO3 package providing text no
 pytest                    # unit tests
 pytest -m integration     # integration tests (needs fixture dump)
 ruff check .              # lint
-black --check .           # format check
+ruff format --check .     # format check
 mypy .                    # type check
 ```
 
