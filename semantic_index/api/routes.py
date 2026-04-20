@@ -22,8 +22,6 @@ from semantic_index.api.schemas import (
     BatchNeighborsResponse,
     CommunitiesResponse,
     CommunityDetail,
-    DiscoveryEntry,
-    DiscoveryResponse,
     DjSummary,
     EntityArtists,
     ExplainResponse,
@@ -276,48 +274,6 @@ def get_communities(
     except sqlite3.OperationalError:
         total = 0
     return CommunitiesResponse(communities=communities, total_artists=total)
-
-
-@router.get("/discovery", response_model=DiscoveryResponse)
-def get_discovery(
-    limit: int = Query(default=25, ge=1, le=100),
-    community_id: int | None = Query(default=None),
-    genre: str | None = Query(default=None),
-    db: sqlite3.Connection = Depends(get_db),
-) -> DiscoveryResponse:
-    """Return underplayed sonic fits — artists acoustically similar to many but rarely placed by DJs."""
-    _init_metrics_flag(db)
-    try:
-        sql = (
-            f"SELECT {_scols()}, discovery_score, dj_edge_count, acoustic_neighbor_count "  # noqa: S608
-            "FROM artist "
-            "WHERE discovery_score IS NOT NULL AND discovery_score > 0 "
-        )
-        params: list = []
-        if community_id is not None:
-            sql += "AND community_id = ? "
-            params.append(community_id)
-        if genre is not None:
-            sql += "AND genre = ? "
-            params.append(genre)
-        sql += "ORDER BY discovery_score DESC LIMIT ?"
-        params.append(limit)
-
-        rows = db.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
-        return DiscoveryResponse(results=[])
-
-    return DiscoveryResponse(
-        results=[
-            DiscoveryEntry(
-                artist=_artist_summary(r),
-                discovery_score=r["discovery_score"],
-                dj_edge_count=r["dj_edge_count"],
-                acoustic_neighbor_count=r["acoustic_neighbor_count"],
-            )
-            for r in rows
-        ]
-    )
 
 
 @router.get("/artists/{artist_id}", response_model=ArtistDetail)

@@ -110,9 +110,6 @@ class TestEnsureSchema:
         assert "community_id" in cols
         assert "betweenness" in cols
         assert "pagerank" in cols
-        assert "discovery_score" in cols
-        assert "dj_edge_count" in cols
-        assert "acoustic_neighbor_count" in cols
         conn.close()
 
     def test_creates_community_table(self):
@@ -198,35 +195,6 @@ class TestComputeAndPersist:
         # Largest communities should have at least 3 members
         assert rows[0]["size"] >= 3
         assert rows[0]["label"] is not None
-        conn.close()
-
-    def test_discovery_scores_from_acoustic(self):
-        path = _build_fixture_db(with_acoustic=True)
-        compute_and_persist(path)
-
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        # Artists with within-cluster acoustic neighbors at >= 0.95 should have positive scores
-        rows = conn.execute(
-            "SELECT canonical_name, discovery_score, dj_edge_count, acoustic_neighbor_count "
-            "FROM artist WHERE discovery_score IS NOT NULL AND discovery_score > 0"
-        ).fetchall()
-        assert len(rows) > 0
-        for r in rows:
-            assert r["acoustic_neighbor_count"] > 0
-            assert r["dj_edge_count"] >= 0
-        conn.close()
-
-    def test_discovery_scores_zero_without_acoustic(self):
-        path = _build_fixture_db(with_acoustic=False)
-        compute_and_persist(path)
-
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT discovery_score FROM artist WHERE discovery_score > 0"
-        ).fetchall()
-        assert len(rows) == 0
         conn.close()
 
     def test_returns_report(self):
