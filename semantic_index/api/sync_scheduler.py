@@ -13,12 +13,18 @@ Controlled by environment variables:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Held at module level so the lock persists for the lifetime of the process.
+# Closing this file releases the flock; the OS releases it if the process dies.
+_lock_file = None
 
 
 def _seconds_until_next_run(hour_utc: int) -> float:
@@ -27,7 +33,7 @@ def _seconds_until_next_run(hour_utc: int) -> float:
     target = now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
     if target <= now:
         # Already past today's window — schedule for tomorrow
-        target = target.replace(day=target.day + 1)
+        target = target + timedelta(days=1)
     delta = (target - now).total_seconds()
     return delta
 
@@ -71,8 +77,11 @@ def start_scheduler(
     dsn: str,
     min_count: int = 2,
     hour_utc: int = 9,
-) -> threading.Thread:
+) -> threading.Thread | None:
     """Start the sync scheduler as a daemon thread.
+
+    Uses a file lock to ensure only one uvicorn worker runs the
+    scheduler. Returns ``None`` if another worker already holds the lock.
 
     Args:
         db_path: Path to the production SQLite database.
@@ -81,8 +90,20 @@ def start_scheduler(
         hour_utc: Hour (UTC) to run the daily sync.
 
     Returns:
-        The daemon thread (already started).
+        The daemon thread (already started), or None if the lock is held.
     """
+    global _lock_file  # noqa: PLW0603
+
+    lock_path = Path(db_path).with_suffix(".sync.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_fd = open(lock_path, "w")  # noqa: SIM115
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_file = lock_fd  # prevent GC from closing/releasing the lock
+    except OSError:
+        logger.info("Sync scheduler lock held by another worker — skipping")
+        return None
+
     thread = threading.Thread(
         target=_scheduler_loop,
         args=(db_path, dsn, min_count, hour_utc),
