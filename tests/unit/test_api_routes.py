@@ -365,36 +365,26 @@ class TestNeighbors:
         assert "Cat Power" in names
 
     @pytest.mark.asyncio
-    async def test_heat_cool_ranks_by_raw_count(
-        self, client: AsyncClient, artist_ids: dict[str, int]
+    @pytest.mark.parametrize(
+        ("heat", "field"),
+        [
+            pytest.param(0.0, "raw_count", id="cool_ranks_by_raw_count"),
+            pytest.param(1.0, "pmi", id="hot_ranks_by_pmi"),
+        ],
+    )
+    async def test_heat_ranking(
+        self, client: AsyncClient, artist_ids: dict[str, int], heat: float, field: str
     ) -> None:
-        """heat=0 (cool) ranks by raw_count, so higher raw_count appears first."""
+        """Extreme heat values rank neighbors by the corresponding field."""
         aid = artist_ids["Autechre"]
         resp = await client.get(
             f"/graph/artists/{aid}/neighbors",
-            params={"type": "djTransition", "heat": 0.0},
+            params={"type": "djTransition", "heat": heat},
         )
         assert resp.status_code == 200
         neighbors = resp.json()["neighbors"]
         assert len(neighbors) >= 2
-        # First neighbor should have higher raw_count
-        assert neighbors[0]["detail"]["raw_count"] >= neighbors[-1]["detail"]["raw_count"]
-
-    @pytest.mark.asyncio
-    async def test_heat_hot_ranks_by_pmi(
-        self, client: AsyncClient, artist_ids: dict[str, int]
-    ) -> None:
-        """heat=1 (hot) ranks by PMI, so higher PMI appears first."""
-        aid = artist_ids["Autechre"]
-        resp = await client.get(
-            f"/graph/artists/{aid}/neighbors",
-            params={"type": "djTransition", "heat": 1.0},
-        )
-        assert resp.status_code == 200
-        neighbors = resp.json()["neighbors"]
-        assert len(neighbors) >= 2
-        # First neighbor should have higher PMI
-        assert neighbors[0]["detail"]["pmi"] >= neighbors[-1]["detail"]["pmi"]
+        assert neighbors[0]["detail"][field] >= neighbors[-1]["detail"][field]
 
     @pytest.mark.asyncio
     async def test_heat_validation(self, client: AsyncClient, artist_ids: dict[str, int]) -> None:

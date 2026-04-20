@@ -283,9 +283,8 @@ class TestGracefulDegradation:
 def _make_cache_client(mock_conn: MagicMock) -> WikidataClient:
     """Create a WikidataClient with a mocked cache connection."""
     mock_conn.closed = False
-    client = WikidataClient()
-    client._cache_dsn = "mock"
-    client._cache_conn = mock_conn
+    client = WikidataClient(cache_dsn="mock")
+    client._pg._conn = mock_conn
     return client
 
 

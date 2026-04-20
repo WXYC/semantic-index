@@ -8,7 +8,7 @@ moved to LML.
 
 import logging
 
-import psycopg
+from semantic_index.utils import LazyPgConnection, batched_with_log
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +21,11 @@ class MusicBrainzClient:
     """
 
     def __init__(self, cache_dsn: str) -> None:
-        self._cache_dsn = cache_dsn
-        self._cache_conn: psycopg.Connection | None = None
+        self._pg = LazyPgConnection(cache_dsn, "musicbrainz-cache")
 
-    def _get_conn(self) -> psycopg.Connection | None:
+    def _get_conn(self):
         """Get or create the cache connection."""
-        if self._cache_conn is None or self._cache_conn.closed:
-            try:
-                self._cache_conn = psycopg.connect(self._cache_dsn, autocommit=True)
-            except Exception:
-                logger.warning("Failed to connect to musicbrainz-cache", exc_info=True)
-                return None
-        return self._cache_conn
+        return self._pg.get()
 
     def resolve_gids_to_ids(self, gids: list[str]) -> dict[str, int]:
         """Resolve MusicBrainz artist GIDs (UUIDs) to integer IDs.
@@ -56,9 +49,7 @@ class MusicBrainzClient:
 
         try:
             result: dict[str, int] = {}
-            batch_size = 1000
-            for i in range(0, len(gids), batch_size):
-                batch = gids[i : i + batch_size]
+            for batch in batched_with_log(gids, label="GID resolution"):
                 rows = conn.execute(
                     "SELECT id, gid::text FROM mb_artist WHERE gid = ANY(%s)",
                     (batch,),
@@ -92,9 +83,7 @@ class MusicBrainzClient:
 
         try:
             result: dict[int, list[str]] = {}
-            batch_size = 1000
-            for i in range(0, len(mb_artist_ids), batch_size):
-                batch = mb_artist_ids[i : i + batch_size]
+            for batch in batched_with_log(mb_artist_ids, label="Recording lookup"):
                 rows = conn.execute(
                     "SELECT artist_id, recording_mbid::text "
                     "FROM mb_artist_recording "
@@ -103,13 +92,6 @@ class MusicBrainzClient:
                 ).fetchall()
                 for artist_id, mbid in rows:
                     result.setdefault(artist_id, []).append(mbid)
-
-                if (i + batch_size) % 5000 == 0:
-                    logger.info(
-                        "  Recording lookup: %d/%d artist batches",
-                        i // batch_size + 1,
-                        (len(mb_artist_ids) + batch_size - 1) // batch_size,
-                    )
 
             return result
         except Exception:

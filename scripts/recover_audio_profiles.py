@@ -226,10 +226,12 @@ def recover(
         conn.close()
 
         # Close PG connections
-        if mb_client._cache_conn and not mb_client._cache_conn.closed:
-            mb_client._cache_conn.close()
-        if ab_client._conn and not ab_client._conn.closed:
-            ab_client._conn.close()
+        pg_conn = mb_client._pg._conn
+        if pg_conn and not pg_conn.closed:
+            pg_conn.close()
+        pg_conn = ab_client._pg._conn
+        if pg_conn and not pg_conn.closed:
+            pg_conn.close()
 
         # Step 9: Checkpoint and swap
         checkpoint_and_close(str(temp_path))

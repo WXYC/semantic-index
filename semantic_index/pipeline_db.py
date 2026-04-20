@@ -417,123 +417,102 @@ class PipelineDB:
                ORDER BY wikidata_qid""").fetchall()
         return [(row[0], sorted(int(x) for x in row[1].split(","))) for row in rows]
 
-    def _rekey_symmetric_edges(self, keep_id: int, merge_id: int) -> int:
-        """Re-key symmetric edge tables, replacing merge_id with keep_id.
+    def _rekey_pair_edge_table(
+        self,
+        table: str,
+        col_a: str,
+        col_b: str,
+        keep_id: int,
+        merge_id: int,
+        *,
+        symmetric: bool = False,
+    ) -> int:
+        """Re-key a two-column edge table, replacing merge_id with keep_id.
 
-        For each table in ``_SYMMETRIC_EDGE_TABLES``:
-        1. Delete edges between merge_id and keep_id (would become self-referential).
-        2. Delete edges that would create PK conflicts after re-keying (checks both
-           ``(keep_id, X)`` and ``(X, keep_id)`` since tables are symmetric/unordered).
-        3. UPDATE remaining edges to use keep_id.
-        4. Delete any residual self-referential edges (defensive).
+        Works for both symmetric (``artist_a_id``/``artist_b_id``) and directed
+        (``source_id``/``target_id``) edge tables.
 
-        Returns the total number of edge rows re-keyed (step 3 only).
-        """
-        total = 0
-        for table in _SYMMETRIC_EDGE_TABLES:
-            if not self._has_table(table):
-                continue
-
-            # 1. Delete edges between merge_id and keep_id (would become self-loops)
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE "  # noqa: S608
-                f"(artist_a_id = ? AND artist_b_id = ?) OR "
-                f"(artist_a_id = ? AND artist_b_id = ?)",
-                (merge_id, keep_id, keep_id, merge_id),
-            )
-
-            # 2a. Delete (merge_id, X) edges that would conflict with existing keep_id edges
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE artist_a_id = ?1 AND ("  # noqa: S608
-                f"  EXISTS (SELECT 1 FROM {table} t2"
-                f"    WHERE t2.artist_a_id = ?2 AND t2.artist_b_id = {table}.artist_b_id)"
-                f"  OR EXISTS (SELECT 1 FROM {table} t2"
-                f"    WHERE t2.artist_a_id = {table}.artist_b_id AND t2.artist_b_id = ?2)"
-                f")",
-                (merge_id, keep_id),
-            )
-
-            # 2b. Delete (X, merge_id) edges that would conflict with existing keep_id edges
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE artist_b_id = ?1 AND ("  # noqa: S608
-                f"  EXISTS (SELECT 1 FROM {table} t2"
-                f"    WHERE t2.artist_a_id = {table}.artist_a_id AND t2.artist_b_id = ?2)"
-                f"  OR EXISTS (SELECT 1 FROM {table} t2"
-                f"    WHERE t2.artist_a_id = ?2 AND t2.artist_b_id = {table}.artist_a_id)"
-                f")",
-                (merge_id, keep_id),
-            )
-
-            # 3. Re-key remaining edges
-            cur = self._conn.execute(
-                f"UPDATE {table} SET artist_a_id = ? WHERE artist_a_id = ?",  # noqa: S608
-                (keep_id, merge_id),
-            )
-            total += cur.rowcount
-            cur = self._conn.execute(
-                f"UPDATE {table} SET artist_b_id = ? WHERE artist_b_id = ?",  # noqa: S608
-                (keep_id, merge_id),
-            )
-            total += cur.rowcount
-
-            # 4. Safety: delete any self-referential edges
-            self._conn.execute(f"DELETE FROM {table} WHERE artist_a_id = artist_b_id")  # noqa: S608
-        return total
-
-    def _rekey_directed_edges(self, keep_id: int, merge_id: int) -> int:
-        """Re-key directed edge tables, replacing merge_id with keep_id.
-
-        For each table in ``_DIRECTED_EDGE_TABLES`` (keyed by ``source_id``/``target_id``):
+        Steps:
         1. Delete edges between merge_id and keep_id (would become self-referential).
         2. Delete edges that would create PK conflicts after re-keying.
         3. UPDATE remaining edges to use keep_id.
         4. Delete any residual self-referential edges (defensive).
 
-        Returns the total number of edge rows re-keyed (step 3 only).
+        Returns the number of rows re-keyed (step 3 only).
         """
+        if not self._has_table(table):
+            return 0
+
+        # 1. Delete edges between merge_id and keep_id
+        self._conn.execute(
+            f"DELETE FROM {table} WHERE "  # noqa: S608
+            f"({col_a} = ? AND {col_b} = ?) OR "
+            f"({col_a} = ? AND {col_b} = ?)",
+            (merge_id, keep_id, keep_id, merge_id),
+        )
+
+        # 2a. Delete (merge_id, X) edges that conflict with existing (keep_id, X)
+        conflict_a = (
+            f"DELETE FROM {table} WHERE {col_a} = ?1 AND ("  # noqa: S608
+            f"  EXISTS (SELECT 1 FROM {table} t2"
+            f"    WHERE t2.{col_a} = ?2 AND t2.{col_b} = {table}.{col_b})"
+        )
+        if symmetric:
+            conflict_a += (
+                f"  OR EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.{col_a} = {table}.{col_b} AND t2.{col_b} = ?2)"
+            )
+        conflict_a += ")"
+        self._conn.execute(conflict_a, (merge_id, keep_id))
+
+        # 2b. Delete (X, merge_id) edges that conflict with existing (X, keep_id)
+        conflict_b = (
+            f"DELETE FROM {table} WHERE {col_b} = ?1 AND "  # noqa: S608
+            f"EXISTS (SELECT 1 FROM {table} t2"
+            f"  WHERE t2.{col_a} = {table}.{col_a} AND t2.{col_b} = ?2)"
+        )
+        if symmetric:
+            conflict_b = (
+                f"DELETE FROM {table} WHERE {col_b} = ?1 AND ("  # noqa: S608
+                f"  EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.{col_a} = {table}.{col_a} AND t2.{col_b} = ?2)"
+                f"  OR EXISTS (SELECT 1 FROM {table} t2"
+                f"    WHERE t2.{col_a} = ?2 AND t2.{col_b} = {table}.{col_a})"
+                f")"
+            )
+        self._conn.execute(conflict_b, (merge_id, keep_id))
+
+        # 3. Re-key remaining edges
+        total = 0
+        cur = self._conn.execute(
+            f"UPDATE {table} SET {col_a} = ? WHERE {col_a} = ?",  # noqa: S608
+            (keep_id, merge_id),
+        )
+        total += cur.rowcount
+        cur = self._conn.execute(
+            f"UPDATE {table} SET {col_b} = ? WHERE {col_b} = ?",  # noqa: S608
+            (keep_id, merge_id),
+        )
+        total += cur.rowcount
+
+        # 4. Safety: delete any self-referential edges
+        self._conn.execute(f"DELETE FROM {table} WHERE {col_a} = {col_b}")  # noqa: S608
+        return total
+
+    def _rekey_symmetric_edges(self, keep_id: int, merge_id: int) -> int:
+        """Re-key symmetric edge tables, replacing merge_id with keep_id."""
+        total = 0
+        for table in _SYMMETRIC_EDGE_TABLES:
+            total += self._rekey_pair_edge_table(
+                table, "artist_a_id", "artist_b_id", keep_id, merge_id, symmetric=True
+            )
+        return total
+
+    def _rekey_directed_edges(self, keep_id: int, merge_id: int) -> int:
+        """Re-key directed edge tables, replacing merge_id with keep_id."""
         total = 0
         for table in _DIRECTED_EDGE_TABLES:
-            if not self._has_table(table):
-                continue
-
-            # 1. Delete edges between merge_id and keep_id
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE "  # noqa: S608
-                f"(source_id = ? AND target_id = ?) OR "
-                f"(source_id = ? AND target_id = ?)",
-                (merge_id, keep_id, keep_id, merge_id),
-            )
-
-            # 2a. Delete (merge_id, X) edges that conflict with existing (keep_id, X)
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE source_id = ?1 AND "  # noqa: S608
-                f"EXISTS (SELECT 1 FROM {table} t2"
-                f"  WHERE t2.source_id = ?2 AND t2.target_id = {table}.target_id)",
-                (merge_id, keep_id),
-            )
-
-            # 2b. Delete (X, merge_id) edges that conflict with existing (X, keep_id)
-            self._conn.execute(
-                f"DELETE FROM {table} WHERE target_id = ?1 AND "  # noqa: S608
-                f"EXISTS (SELECT 1 FROM {table} t2"
-                f"  WHERE t2.source_id = {table}.source_id AND t2.target_id = ?2)",
-                (merge_id, keep_id),
-            )
-
-            # 3. Re-key remaining edges
-            cur = self._conn.execute(
-                f"UPDATE {table} SET source_id = ? WHERE source_id = ?",  # noqa: S608
-                (keep_id, merge_id),
-            )
-            total += cur.rowcount
-            cur = self._conn.execute(
-                f"UPDATE {table} SET target_id = ? WHERE target_id = ?",  # noqa: S608
-                (keep_id, merge_id),
-            )
-            total += cur.rowcount
-
-            # 4. Safety: delete any self-referential edges
-            self._conn.execute(f"DELETE FROM {table} WHERE source_id = target_id")  # noqa: S608
+            total += self._rekey_pair_edge_table(table, "source_id", "target_id", keep_id, merge_id)
         return total
 
     def _rekey_single_artist_tables(self, keep_id: int, merge_id: int) -> int:

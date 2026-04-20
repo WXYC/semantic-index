@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from semantic_index.api.database import get_db
+from semantic_index.api.database import get_db, open_cache_db
 from semantic_index.api.schemas import PreviewResponse
 
 logger = logging.getLogger(__name__)
@@ -40,12 +40,7 @@ CREATE TABLE IF NOT EXISTS preview_cache (
 
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
     """Open a writable connection to the sidecar preview cache database."""
-    cache_path = db_path + ".preview-cache.db"
-    conn = sqlite3.connect(cache_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_CACHE_SCHEMA)
-    return conn
+    return open_cache_db(db_path, "preview", _CACHE_SCHEMA)
 
 
 def _http_get(url: str, **kwargs) -> httpx.Response:
