@@ -100,7 +100,7 @@ def start_scheduler(
         lock_fd = open(lock_path, "w")  # noqa: SIM115
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _lock_file = lock_fd  # prevent GC from closing/releasing the lock
-    except OSError:
+    except BlockingIOError:
         lock_fd.close()
         logger.info("Sync scheduler lock held by another worker — skipping")
         return None
