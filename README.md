@@ -24,7 +24,7 @@ python run_pipeline.py <dump_path> [--output-dir DIR] [--min-count N] [--no-sqli
 | `--min-count` | `2` | Minimum co-occurrence count for graph edges |
 | `--no-sqlite` | disabled | Skip SQLite database export |
 | `--db-path` | none | Path to pipeline SQLite database with persistent identity resolution |
-| `--entity-source` | `local` | `local` skips LML; `lml` reads from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`). `lml` fails loudly if PG is unreachable — pass `--entity-source=local` to bypass. |
+| `--entity-source` | `local` (most cases); **required** when both `--db-path` and `--discogs-cache-dsn` are set | `local` skips LML; `lml` reads from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`). `lml` fails loudly if PG is unreachable — pass `--entity-source=local` to bypass. The pipeline refuses to start when both `--db-path` and `--discogs-cache-dsn` are set without an explicit `--entity-source` choice (pre-PR #184 that combo silently triggered LML import; post-PR #184 it would silently skip LML, so the operator must pick). |
 
 ## How it works
 
