@@ -204,21 +204,24 @@ class TestFullPipeline:
     def test_cross_reference_edges_extracted(self) -> None:
         """Cross-reference edges populated when the fixture exposes the path.
 
-        The tubafrenzy dev fixture contains LIBRARY_CODE_CROSS_REFERENCE rows
-        but none of them are reachable from artists kept in the resolved graph
-        (see tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql), so the
-        cross_reference table comes out empty. Skip in that case so the
-        assertion fires automatically the moment the fixture grows reachable
-        cross-ref rows; until then, cross_reference extraction is exercised
-        directly by the unit tests.
+        The tubafrenzy dev fixture has 119 LIBRARY_CODE_CROSS_REFERENCE rows
+        and 35 RELEASE_CROSS_REFERENCE rows, but every CROSS_REFERENCING_ARTIST_ID
+        in those rows points at a LIBRARY_CODE.ID outside the truncated 1000-row
+        LIBRARY_CODE table that ships in the fixture. cross_reference.py logs a
+        warning and skips each unresolvable row, so extraction returns zero edges
+        and the cross_reference table comes out empty. Skip in that case so the
+        assertion fires automatically the moment the fixture's LIBRARY_CODE table
+        is widened to cover those IDs; until then, cross_reference extraction is
+        exercised directly by the unit tests.
         """
         count = self.conn.execute("SELECT count(*) FROM cross_reference").fetchone()[0]
         if count == 0:
             pytest.skip(
-                "cross_reference table is empty: tubafrenzy fixture has no "
-                "LIBRARY_CODE_CROSS_REFERENCE rows reachable from kept artists. "
-                "Add reachable cross-ref rows to wxycmusic-fixture.sql to exercise "
-                "this path end-to-end."
+                "cross_reference table is empty: every cross-ref row in "
+                "wxycmusic-fixture.sql references a LIBRARY_CODE.ID outside "
+                "the fixture's truncated LIBRARY_CODE table, so all rows are "
+                "skipped during extraction. Widen the fixture's LIBRARY_CODE "
+                "rows to cover the referenced IDs to exercise this path."
             )
         assert count > 0, "cross_reference table is empty"
 
