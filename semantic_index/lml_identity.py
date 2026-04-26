@@ -15,6 +15,19 @@ from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
+
+class LmlEntitySourceError(RuntimeError):
+    """Raised when the LML entity source is selected but cannot be reached.
+
+    This is a fail-loud signal: when ``--entity-source=lml`` is requested and
+    LML PG is unavailable (connection refused, auth failure, timeout, missing
+    DSN), we surface this exception with a clear actionable message instead
+    of silently falling back to local reconciliation. Silent fallback masks
+    real LML configuration errors (wrong DSN, expired credentials, etc.).
+    To skip LML entirely, the operator should pass ``--entity-source=local``.
+    """
+
+
 _FETCH_ALL_IDENTITIES_SQL = """\
 SELECT library_name, discogs_artist_id, wikidata_qid,
        musicbrainz_artist_id, spotify_artist_id,
