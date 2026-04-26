@@ -701,6 +701,39 @@ class TestArtistDetail:
         assert data["bandcamp_id"] == "autechre"
 
     @pytest.mark.asyncio
+    async def test_artist_detail_includes_reconciled_identity_for_resolved_artist(
+        self, entity_client: AsyncClient, entity_artist_ids: dict[str, int]
+    ) -> None:
+        """Resolved artists carry a `reconciled_identity` object whose fields
+        mirror the flat external-ID fields. The nested form is the canonical
+        wxyc-shared schema; the flat fields remain for backward compatibility."""
+        aid = entity_artist_ids["Autechre"]
+        resp = await entity_client.get(f"/graph/artists/{aid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "reconciled_identity" in data
+        ri = data["reconciled_identity"]
+        assert ri is not None
+        # Nested form mirrors the flat fields exactly
+        assert ri["discogs_artist_id"] == 1240
+        assert ri["musicbrainz_artist_id"] == "410c9baf-5469-44f6-9852-826524b80c61"
+        assert ri["wikidata_qid"] == "Q375855"
+        assert ri["spotify_artist_id"] == "5bMqBjPbCOWGgWJpbAqdQq"
+        assert ri["apple_music_artist_id"] == "15821"
+        assert ri["bandcamp_id"] == "autechre"
+
+    @pytest.mark.asyncio
+    async def test_artist_detail_reconciled_identity_null_when_unresolved(
+        self, entity_client: AsyncClient, entity_artist_ids: dict[str, int]
+    ) -> None:
+        """Artists with no entity_id and no external IDs get reconciled_identity=None."""
+        aid = entity_artist_ids["Cat Power"]
+        resp = await entity_client.get(f"/graph/artists/{aid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reconciled_identity"] is None
+
+    @pytest.mark.asyncio
     async def test_artist_detail_no_entity(
         self, entity_client: AsyncClient, entity_artist_ids: dict[str, int]
     ) -> None:

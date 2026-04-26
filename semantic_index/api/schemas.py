@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from generated.api_models import ReconciledIdentity
+
 
 class ArtistSummary(BaseModel):
     """Minimal artist representation for search results and edge endpoints."""
@@ -63,7 +65,13 @@ class ExplainResponse(BaseModel):
 
 
 class ArtistDetail(BaseModel):
-    """Full artist detail including external IDs from joined entity table."""
+    """Full artist detail including external IDs from joined entity table.
+
+    The flat external-ID fields (discogs_artist_id, musicbrainz_artist_id, …)
+    are kept for backward compatibility with the existing graph explorer
+    frontend. New consumers should read the nested `reconciled_identity` field,
+    which conforms to the shared `@wxyc/shared` `ReconciledIdentity` schema.
+    """
 
     id: int
     canonical_name: str
@@ -82,6 +90,7 @@ class ArtistDetail(BaseModel):
     spotify_artist_id: str | None = None
     apple_music_artist_id: str | None = None
     bandcamp_id: str | None = None
+    reconciled_identity: ReconciledIdentity | None = None
 
 
 class EntityArtists(BaseModel):

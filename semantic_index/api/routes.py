@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from generated.api_models import ReconciledIdentity
 from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
     ArtistDetail,
@@ -449,6 +450,25 @@ def get_entity_artists(
     )
 
 
+def _build_reconciled_identity(row: sqlite3.Row) -> ReconciledIdentity | None:
+    """Build a shared `ReconciledIdentity` from a SQL row.
+
+    Returns None when the artist has no resolved external IDs at all, so
+    consumers can distinguish "unresolved" from "resolved with some null IDs."
+    """
+    fields = {
+        "discogs_artist_id": row["discogs_artist_id"],
+        "musicbrainz_artist_id": row["musicbrainz_artist_id"],
+        "wikidata_qid": row["wikidata_qid"],
+        "spotify_artist_id": row["spotify_artist_id"],
+        "apple_music_artist_id": row["apple_music_artist_id"],
+        "bandcamp_id": row["bandcamp_id"],
+    }
+    if not any(v is not None for v in fields.values()):
+        return None
+    return ReconciledIdentity(**fields)
+
+
 def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
     """Fetch full artist detail, joining entity table when available.
 
@@ -495,6 +515,8 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
     if row is None:
         raise HTTPException(status_code=404, detail="Artist not found")
 
+    reconciled_identity = _build_reconciled_identity(row)
+
     return ArtistDetail(
         id=row["id"],
         canonical_name=row["canonical_name"],
@@ -513,6 +535,7 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
         spotify_artist_id=row["spotify_artist_id"],
         apple_music_artist_id=row["apple_music_artist_id"],
         bandcamp_id=row["bandcamp_id"],
+        reconciled_identity=reconciled_identity,
     )
 
 
