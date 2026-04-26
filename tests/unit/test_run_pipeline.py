@@ -78,8 +78,21 @@ class TestParseArgs:
             parse_args(["dump.sql", "--skip-reconciliation"])
         with pytest.raises(SystemExit):
             parse_args(["dump.sql", "--fetch-streaming-ids"])
+
+    def test_entity_source_default_is_local(self):
+        """Default entity source is 'local' (skips LML)."""
+        args = parse_args(["dump.sql"])
+        assert args.entity_source == "local"
+
+    def test_entity_source_lml_accepted(self):
+        """--entity-source=lml is accepted as a valid choice."""
+        args = parse_args(["dump.sql", "--entity-source", "lml"])
+        assert args.entity_source == "lml"
+
+    def test_entity_source_invalid_rejected(self):
+        """Invalid --entity-source values are rejected by argparse."""
         with pytest.raises(SystemExit):
-            parse_args(["dump.sql", "--entity-source", "local"])
+            parse_args(["dump.sql", "--entity-source", "remote"])
 
 
 def _make_resolved_entry(

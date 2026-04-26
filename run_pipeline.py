@@ -137,6 +137,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "with persistent identity resolution from LML. Creates the database if needed.",
     )
     parser.add_argument(
+        "--entity-source",
+        choices=["local", "lml"],
+        default="local",
+        help="Where to source entity (artist) identity from. "
+        "'local' (default): use only the local SQLite pipeline DB; skip LML. "
+        "'lml': read identities from LML's entity.identity PG table (requires "
+        "--discogs-cache-dsn). lml requires LML PG to be reachable; the pipeline "
+        "fails fast (raises LmlEntitySourceError) if it isn't. To skip LML when "
+        "PG is unavailable, pass --entity-source=local.",
+    )
+    parser.add_argument(
         "--compute-discogs-edges",
         action="store_true",
         help="Compute Discogs-derived edges (shared personnel, styles, labels, compilations). "
@@ -279,6 +290,51 @@ def _run_facet_only(
     log.info("Facet tables written to %s in %.1f seconds.", sqlite_path, elapsed)
 
 
+def _validate_lml_entity_source(args: argparse.Namespace) -> None:
+    """Validate LML PG connectivity early when --entity-source=lml is selected.
+
+    Connects to LML PG (via the discogs-cache DSN) and runs a trivial query to
+    verify reachability and authentication. On any failure, raises
+    :class:`LmlEntitySourceError` with a message that points the operator at
+    the workaround (``--entity-source=local``).
+
+    This runs before any expensive pipeline work so failures surface within
+    seconds, not after a 30-minute parse.
+    """
+    from semantic_index.lml_identity import LmlEntitySourceError, PgSource
+
+    if not args.discogs_cache_dsn:
+        raise LmlEntitySourceError(
+            "--entity-source=lml requires --discogs-cache-dsn (or the "
+            "DATABASE_URL_DISCOGS env var) so the pipeline can connect to LML's "
+            "entity.identity PG table. Either provide a DSN, or pass "
+            "--entity-source=local to skip LML entirely."
+        )
+
+    log.info("Validating LML PG reachability (--entity-source=lml)...")
+    pg_source = PgSource(args.discogs_cache_dsn)
+    try:
+        # Trivial probe: a 1-row SELECT against entity.identity. We don't need
+        # the result; we only need to confirm connect+auth+schema all work.
+        pg_source.fetchall("SELECT 1 FROM entity.identity LIMIT 1")
+    except Exception as exc:
+        log.error(
+            "LML entity source unavailable: %s. "
+            "To proceed without LML, re-run with --entity-source=local.",
+            exc,
+        )
+        raise LmlEntitySourceError(
+            "Failed to reach LML PG entity.identity table with "
+            "--entity-source=lml. Underlying error: "
+            f"{type(exc).__name__}: {exc}. "
+            "Fix LML connectivity (check --discogs-cache-dsn / DATABASE_URL_DISCOGS, "
+            "network, credentials) or pass --entity-source=local to skip LML."
+        ) from exc
+    finally:
+        pg_source.close()
+    log.info("LML PG reachable.")
+
+
 def run(args: argparse.Namespace) -> None:
     dump_path = args.dump_path
     output_dir = Path(args.output_dir)
@@ -287,6 +343,10 @@ def run(args: argparse.Namespace) -> None:
     if not Path(dump_path).exists():
         log.error("Dump file not found: %s", dump_path)
         sys.exit(1)
+
+    # Fail fast on LML connectivity before any expensive work.
+    if args.entity_source == "lml":
+        _validate_lml_entity_source(args)
 
     t0 = time.time()
 
@@ -477,9 +537,19 @@ def run(args: argparse.Namespace) -> None:
         pipeline_db.bulk_upsert_artists(all_canonical)
 
         # 5d. Import identities from LML entity store (PG)
-        if args.discogs_cache_dsn:
+        #
+        # Gated by --entity-source=lml. With the default (--entity-source=local),
+        # we skip LML entirely and rely on local reconciliation. With
+        # --entity-source=lml we already validated PG reachability above (in
+        # _validate_lml_entity_source); a failure here would be unexpected, but
+        # we still surface it as LmlEntitySourceError for consistency.
+        if args.entity_source == "lml":
             log.info("Importing identities from LML entity store (entity.identity)...")
-            from semantic_index.lml_identity import PgSource, import_lml_identities
+            from semantic_index.lml_identity import (
+                LmlEntitySourceError,
+                PgSource,
+                import_lml_identities,
+            )
 
             pg_source = PgSource(args.discogs_cache_dsn)
             try:
@@ -490,10 +560,29 @@ def run(args: argparse.Namespace) -> None:
                     lml_report.unmatched,
                     lml_report.entities_created,
                 )
+                if lml_report.matched == 0:
+                    log.warning(
+                        "LML returned zero matched identities — entity.identity "
+                        "appears empty for the local artist set. Pipeline will "
+                        "continue with no LML reconciliation applied."
+                    )
+            except LmlEntitySourceError:
+                raise
+            except Exception as exc:
+                raise LmlEntitySourceError(
+                    "LML identity import failed after initial connectivity probe "
+                    "succeeded. Underlying error: "
+                    f"{type(exc).__name__}: {exc}. "
+                    "Re-run with --entity-source=local to skip LML."
+                ) from exc
             finally:
                 pg_source.close()
         else:
-            log.warning("No --discogs-cache-dsn provided; skipping LML identity import")
+            log.info(
+                "Skipping LML identity import (--entity-source=%s); "
+                "using local reconciliation only.",
+                args.entity_source,
+            )
 
         # 5e2. Assign Wikidata QIDs from wikidata-cache via Discogs ID bridge
         if args.wikidata_cache_dsn:

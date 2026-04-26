@@ -245,13 +245,11 @@ class TestLmlEntitySourcePipeline:
 class TestLmlEntitySourceCLI:
     """Verify --entity-source CLI flag parsing."""
 
-    def test_entity_source_lml_requires_discogs_dsn(self):
-        """--entity-source=lml without --discogs-cache-dsn should parse but not have a DSN."""
+    def test_entity_source_lml_parses_without_dsn(self):
+        """--entity-source=lml parses; DSN absence is enforced at pipeline run time."""
         from run_pipeline import parse_args
 
-        args = parse_args(
-            ["dump.sql", "--entity-source", "lml", "--entity-store-path", "/tmp/test.db"]
-        )
+        args = parse_args(["dump.sql", "--entity-source", "lml"])
         assert args.entity_source == "lml"
         assert args.discogs_cache_dsn is None
 

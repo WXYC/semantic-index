@@ -271,13 +271,14 @@ Use `--no-sqlite` to skip the SQLite export.
 
 ### Pipeline DB mode
 
-Pass `--db-path` to enable the pipeline database: artists are managed with persistent identity resolution from LML rather than created fresh on each run. The pipeline database becomes the SQLite output.
+Pass `--db-path` to enable the pipeline database: artists are managed with persistent identity resolution rather than created fresh on each run. The pipeline database becomes the SQLite output.
 
 ```bash
-python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --discogs-cache-dsn postgresql://...
+python run_pipeline.py dump.sql --db-path output/wxyc_artist_graph.db --entity-source lml --discogs-cache-dsn postgresql://...
 ```
 
-- `--db-path PATH` — Path to pipeline SQLite database. Creates it if needed. Identity resolution is read from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`).
+- `--db-path PATH` — Path to pipeline SQLite database. Creates it if needed.
+- `--entity-source {local,lml}` — Where to source artist identity from. `local` (default) uses only the local SQLite pipeline DB and skips LML. `lml` reads identities from LML's `entity.identity` PG table (requires `--discogs-cache-dsn`). The `lml` mode **fails loudly** (raises `LmlEntitySourceError`) if LML PG is unreachable — silent fallback would mask config errors. To skip LML when PG is down, re-run with `--entity-source=local`.
 - `--compilation-track-artist-dump PATH` — Path to a SQL dump containing the `COMPILATION_TRACK_ARTIST` table. When provided, VA/compilation entries are resolved to per-track artists (Tier 0) before the FK chain.
 - `--compute-discogs-edges` — Compute Discogs-derived edges (shared personnel, styles, labels, compilations). Off by default.
 - `--compute-wikidata-influences` — Query Wikidata P737 (influenced by) and create directed influence edges. Requires `--db-path` with reconciled Wikidata QIDs.
