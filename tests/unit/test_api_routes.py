@@ -776,6 +776,85 @@ class TestArtistDetail:
         assert data["spotify_artist_id"] is None
         assert data["apple_music_artist_id"] is None
         assert data["bandcamp_id"] is None
+        # Old-schema fallback skips _build_reconciled_identity entirely; the
+        # field defaults to None on the response model.
+        assert "reconciled_identity" in data
+        assert data["reconciled_identity"] is None
+
+    @pytest.mark.asyncio
+    async def test_artist_detail_reconciled_identity_partial(self, entity_db_path: str) -> None:
+        """An artist with some IDs set and others null produces a populated
+        reconciled_identity; missing IDs are exposed as null on the nested form
+        (not omitted), so consumers can rely on key presence."""
+        # Set up a one-off artist with only discogs_artist_id resolved.
+        conn = sqlite3.connect(entity_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(
+                "INSERT INTO entity (name, entity_type, created_at, updated_at) "
+                "VALUES ('Partial', 'artist', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            )
+            entity_id = cur.lastrowid
+            cur = conn.execute(
+                "INSERT INTO artist (canonical_name, total_plays, dj_count, "
+                "  request_ratio, show_count, entity_id, discogs_artist_id) "
+                "VALUES ('Partial Artist', 1, 1, 0.0, 1, ?, 9999)",
+                (entity_id,),
+            )
+            artist_id = cur.lastrowid
+            conn.commit()
+        finally:
+            conn.close()
+
+        app = create_app(entity_db_path)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{artist_id}")
+
+        assert resp.status_code == 200
+        ri = resp.json()["reconciled_identity"]
+        assert ri is not None
+        assert ri["discogs_artist_id"] == 9999
+        # All other ID fields are present on the wire and explicitly null
+        for key in (
+            "musicbrainz_artist_id",
+            "wikidata_qid",
+            "spotify_artist_id",
+            "apple_music_artist_id",
+            "bandcamp_id",
+        ):
+            assert key in ri
+            assert ri[key] is None
+
+    def test_reconciled_identity_helper_field_set_matches_schema(self) -> None:
+        """Drift guard: every field on the shared ReconciledIdentity schema must
+        be read by `_build_reconciled_identity`. If api.yaml gains a new field
+        and the codegen regenerates ReconciledIdentity, this test fails until
+        the helper is updated — preventing silent omission of a new external ID.
+        """
+        from generated.api_models import ReconciledIdentity
+        from semantic_index.api.routes import _build_reconciled_identity
+
+        all_fields = set(ReconciledIdentity.model_fields.keys())
+
+        # Capture every key the helper looks up on the row.
+        accessed: set[str] = set()
+
+        class RecordingRow:
+            def __getitem__(self, key: str) -> None:
+                accessed.add(key)
+                return None
+
+        # Returns None because all values are None — that's fine; we only care
+        # which keys the helper read.
+        _build_reconciled_identity(RecordingRow())  # type: ignore[arg-type]
+
+        missing = all_fields - accessed
+        assert not missing, (
+            f"Schema field(s) {sorted(missing)} exist on ReconciledIdentity but "
+            f"are never read by _build_reconciled_identity. Update the helper to "
+            f"include row[<field>] for each."
+        )
 
 
 class TestEntityArtists:
