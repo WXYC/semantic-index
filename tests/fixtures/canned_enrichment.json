@@ -1,0 +1,25 @@
+{
+  "_comment": "Canned bulk-enrichment payload for the full-pipeline E2E enrichment test. Shape mirrors DiscogsClient.get_bulk_enrichment(): a dict keyed by lowercase artist name where each value has keys 'styles' (list[str]), 'extra_artists' (list[[name, role]]), 'labels' (list[[label_id, label_name]]), and 'track_artists' (list[[release_id, artist_name]]). The E2E test does not hardcode artist names; it pulls the first two canonical artists from the requested batch and overlays this payload onto them so the test stays robust as the fixture evolves. Regenerate via scripts/generate_canned_enrichment.py if the upstream schema changes.",
+  "artist_a": {
+    "styles": ["IDM", "Electronic", "Experimental"],
+    "extra_artists": [
+      ["Sean Booth", "Producer"],
+      ["Rob Brown", "Producer"]
+    ],
+    "labels": [
+      [100, "Warp"]
+    ],
+    "track_artists": []
+  },
+  "artist_b": {
+    "styles": ["IDM", "Ambient", "Electronic"],
+    "extra_artists": [
+      ["Sean Booth", "Mixed By"],
+      ["Tim Gane", "Written-By"]
+    ],
+    "labels": [
+      [100, "Warp"]
+    ],
+    "track_artists": []
+  }
+}
