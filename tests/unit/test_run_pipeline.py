@@ -1,11 +1,13 @@
 """Tests for run_pipeline CLI argument parsing and facet-only integration."""
 
+import argparse
+import logging
 import pickle
 import sqlite3
 
 import pytest
 
-from run_pipeline import main, parse_args
+from run_pipeline import _resolve_entity_source, main, parse_args
 from semantic_index.models import FlowsheetEntry, ResolvedEntry
 
 
@@ -79,20 +81,95 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             parse_args(["dump.sql", "--fetch-streaming-ids"])
 
-    def test_entity_source_default_is_local(self):
-        """Default entity source is 'local' (skips LML)."""
+    def test_entity_source_default_is_none(self):
+        """Default entity source is None at parse time.
+
+        The actual default ('local') is applied later in `_resolve_entity_source`,
+        which also refuses the historically-ambiguous flag combo
+        (--db-path + --discogs-cache-dsn without an explicit choice). Keeping
+        the parsed value as None lets the resolver tell "operator did not pick"
+        apart from "operator picked local".
+        """
         args = parse_args(["dump.sql"])
-        assert args.entity_source == "local"
+        assert args.entity_source is None
 
     def test_entity_source_lml_accepted(self):
         """--entity-source=lml is accepted as a valid choice."""
         args = parse_args(["dump.sql", "--entity-source", "lml"])
         assert args.entity_source == "lml"
 
+    def test_entity_source_local_accepted(self):
+        """--entity-source=local is accepted as a valid choice."""
+        args = parse_args(["dump.sql", "--entity-source", "local"])
+        assert args.entity_source == "local"
+
     def test_entity_source_invalid_rejected(self):
         """Invalid --entity-source values are rejected by argparse."""
         with pytest.raises(SystemExit):
             parse_args(["dump.sql", "--entity-source", "remote"])
+
+
+def _resolver_args(**overrides) -> argparse.Namespace:
+    """Build a minimal Namespace for `_resolve_entity_source` tests."""
+    base = {
+        "entity_source": None,
+        "db_path": None,
+        "discogs_cache_dsn": None,
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+class TestResolveEntitySource:
+    """Verify the post-parse `_resolve_entity_source` safeguard.
+
+    Background: PR #184 made LML import opt-in via `--entity-source=lml`.
+    Pre-#184 the same flag combo (--db-path + --discogs-cache-dsn) silently
+    triggered LML import. Post-#184, it would silently *skip* LML — a
+    real quality regression. The resolver refuses that ambiguous combo and
+    asks the operator to choose.
+    """
+
+    def test_explicit_lml_passes_through(self):
+        args = _resolver_args(entity_source="lml", discogs_cache_dsn="postgresql://x")
+        _resolve_entity_source(args)
+        assert args.entity_source == "lml"
+
+    def test_explicit_local_passes_through(self):
+        args = _resolver_args(entity_source="local", db_path="/tmp/x.db")
+        _resolve_entity_source(args)
+        assert args.entity_source == "local"
+
+    def test_no_dsn_defaults_to_local(self):
+        """No DSN means LML was never possible — quietly default to local."""
+        args = _resolver_args(db_path="/tmp/x.db")
+        _resolve_entity_source(args)
+        assert args.entity_source == "local"
+
+    def test_no_db_path_defaults_to_local(self):
+        """Without --db-path, LML import never runs — quietly default to local."""
+        args = _resolver_args(discogs_cache_dsn="postgresql://x")
+        _resolve_entity_source(args)
+        assert args.entity_source == "local"
+
+    def test_neither_db_nor_dsn_defaults_to_local(self):
+        args = _resolver_args()
+        _resolve_entity_source(args)
+        assert args.entity_source == "local"
+
+    def test_db_plus_dsn_without_choice_refuses(self, caplog):
+        """The historically-ambiguous combo must refuse to start."""
+        args = _resolver_args(db_path="/tmp/x.db", discogs_cache_dsn="postgresql://x")
+        with caplog.at_level(logging.ERROR, logger="run_pipeline"):
+            with pytest.raises(SystemExit) as excinfo:
+                _resolve_entity_source(args)
+        assert excinfo.value.code == 2
+        # The error log must name both flags so the operator can self-recover.
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "--entity-source=lml" in joined
+        assert "--entity-source=local" in joined
+        assert "--db-path" in joined
+        assert "--discogs-cache-dsn" in joined
 
 
 def _make_resolved_entry(

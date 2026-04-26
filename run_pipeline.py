@@ -139,13 +139,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--entity-source",
         choices=["local", "lml"],
-        default="local",
+        default=None,
         help="Where to source entity (artist) identity from. "
-        "'local' (default): use only the local SQLite pipeline DB; skip LML. "
+        "'local': use only the local SQLite pipeline DB; skip LML. "
         "'lml': read identities from LML's entity.identity PG table (requires "
         "--discogs-cache-dsn). lml requires LML PG to be reachable; the pipeline "
         "fails fast (raises LmlEntitySourceError) if it isn't. To skip LML when "
-        "PG is unavailable, pass --entity-source=local.",
+        "PG is unavailable, pass --entity-source=local. "
+        "When omitted, defaults to 'local' unless both --db-path and "
+        "--discogs-cache-dsn are set — in that ambiguous case (which used to "
+        "implicitly trigger LML import before PR #184) the pipeline refuses to "
+        "start and asks the operator to choose explicitly.",
     )
     parser.add_argument(
         "--compute-discogs-edges",
@@ -290,6 +294,44 @@ def _run_facet_only(
     log.info("Facet tables written to %s in %.1f seconds.", sqlite_path, elapsed)
 
 
+def _resolve_entity_source(args: argparse.Namespace) -> None:
+    """Resolve ``args.entity_source`` when omitted, refusing dangerous defaults.
+
+    Pre-#184 behavior: setting ``--discogs-cache-dsn`` together with
+    ``--db-path`` implicitly triggered an LML identity import. PR #184 made
+    LML import opt-in via ``--entity-source=lml``, so the same flag combo now
+    silently produces a graph DB without LML-resolved identities — a real
+    quality regression that would only surface days later.
+
+    To prevent that silent regression, we refuse to start when an operator
+    passes the historically LML-implying flag combo (``--db-path`` plus
+    ``--discogs-cache-dsn``) without an explicit ``--entity-source`` choice.
+    The operator must pick ``--entity-source=lml`` (the old implicit
+    behavior, now explicit) or ``--entity-source=local`` (skip LML).
+
+    All other combinations get a quiet ``local`` default — no DSN, or no
+    pipeline DB, means LML import was never possible anyway.
+    """
+    if args.entity_source is not None:
+        return
+
+    if args.db_path and args.discogs_cache_dsn:
+        log.error(
+            "Refusing to start: --db-path and --discogs-cache-dsn are both set "
+            "but --entity-source was not specified. Before PR #184 this "
+            "combination silently triggered an LML identity import; now it "
+            "would silently skip LML, producing a graph DB without "
+            "LML-resolved entities. Re-run with one of:\n"
+            "  --entity-source=lml    (preserve the pre-#184 behavior; "
+            "requires LML PG to be reachable)\n"
+            "  --entity-source=local  (skip LML entirely; use only local "
+            "reconciliation)"
+        )
+        sys.exit(2)
+
+    args.entity_source = "local"
+
+
 def _validate_lml_entity_source(args: argparse.Namespace) -> None:
     """Validate LML PG connectivity early when --entity-source=lml is selected.
 
@@ -343,6 +385,10 @@ def run(args: argparse.Namespace) -> None:
     if not Path(dump_path).exists():
         log.error("Dump file not found: %s", dump_path)
         sys.exit(1)
+
+    # Resolve --entity-source defaults, refusing the historically-ambiguous
+    # combo (--db-path + --discogs-cache-dsn without an explicit choice).
+    _resolve_entity_source(args)
 
     # Fail fast on LML connectivity before any expensive work.
     if args.entity_source == "lml":

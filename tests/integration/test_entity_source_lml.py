@@ -253,12 +253,17 @@ class TestLmlEntitySourceCLI:
         assert args.entity_source == "lml"
         assert args.discogs_cache_dsn is None
 
-    def test_entity_source_default_is_local(self):
-        """Default entity source is 'local'."""
+    def test_entity_source_default_is_none(self):
+        """Default entity source is None at parse time.
+
+        ``_resolve_entity_source`` later promotes a missing value to ``local``
+        in the safe case, or refuses to start when the operator passed the
+        historically-ambiguous combo (--db-path + --discogs-cache-dsn).
+        """
         from run_pipeline import parse_args
 
         args = parse_args(["dump.sql"])
-        assert args.entity_source == "local"
+        assert args.entity_source is None
 
     def test_entity_source_invalid_rejected(self):
         """Invalid entity source values are rejected by argparse."""
