@@ -353,6 +353,18 @@ def _validate_lml_entity_source(args: argparse.Namespace) -> None:
             "--entity-source=local to skip LML entirely."
         )
 
+    if not args.db_path:
+        # The LML import writes into the pipeline SQLite DB (see step 5d below).
+        # Without --db-path the import block is skipped entirely, so an operator
+        # who asked for --entity-source=lml would get zero LML-resolved
+        # identities and never know. Refuse loudly instead.
+        raise LmlEntitySourceError(
+            "--entity-source=lml requires --db-path so LML identities have a "
+            "pipeline database to be imported into. Without --db-path the LML "
+            "import step is skipped entirely. Either provide --db-path, or pass "
+            "--entity-source=local to skip LML."
+        )
+
     log.info("Validating LML PG reachability (--entity-source=lml)...")
     pg_source = PgSource(args.discogs_cache_dsn)
     try:

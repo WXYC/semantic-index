@@ -53,6 +53,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "dump_path": "dump.sql",
         "entity_source": "lml",
         "discogs_cache_dsn": "postgresql://example/discogs",
+        "db_path": "/tmp/pipeline.db",
         "verbose": False,
     }
     base.update(overrides)
@@ -147,6 +148,27 @@ class TestValidateLmlEntitySource:
 
         msg = str(excinfo.value)
         assert "--discogs-cache-dsn" in msg
+        assert "--entity-source=local" in msg
+
+    def test_missing_db_path_raises_with_actionable_message(self, monkeypatch):
+        """--entity-source=lml without --db-path should fail fast.
+
+        The LML import block in `run()` is gated on `args.db_path` (it writes
+        the imported identities into the pipeline SQLite DB). Without
+        --db-path the import is silently skipped, so an operator who asked for
+        LML identities would get none. The early validator must refuse this
+        combination instead.
+        """
+        from run_pipeline import _validate_lml_entity_source
+
+        # No PgSource patch needed: we never get that far.
+        args = _make_args(db_path=None)
+
+        with pytest.raises(LmlEntitySourceError) as excinfo:
+            _validate_lml_entity_source(args)
+
+        msg = str(excinfo.value)
+        assert "--db-path" in msg
         assert "--entity-source=local" in msg
 
     def test_pg_source_is_closed_even_on_failure(self, monkeypatch):
