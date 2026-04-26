@@ -202,27 +202,16 @@ class TestFullPipeline:
     # -- Cross-references --
 
     def test_cross_reference_edges_extracted(self) -> None:
-        """Cross-reference edges populated when the fixture exposes the path.
+        """Cross-reference edges are extracted from the fixture.
 
-        The tubafrenzy dev fixture has 119 LIBRARY_CODE_CROSS_REFERENCE rows
-        and 35 RELEASE_CROSS_REFERENCE rows, but every CROSS_REFERENCING_ARTIST_ID
-        in those rows points at a LIBRARY_CODE.ID outside the truncated 1000-row
-        LIBRARY_CODE table that ships in the fixture. cross_reference.py logs a
-        warning and skips each unresolvable row, so extraction returns zero edges
-        and the cross_reference table comes out empty. Skip in that case so the
-        assertion fires automatically the moment the fixture's LIBRARY_CODE table
-        is widened to cover those IDs; until then, cross_reference extraction is
-        exercised directly by the unit tests.
+        The tubafrenzy dev fixture appends a small set of synthetic
+        LIBRARY_CODE_CROSS_REFERENCE and RELEASE_CROSS_REFERENCE rows that
+        reference LIBRARY_CODE / LIBRARY_RELEASE IDs already present in the
+        truncated fixture. The historical cross-ref rows reference much older
+        IDs that fall outside the top-1000-by-ID truncation window and are
+        silently skipped at extraction time. See WXYC/semantic-index#185.
         """
         count = self.conn.execute("SELECT count(*) FROM cross_reference").fetchone()[0]
-        if count == 0:
-            pytest.skip(
-                "cross_reference table is empty: every cross-ref row in "
-                "wxycmusic-fixture.sql references a LIBRARY_CODE.ID outside "
-                "the fixture's truncated LIBRARY_CODE table, so all rows are "
-                "skipped during extraction. Widen the fixture's LIBRARY_CODE "
-                "rows to cover the referenced IDs to exercise this path."
-            )
         assert count > 0, "cross_reference table is empty"
 
     # -- Facet tables --
