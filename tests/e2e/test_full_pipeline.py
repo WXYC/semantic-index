@@ -204,15 +204,36 @@ class TestFullPipeline:
     def test_cross_reference_edges_extracted(self) -> None:
         """Cross-reference edges are extracted from the fixture.
 
-        The tubafrenzy dev fixture appends a small set of synthetic
-        LIBRARY_CODE_CROSS_REFERENCE and RELEASE_CROSS_REFERENCE rows that
-        reference LIBRARY_CODE / LIBRARY_RELEASE IDs already present in the
-        truncated fixture. The historical cross-ref rows reference much older
-        IDs that fall outside the top-1000-by-ID truncation window and are
-        silently skipped at extraction time. See WXYC/semantic-index#185.
+        Both extraction paths (LIBRARY_CODE_CROSS_REFERENCE and
+        RELEASE_CROSS_REFERENCE) must produce at least one edge. The fixture's
+        historical cross-ref rows reference LIBRARY_CODE / LIBRARY_RELEASE IDs
+        that fall outside the top-1000-by-ID truncation window and are silently
+        skipped at extraction time; the fixture compensates by either (a)
+        appending synthetic rows whose FKs land inside the truncation window
+        or (b) pulling in the extra referenced rows via the supplemental
+        ``--no-create-info`` mysqldump invocations in
+        ``scripts/dev/generate-fixture-dump.sh``. Either mechanism keeps both
+        ``source`` flavours populated; if you regenerate the fixture and this
+        test starts failing, that's the contract that broke. See
+        WXYC/semantic-index#185 and WXYC/tubafrenzy#486.
+
+        Source of truth for the cross-ref IDs:
+        ``tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql``.
         """
-        count = self.conn.execute("SELECT count(*) FROM cross_reference").fetchone()[0]
-        assert count > 0, "cross_reference table is empty"
+        rows = self.conn.execute(
+            "SELECT source, count(*) FROM cross_reference GROUP BY source"
+        ).fetchall()
+        by_source = {row["source"]: row[1] for row in rows}
+        total = sum(by_source.values())
+        assert total > 0, "cross_reference table is empty"
+        assert by_source.get("library_code", 0) > 0, (
+            "no library_code cross-ref edges -- LIBRARY_CODE_CROSS_REFERENCE "
+            "extraction path is not exercised by the fixture"
+        )
+        assert by_source.get("release", 0) > 0, (
+            "no release cross-ref edges -- RELEASE_CROSS_REFERENCE extraction "
+            "path is not exercised by the fixture"
+        )
 
     # -- Facet tables --
 
