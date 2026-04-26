@@ -1,4 +1,13 @@
-"""Tests for SQL-based Discogs edge computation via DiscogsClient."""
+"""Integration tests for SQL-based Discogs edge computation via DiscogsClient.
+
+These tests query the materialized summary tables in a populated discogs-cache
+PostgreSQL (port 5433 by default). They are skipped when the DB is unreachable
+or when the expected tables/data are absent. The DSN comes from the
+``DATABASE_URL_DISCOGS`` env var, falling back to ``postgresql://jake@localhost/discogs``
+for the original developer's local layout.
+"""
+
+import os
 
 import psycopg
 import pytest
@@ -14,8 +23,12 @@ from semantic_index.models import (
 
 @pytest.fixture
 def discogs_dsn():
-    """DSN for the local discogs-cache PostgreSQL."""
-    return "postgresql://jake@localhost/discogs"
+    """DSN for the discogs-cache PostgreSQL.
+
+    Honours ``DATABASE_URL_DISCOGS`` for CI / non-default layouts. Falls back to
+    the historical local-developer DSN.
+    """
+    return os.environ.get("DATABASE_URL_DISCOGS", "postgresql://jake@localhost/discogs")
 
 
 @pytest.fixture

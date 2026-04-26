@@ -56,3 +56,82 @@ jobs:
       - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - run: pytest tests/unit/ -v --cov=semantic_index --cov-report=term-missing
+
+  integration:
+    # Runs the integration-marked tests that don't need external service data.
+    # The discogs-edges SQL tests require a populated discogs-cache PG (out of
+    # reach in CI — the cache is built from a multi-GB Discogs XML dump), so
+    # they self-skip when `DATABASE_URL_DISCOGS` is unreachable.
+    #
+    # Three integration files (test_entity_migration, test_entity_source_lml,
+    # test_entity_store_pipeline) import the deleted ``semantic_index.entity_store``
+    # module and will fail at import. They are owned by issue #184 and explicitly
+    # ignored here so this guardrail can land green; #184 will resurrect or
+    # delete them as part of the entity-source rework.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: WXYC/wxyc-etl
+          path: _wxyc-etl
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: WXYC/tubafrenzy
+          path: tubafrenzy
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install maturin
+      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
+      - run: pip install _wxyc-etl/target/wheels/*.whl
+      - run: pip install -e ".[api,dev]"
+      - name: Run integration tests
+        env:
+          TUBAFRENZY_FIXTURE: ${{ github.workspace }}/tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql
+        run: >-
+          pytest tests/integration/ -v
+          -m "integration"
+          --ignore=tests/integration/test_entity_migration.py
+          --ignore=tests/integration/test_entity_source_lml.py
+          --ignore=tests/integration/test_entity_store_pipeline.py
+
+  e2e:
+    # Runs the end-to-end pipeline tests against the tubafrenzy fixture dump.
+    # Cloning tubafrenzy is cheap (the fixture is committed); no external DB
+    # is needed because the pipeline parses the SQL dump directly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: WXYC/wxyc-etl
+          path: _wxyc-etl
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: WXYC/tubafrenzy
+          path: tubafrenzy
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install maturin
+      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
+      - run: pip install _wxyc-etl/target/wheels/*.whl
+      - run: pip install -e ".[api,dev]"
+      - name: Run e2e tests
+        env:
+          TUBAFRENZY_FIXTURE: ${{ github.workspace }}/tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql
+        run: pytest tests/e2e/ -v -m "e2e"
+
+  marker-sync:
+    uses: WXYC/wxyc-etl/.github/workflows/check-ci-marker-sync.yml@main
+    with:
+      repo-path: "."
+      workflows-dir: ".github/workflows"
+      tests-dir: "tests"
