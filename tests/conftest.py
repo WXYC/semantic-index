@@ -3,6 +3,8 @@
 Uses WXYC example artists from the canonical data in wxyc-shared.
 """
 
+import pytest
+
 from semantic_index.models import (
     AdjacencyPair,
     ArtistEnrichment,
@@ -23,6 +25,18 @@ from semantic_index.models import (
     WikidataInfluence,
     WikidataLabelHierarchy,
 )
+
+
+@pytest.fixture(scope="class")
+def monkeypatch_class():
+    """Class-scoped monkeypatch (pytest's built-in is function-scoped).
+
+    Use this in autouse class-scoped fixtures that need to patch attributes for
+    the lifetime of all tests in a TestCase class — for example, when running an
+    expensive pipeline once per class with mocked external dependencies.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        yield mp
 
 
 def make_flowsheet_entry(
