@@ -28,6 +28,7 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir ".[api]"
 
 COPY semantic_index/ semantic_index/
+COPY generated/ generated/
 COPY scripts/ scripts/
 COPY explorer/ explorer/
 COPY data/ data/
