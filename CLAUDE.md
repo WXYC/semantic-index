@@ -254,7 +254,7 @@ Summary tables (`artist_style_summary`, `artist_personnel_summary`, `artist_labe
 
 ### Testing
 
-Markers follow architecture A from `plans/test-patterns.md` Section 3 — they route CI by infrastructure, not by tier. The directory layout (`tests/unit/`, `tests/integration/`, `tests/e2e/`) documents tier; markers describe operational requirements.
+Markers follow architecture A from [the wiki test-patterns doc](https://github.com/WXYC/wiki/blob/main/plans/test-patterns.md), Section 3 — they route CI by infrastructure, not by tier. The directory layout (`tests/unit/`, `tests/integration/`, `tests/e2e/`) documents tier; markers describe operational requirements.
 
 - **Default (no marker)** — pure logic tests plus the in-memory pipeline tests in `tests/integration/test_pipeline.py`, `tests/integration/test_entity_source_fallback.py`, and `tests/e2e/test_full_pipeline.py`. These self-skip when the tubafrenzy fixture (`tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql`) is not on disk.
 - **`pg`** — needs a PostgreSQL service. Currently the discogs-edges SQL tests in `tests/integration/test_discogs_edges_sql.py`, which query the discogs-cache PG via `DATABASE_URL_DISCOGS`. Self-skip when the DSN is unreachable.
