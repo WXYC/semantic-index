@@ -244,6 +244,17 @@ The pipeline uses `wxyc-etl` (a Rust/PyO3 package) for shared text normalization
 
 Summary tables (`artist_style_summary`, `artist_personnel_summary`, `artist_label_summary`, `artist_compilation_summary`) are materialized views created by discogs-cache and are not part of the wxyc-etl schema constants.
 
+### Observability (Sentry + JSON logs)
+
+Both pipeline entrypoints (`run_pipeline.py` and `scripts/nightly_sync.py`) initialize the shared `wxyc_etl.logger` at the top of `main()` so logs come out as one JSON object per line on stderr and unhandled exceptions land in Sentry. Every log line carries the four standard tags:
+
+- `repo` — `"semantic-index"`
+- `tool` — `"semantic-index run_pipeline"` or `"semantic-index nightly_sync"`
+- `step` — supplied per-call via `logger.info("...", extra={"step": "resolve"})`
+- `run_id` — UUIDv4 generated at `init_logger` time, shared across all log lines for a single invocation
+
+Sentry activates automatically when `SENTRY_DSN` is set in the environment; without it, JSON logging still initializes and Sentry stays inactive. TODO: provision `SENTRY_DSN` in the EC2 `.env.semantic-index` and the GitHub Actions deploy workflow (separate child task — see Phase A epic).
+
 ### Code Style
 
 - Python 3.12+
