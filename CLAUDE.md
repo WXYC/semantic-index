@@ -256,10 +256,9 @@ Summary tables (`artist_style_summary`, `artist_personnel_summary`, `artist_labe
 
 Markers follow architecture A from `plans/test-patterns.md` Section 3 — they route CI by infrastructure, not by tier. The directory layout (`tests/unit/`, `tests/integration/`, `tests/e2e/`) documents tier; markers describe operational requirements.
 
-- **Default (no marker)** — pure logic tests plus the in-memory pipeline tests in `tests/integration/test_pipeline.py` and `tests/e2e/test_full_pipeline.py`. The latter two self-skip when the tubafrenzy fixture (`tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql`) is not on disk.
+- **Default (no marker)** — pure logic tests plus the in-memory pipeline tests in `tests/integration/test_pipeline.py`, `tests/integration/test_entity_source_fallback.py`, and `tests/e2e/test_full_pipeline.py`. These self-skip when the tubafrenzy fixture (`tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql`) is not on disk.
 - **`pg`** — needs a PostgreSQL service. Currently the discogs-edges SQL tests in `tests/integration/test_discogs_edges_sql.py`, which query the discogs-cache PG via `DATABASE_URL_DISCOGS`. Self-skip when the DSN is unreachable.
 - **`slow`** — orthogonal cost dimension; takes longer than ~10s. Currently the Rust resolver perf benchmark in `tests/unit/test_artist_resolver_rust.py`. Manual-only via `# ci-sync-skip: slow` in `pyproject.toml`.
-- **`integration`** (transitional) — kept for `tests/integration/test_entity_source_fallback.py` (owned by PR #192) and three `entity_store`-importing files that are `--ignore`d in CI pending the entity-source rework. Will be removed when those files are ported or deleted; see the TODO in `pyproject.toml` and `.github/workflows/ci.yml`.
 
 Use WXYC example artists (Autechre, Stereolab, Father John Misty, etc.) in test fixtures.
 

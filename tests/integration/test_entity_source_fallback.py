@@ -19,8 +19,6 @@ import pytest
 
 from semantic_index.lml_identity import LmlEntitySourceError
 
-pytestmark = pytest.mark.integration
-
 _RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
 
 

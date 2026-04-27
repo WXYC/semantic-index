@@ -89,21 +89,12 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 # ci-sync-skip: slow reason: perf benchmarks (test_artist_resolver_rust); manual-only
 # Architecture A markers (see plans/test-patterns.md Section 3): markers route CI by
-# infrastructure; directories document tier. `integration` is a transitional declaration
-# kept so the four entity_store/entity_source files still using `pytestmark =
-# pytest.mark.integration` (`test_entity_migration`, `test_entity_source_lml`,
-# `test_entity_store_pipeline`, `test_entity_source_fallback`) still parse cleanly.
-# The first three are `--ignore`d in CI (deleted-module imports); the fourth is owned
-# by PR #192's entity-source rework, which is why this PR doesn't touch it. Drop the
-# `integration` marker (and its CI job) once PR #192 has landed and the three ignored
-# files have been ported or deleted by their owning workstream.
-# TODO: remove `integration` marker after PR #192 lands; grep for `entity_store`.
+# infrastructure; directories document tier.
 markers = [
     "pg: needs a PostgreSQL service (DATABASE_URL_TEST or DATABASE_URL_DISCOGS)",
     "slow: takes longer than ~10s (orthogonal to infra)",
-    "integration: transitional marker for entity_store/entity_source files; see TODO above",
 ]
-addopts = "-m 'not pg and not slow and not integration'"
+addopts = "-m 'not pg and not slow'"
 console_output_style = "progress"
 testpaths = ["tests"]
 pythonpath = ["."]
