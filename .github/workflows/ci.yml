@@ -42,7 +42,7 @@ jobs:
     # Default (no-marker) tests: everything in tests/ that isn't gated by an
     # infra marker. Includes tests/unit/ plus the unmarked in-memory tests under
     # tests/integration/ and tests/e2e/ (which self-skip when the tubafrenzy
-    # fixture is absent — see the integration job comment for why).
+    # fixture is absent).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,11 +60,7 @@ jobs:
       - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - name: Run default (no-marker) tests
-        run: >-
-          pytest tests/ -v --cov=semantic_index --cov-report=term-missing
-          --ignore=tests/integration/test_entity_migration.py
-          --ignore=tests/integration/test_entity_source_lml.py
-          --ignore=tests/integration/test_entity_store_pipeline.py
+        run: pytest tests/ -v --cov=semantic_index --cov-report=term-missing
 
   pg:
     # PG-backed tests (architecture A `pg` marker). Currently the only `pg`
@@ -91,55 +87,7 @@ jobs:
       - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - name: Run pg-marked tests
-        # Same `--ignore` flags as the `test` and `integration` jobs: the
-        # three entity_store-importing files would fail at collection even
-        # though they don't bear the `pg` marker. See the `integration`
-        # job's comment for the full rationale.
-        run: >-
-          pytest tests/ -v -m "pg"
-          --ignore=tests/integration/test_entity_migration.py
-          --ignore=tests/integration/test_entity_source_lml.py
-          --ignore=tests/integration/test_entity_store_pipeline.py
-
-  integration:
-    # Transitional `integration` marker job. After the architecture-A migration
-    # (`plans/test-patterns.md` Section 3), only one file still wears
-    # `pytestmark = pytest.mark.integration`: `test_entity_source_fallback.py`,
-    # which is owned by the parallel entity-source rework (PR #192) and so is
-    # off-limits to this migration PR. Three other entity_store/entity_source
-    # files (`test_entity_migration`, `test_entity_source_lml`,
-    # `test_entity_store_pipeline`) also still bear the marker but import the
-    # deleted `semantic_index.entity_store` module (removed in commit e8226d3,
-    # asserted by `tests/unit/test_deletion_audit.py`); the successor is
-    # `semantic_index.pipeline_db`. They would fail at collection and are
-    # explicitly `--ignore`d here so this guardrail can land green; that effort
-    # will port them to PipelineDB or delete them as part of its own PR.
-    # TODO: remove this entire job (and the `integration` marker declaration in
-    # pyproject.toml) once PR #192 has landed and the three ignored files have
-    # been ported or deleted; grep for `entity_store` here.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: WXYC/wxyc-etl
-          path: _wxyc-etl
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
-      - run: pip install _wxyc-etl/target/wheels/*.whl
-      - run: pip install -e ".[api,dev]"
-      - name: Run integration-marked tests (transitional)
-        run: >-
-          pytest tests/integration/ -v
-          -m "integration"
-          --ignore=tests/integration/test_entity_migration.py
-          --ignore=tests/integration/test_entity_source_lml.py
-          --ignore=tests/integration/test_entity_store_pipeline.py
+        run: pytest tests/ -v -m "pg"
 
   marker-sync:
     uses: WXYC/wxyc-etl/.github/workflows/check-ci-marker-sync.yml@main
