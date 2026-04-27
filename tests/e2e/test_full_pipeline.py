@@ -23,8 +23,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 # Walk up from this file to find the WXYC org directory containing sibling repos.
 _FIXTURE_RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
 

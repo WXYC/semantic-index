@@ -10,8 +10,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 # Default: walk up from this file to find the WXYC parent dir containing sibling repos.
 # Override with TUBAFRENZY_FIXTURE env var if the layout differs.
 _RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
