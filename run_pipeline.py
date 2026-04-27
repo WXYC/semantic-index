@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+from wxyc_etl.logger import init_logger
+
 from semantic_index.adjacency import extract_adjacency_pairs
 from semantic_index.artist_resolver import (
     ArtistResolver,
@@ -1251,10 +1253,10 @@ def run(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    logging.basicConfig(
+    init_logger(
+        repo="semantic-index",
+        tool="semantic-index run_pipeline",
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
     )
     run(args)
 

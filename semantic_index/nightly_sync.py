@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+from wxyc_etl.logger import init_logger
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/wxyc_artist_graph.db"
@@ -396,10 +398,10 @@ def main(argv: list[str] | None = None) -> None:
     """Entry point for the nightly sync script."""
     args = parse_args(argv)
 
-    logging.basicConfig(
+    init_logger(
+        repo="semantic-index",
+        tool="semantic-index nightly_sync",
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s [nightly_sync] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
     if not args.dsn:
