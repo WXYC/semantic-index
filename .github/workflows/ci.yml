@@ -91,7 +91,15 @@ jobs:
       - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - name: Run pg-marked tests
-        run: pytest tests/ -v -m "pg"
+        # Same `--ignore` flags as the `test` and `integration` jobs: the
+        # three entity_store-importing files would fail at collection even
+        # though they don't bear the `pg` marker. See the `integration`
+        # job's comment for the full rationale.
+        run: >-
+          pytest tests/ -v -m "pg"
+          --ignore=tests/integration/test_entity_migration.py
+          --ignore=tests/integration/test_entity_source_lml.py
+          --ignore=tests/integration/test_entity_store_pipeline.py
 
   integration:
     # Transitional `integration` marker job. After the architecture-A migration
