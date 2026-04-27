@@ -48,7 +48,7 @@ def _verify_discogs_db(discogs_dsn):
         pytest.skip("discogs-cache PostgreSQL not available")
 
 
-@pytest.mark.integration
+@pytest.mark.pg
 @pytest.mark.usefixtures("_verify_discogs_db")
 class TestComputeSharedStylesSql:
     """Tests for SQL-based shared style edge computation."""
@@ -89,7 +89,7 @@ class TestComputeSharedStylesSql:
         assert edges == []
 
 
-@pytest.mark.integration
+@pytest.mark.pg
 @pytest.mark.usefixtures("_verify_discogs_db")
 class TestComputeSharedPersonnelSql:
     """Tests for SQL-based shared personnel edge computation."""
@@ -115,7 +115,7 @@ class TestComputeSharedPersonnelSql:
         assert edges == []
 
 
-@pytest.mark.integration
+@pytest.mark.pg
 @pytest.mark.usefixtures("_verify_discogs_db")
 class TestComputeLabelFamilySql:
     """Tests for SQL-based label family edge computation."""
@@ -146,7 +146,7 @@ class TestComputeLabelFamilySql:
         assert edges == []
 
 
-@pytest.mark.integration
+@pytest.mark.pg
 @pytest.mark.usefixtures("_verify_discogs_db")
 class TestComputeCompilationSql:
     """Tests for SQL-based compilation co-appearance edge computation."""
