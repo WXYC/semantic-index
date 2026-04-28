@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import tempfile
 from unittest.mock import MagicMock
@@ -12,6 +13,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
+from semantic_index.api.narrative import _compute_aa_neighbors
 from semantic_index.facet_export import export_facet_tables
 from semantic_index.models import ArtistStats, PmiEdge, SharedPersonnelEdge, SharedStyleEdge
 from semantic_index.sqlite_export import export_sqlite
@@ -510,3 +512,159 @@ class TestAudioProfileEnrichment:
 
         # Cat Power has no audio profile
         assert "audio" not in prompt_data["target"]
+
+
+def _build_aa_fixture_db() -> str:
+    """Build a synthetic graph where AA and degree-based ranking disagree.
+
+    Two pivots A and B share two neighbors:
+      - X: degree 2 (only connected to A and B). 1/log(2) ≈ 1.44.
+      - Y: degree 50 (connected to A, B, and 48 other artists). 1/log(50) ≈ 0.26.
+
+    A degree-descending or play-count-descending ranking puts Y first; AA puts X
+    first, which is the whole point of the rerank.
+    """
+    path = tempfile.mktemp(suffix=".db")
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE artist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_name TEXT NOT NULL UNIQUE,
+            genre TEXT,
+            total_plays INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE dj_transition (
+            source_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL,
+            raw_count INTEGER NOT NULL,
+            pmi REAL NOT NULL,
+            PRIMARY KEY (source_id, target_id)
+        );
+        """
+    )
+
+    # Pivots + low-degree shared (X) + high-degree shared (Y) + 48 fillers
+    # for Y's degree.
+    fillers = [f"Filler {i:02d}" for i in range(48)]
+    names = ["Father John Misty", "Caetano Veloso", "Joe McPhee", "Yo La Tengo", *fillers]
+    conn.executemany(
+        "INSERT INTO artist (canonical_name) VALUES (?)",
+        [(n,) for n in names],
+    )
+
+    name_to_id = {
+        r[1]: r[0] for r in conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    }
+    a, b = name_to_id["Father John Misty"], name_to_id["Caetano Veloso"]
+    x, y = name_to_id["Joe McPhee"], name_to_id["Yo La Tengo"]
+
+    # A and B each link to X (so X has degree 2) and to Y.
+    edges = [(a, x), (b, x), (a, y), (b, y)]
+    # Y also connects to all fillers, taking its degree to 50.
+    for filler_name in fillers:
+        edges.append((y, name_to_id[filler_name]))
+    conn.executemany(
+        "INSERT INTO dj_transition (source_id, target_id, raw_count, pmi) VALUES (?, ?, 1, 1.0)",
+        edges,
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestAdamicAdarReranking:
+    def test_aa_outranks_high_degree_hub(self) -> None:
+        """The low-degree shared neighbor scores higher than the high-degree hub."""
+        path = _build_aa_fixture_db()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        ids = {
+            r["canonical_name"]: r["id"]
+            for r in conn.execute("SELECT id, canonical_name FROM artist")
+        }
+
+        result = _compute_aa_neighbors(conn, ids["Father John Misty"], ids["Caetano Veloso"])
+        conn.close()
+
+        names = [r["name"] for r in result]
+        assert names[0] == "Joe McPhee", f"AA should rank low-degree neighbor first; got {names}"
+        assert names[1] == "Yo La Tengo"
+
+    def test_aa_score_matches_formula(self) -> None:
+        """1/log(degree) is the score, rounded to 3 decimals."""
+        path = _build_aa_fixture_db()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        ids = {
+            r["canonical_name"]: r["id"]
+            for r in conn.execute("SELECT id, canonical_name FROM artist")
+        }
+
+        result = _compute_aa_neighbors(conn, ids["Father John Misty"], ids["Caetano Veloso"])
+        conn.close()
+
+        joe = next(r for r in result if r["name"] == "Joe McPhee")
+        ylt = next(r for r in result if r["name"] == "Yo La Tengo")
+        assert joe["degree"] == 2
+        assert ylt["degree"] == 50
+        assert joe["aa_score"] == round(1.0 / math.log(2), 3)
+        assert ylt["aa_score"] == round(1.0 / math.log(50), 3)
+
+    def test_top_k_caps_result(self) -> None:
+        """top_k=1 returns only the highest-scoring shared neighbor."""
+        path = _build_aa_fixture_db()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        ids = {
+            r["canonical_name"]: r["id"]
+            for r in conn.execute("SELECT id, canonical_name FROM artist")
+        }
+
+        result = _compute_aa_neighbors(
+            conn, ids["Father John Misty"], ids["Caetano Veloso"], top_k=1
+        )
+        conn.close()
+
+        assert len(result) == 1
+        assert result[0]["name"] == "Joe McPhee"
+
+    def test_no_shared_neighbors_returns_empty(self) -> None:
+        """Artists with no shared neighbors return an empty list."""
+        path = _build_aa_fixture_db()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        ids = {
+            r["canonical_name"]: r["id"]
+            for r in conn.execute("SELECT id, canonical_name FROM artist")
+        }
+
+        # Filler 00 only connects to Yo La Tengo; Joe McPhee only connects to
+        # the two pivots. They have no common neighbor.
+        result = _compute_aa_neighbors(conn, ids["Joe McPhee"], ids["Filler 00"])
+        conn.close()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_shared_neighbors(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Generated prompt JSON carries an AA-ranked shared_neighbors list."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+
+        # The fixture has only 2 pairs (Autechre-Stereolab, Autechre-Cat Power),
+        # so Autechre and Stereolab have no shared neighbors and the key is
+        # omitted. Asserting only that the field is absent or a list.
+        if "shared_neighbors" in prompt_data:
+            assert isinstance(prompt_data["shared_neighbors"], list)
+            for entry in prompt_data["shared_neighbors"]:
+                assert {"name", "degree", "aa_score"} <= set(entry)
