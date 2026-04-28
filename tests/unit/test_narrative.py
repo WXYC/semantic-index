@@ -13,7 +13,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.narrative import _compute_aa_neighbors
+from semantic_index.api.narrative import _rank_shared_neighbors_by_aa
 from semantic_index.facet_export import export_facet_tables
 from semantic_index.models import ArtistStats, PmiEdge, SharedPersonnelEdge, SharedStyleEdge
 from semantic_index.sqlite_export import export_sqlite
@@ -584,7 +584,7 @@ class TestAdamicAdarReranking:
             for r in conn.execute("SELECT id, canonical_name FROM artist")
         }
 
-        result = _compute_aa_neighbors(conn, ids["Father John Misty"], ids["Caetano Veloso"])
+        result = _rank_shared_neighbors_by_aa(conn, ids["Father John Misty"], ids["Caetano Veloso"])
         conn.close()
 
         names = [r["name"] for r in result]
@@ -601,7 +601,7 @@ class TestAdamicAdarReranking:
             for r in conn.execute("SELECT id, canonical_name FROM artist")
         }
 
-        result = _compute_aa_neighbors(conn, ids["Father John Misty"], ids["Caetano Veloso"])
+        result = _rank_shared_neighbors_by_aa(conn, ids["Father John Misty"], ids["Caetano Veloso"])
         conn.close()
 
         joe = next(r for r in result if r["name"] == "Joe McPhee")
@@ -621,7 +621,7 @@ class TestAdamicAdarReranking:
             for r in conn.execute("SELECT id, canonical_name FROM artist")
         }
 
-        result = _compute_aa_neighbors(
+        result = _rank_shared_neighbors_by_aa(
             conn, ids["Father John Misty"], ids["Caetano Veloso"], top_k=1
         )
         conn.close()
@@ -641,7 +641,7 @@ class TestAdamicAdarReranking:
 
         # Filler 00 only connects to Yo La Tengo; Joe McPhee only connects to
         # the two pivots. They have no common neighbor.
-        result = _compute_aa_neighbors(conn, ids["Joe McPhee"], ids["Filler 00"])
+        result = _rank_shared_neighbors_by_aa(conn, ids["Joe McPhee"], ids["Filler 00"])
         conn.close()
 
         assert result == []
@@ -668,3 +668,46 @@ class TestAdamicAdarReranking:
             assert isinstance(prompt_data["shared_neighbors"], list)
             for entry in prompt_data["shared_neighbors"]:
                 assert {"name", "degree", "aa_score"} <= set(entry)
+
+
+class TestPromptVersionEviction:
+    @pytest.mark.asyncio
+    async def test_bump_invalidates_prior_version_cache(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``_PROMPT_VERSION`` bump misses prior-version cache entries.
+
+        Guards the contract that subsequent prompt edits in #220–#223 can rely
+        on bumping the constant alone to evict stale narratives.
+        """
+        _clear_narrative_cache(narrative_db_path)
+
+        mock_client = _mock_anthropic_client()
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Populate cache at the current prompt version, then confirm the
+            # repeat hits the cache.
+            resp_first = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+            assert resp_first.json()["cached"] is False
+            resp_repeat = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+            assert resp_repeat.json()["cached"] is True
+
+            # Bump the prompt version: the prior row is still on disk but its
+            # PK no longer matches reads, so the request must regenerate.
+            monkeypatch.setattr("semantic_index.api.narrative._PROMPT_VERSION", 99)
+            resp_after_bump = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+            assert resp_after_bump.json()["cached"] is False, (
+                "cache should miss after _PROMPT_VERSION bump"
+            )
+            # And the new version becomes the warm cache.
+            resp_warm = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+            assert resp_warm.json()["cached"] is True
