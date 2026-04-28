@@ -6,14 +6,6 @@ Tests three prompt variants on the same set of pairs:
 3. ANTI-HALLUCINATION + VARIED LANGUAGE — also address verb monotony
 
 Uses Adamic-Adar weighted neighbors and filters out weak pairs.
-
-KNOWN BUG (preserved, fixed in a follow-up PR):
-    get_artist_meta() queries `SELECT style_tag FROM artist_style` but the
-    schema column is `style`. The resulting sqlite3.OperationalError is
-    swallowed by a broad except, so meta["styles"] is always [] in this
-    script's runs. Any plan-doc result derived from a styles-on/off
-    comparison in this experiment should be treated as suspect until
-    rerun. Landing the file as the historical artifact; fix follows.
 """
 
 import json
@@ -160,10 +152,10 @@ def get_artist_meta(db: sqlite3.Connection, artist_id: int, max_styles: int = 5)
 
     try:
         styles = db.execute(
-            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag",
+            "SELECT style FROM artist_style WHERE artist_id = ? ORDER BY style",
             (artist_id,),
         ).fetchall()
-        style_list = [r["style_tag"] for r in styles]
+        style_list = [r["style"] for r in styles]
         if style_list:
             meta["styles"] = style_list[:max_styles]
     except sqlite3.OperationalError:
