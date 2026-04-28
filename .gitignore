@@ -37,3 +37,12 @@ coverage.json
 *.db-shm
 *.db-wal
 .claude/worktrees/
+
+data/*.bak-*
+data/*.bio-cache.db
+data/*.narrative-cache.db
+data/*.tmp.*.db-shm
+data/*.tmp.*.db-wal
+
+wiki/
+slides
