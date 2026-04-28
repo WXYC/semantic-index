@@ -23,18 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: WXYC/wxyc-etl
-          path: _wxyc-etl
-          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
-      - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - run: mypy semantic_index/
 
@@ -46,18 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: WXYC/wxyc-etl
-          path: _wxyc-etl
-          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
-      - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - name: Run default (no-marker) tests
         run: pytest tests/ -v --cov=semantic_index --cov-report=term-missing
@@ -73,18 +55,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: WXYC/wxyc-etl
-          path: _wxyc-etl
-          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: cd _wxyc-etl/wxyc-etl-python && maturin build --release
-      - run: pip install _wxyc-etl/target/wheels/*.whl
       - run: pip install -e ".[api,dev]"
       - name: Run pg-marked tests
         run: pytest tests/ -v -m "pg"
