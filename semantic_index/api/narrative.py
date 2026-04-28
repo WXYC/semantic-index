@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from datetime import UTC, datetime
 
@@ -16,6 +17,12 @@ from semantic_index.api.schemas import NarrativeResponse
 logger = logging.getLogger(__name__)
 
 narrative_router = APIRouter(prefix="/graph", tags=["graph"])
+
+# Bump whenever the prompt's structure or content changes so the sidecar cache
+# evicts stale entries instead of serving them indefinitely.
+_PROMPT_VERSION = 2
+
+_SHARED_NEIGHBORS_TOP_K = 5
 
 MONTH_NAMES = [
     "",
@@ -48,9 +55,10 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
     month INTEGER NOT NULL DEFAULT 0,
     dj_id INTEGER NOT NULL DEFAULT 0,
     edge_type TEXT NOT NULL DEFAULT '',
+    prompt_version INTEGER NOT NULL DEFAULT 1,
     narrative TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (source_id, target_id, month, dj_id, edge_type)
+    PRIMARY KEY (source_id, target_id, month, dj_id, edge_type, prompt_version)
 );
 """
 
@@ -58,20 +66,73 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
     """Open a writable connection to the sidecar narrative cache database.
 
-    Includes a migration that drops the old schema (PK without ``edge_type``)
-    before creating the current one. Safe because this is a regenerable cache.
+    Drops and recreates ``narrative_cache`` whenever its column set has drifted
+    from the current schema. Safe because this is a regenerable cache; the
+    drop is the "evict stale entries" mechanism for prompt-version bumps.
     """
     cache_path = db_path + ".narrative-cache.db"
     conn = sqlite3.connect(cache_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    # Migrate: old schema has PK without edge_type — ALTER TABLE can't change
-    # a PK, so drop and recreate.  This is just a cache; entries regenerate.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(narrative_cache)")}
-    if cols and "edge_type" not in cols:
+    if cols and ("edge_type" not in cols or "prompt_version" not in cols):
         conn.execute("DROP TABLE narrative_cache")
     conn.executescript(_CACHE_SCHEMA)
     return conn
+
+
+def _compute_aa_neighbors(
+    db: sqlite3.Connection,
+    source_id: int,
+    target_id: int,
+    top_k: int = _SHARED_NEIGHBORS_TOP_K,
+) -> list[dict]:
+    """Adamic-Adar ranked shared neighbors of two artists.
+
+    Each shared neighbor's contribution is ``1 / log(degree)``, where ``degree``
+    is the artist's count of distinct ``dj_transition`` partners. Surfaces
+    informative mid-degree neighbors over generic high-degree hubs.
+
+    Returns a list of dicts ``{name, degree, aa_score}`` sorted descending by
+    ``aa_score``, capped at ``top_k``. Skips neighbors with degree < 2 because
+    ``log(1) = 0`` is undefined and a degree-1 hit is not meaningful anyway.
+    """
+    rows = db.execute(
+        """
+        WITH all_edges AS (
+            SELECT source_id AS a, target_id AS b FROM dj_transition
+            UNION ALL
+            SELECT target_id AS a, source_id AS b FROM dj_transition
+        ),
+        degrees AS (
+            SELECT a AS id, COUNT(DISTINCT b) AS degree FROM all_edges GROUP BY a
+        ),
+        neighbors_a AS (SELECT b AS nid FROM all_edges WHERE a = :a),
+        neighbors_b AS (SELECT b AS nid FROM all_edges WHERE a = :b),
+        shared AS (SELECT nid FROM neighbors_a INTERSECT SELECT nid FROM neighbors_b)
+        SELECT artist.canonical_name, degrees.degree
+        FROM shared
+        JOIN artist ON artist.id = shared.nid
+        JOIN degrees ON degrees.id = shared.nid
+        WHERE artist.id NOT IN (:a, :b)
+        """,
+        {"a": source_id, "b": target_id},
+    ).fetchall()
+
+    scored: list[dict] = []
+    for r in rows:
+        deg = r["degree"]
+        if deg < 2:
+            continue
+        scored.append(
+            {
+                "name": r["canonical_name"],
+                "degree": deg,
+                "aa_score": round(1.0 / math.log(deg), 3),
+            }
+        )
+    scored.sort(key=lambda x: x["aa_score"], reverse=True)
+    return scored[:top_k]
 
 
 def _get_anthropic_client(request: Request):
@@ -98,6 +159,7 @@ def _build_prompt(
     source_meta: dict,
     target_meta: dict,
     relationships: list[dict],
+    shared_neighbors: list[dict] | None = None,
     month: int | None = None,
     dj_name: str | None = None,
     faceted_pair_count: int | None = None,
@@ -108,6 +170,8 @@ def _build_prompt(
         "target": target_meta,
         "relationships": relationships,
     }
+    if shared_neighbors:
+        data["shared_neighbors"] = shared_neighbors
     if month is not None or dj_name is not None:
         facet: dict = {}
         if month is not None:
@@ -285,8 +349,9 @@ def get_narrative(
     try:
         cached_row = cache_db.execute(
             "SELECT narrative FROM narrative_cache "
-            "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? AND edge_type = ?",
-            (lo, hi, cache_month, cache_dj, cache_edge_type),
+            "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? "
+            "AND edge_type = ? AND prompt_version = ?",
+            (lo, hi, cache_month, cache_dj, cache_edge_type, _PROMPT_VERSION),
         ).fetchone()
         if cached_row:
             return NarrativeResponse(
@@ -332,10 +397,15 @@ def get_narrative(
     dj_name = _lookup_dj_name(db, dj_id) if dj_id else None
     faceted_count = _compute_faceted_pair_count(db, source_id, target_id, month, dj_id)
 
+    # Adamic-Adar reranked shared neighbors — surfaces specific mid-degree
+    # connections instead of generic high-degree hubs in the prompt.
+    shared_neighbors = _compute_aa_neighbors(db, source_id, target_id)
+
     user_message = _build_prompt(
         source_meta=source_meta,
         target_meta=target_meta,
         relationships=relationships,
+        shared_neighbors=shared_neighbors,
         month=month,
         dj_name=dj_name,
         faceted_pair_count=faceted_count,
@@ -359,14 +429,16 @@ def get_narrative(
     try:
         cache_db.execute(
             "INSERT OR REPLACE INTO narrative_cache "
-            "(source_id, target_id, month, dj_id, edge_type, narrative, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(source_id, target_id, month, dj_id, edge_type, prompt_version, "
+            "narrative, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 lo,
                 hi,
                 cache_month,
                 cache_dj,
                 cache_edge_type,
+                _PROMPT_VERSION,
                 narrative,
                 datetime.now(UTC).isoformat(),
             ),
