@@ -152,10 +152,10 @@ def get_artist_meta(db: sqlite3.Connection, artist_id: int, max_styles: int = 5)
 
     try:
         styles = db.execute(
-            "SELECT style FROM artist_style WHERE artist_id = ? ORDER BY style",
+            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag",
             (artist_id,),
         ).fetchall()
-        style_list = [r["style"] for r in styles]
+        style_list = [r["style_tag"] for r in styles]
         if style_list:
             meta["styles"] = style_list[:max_styles]
     except sqlite3.OperationalError:
