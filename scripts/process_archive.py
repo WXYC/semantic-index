@@ -46,6 +46,7 @@ from semantic_index.archive_essentia import (
     aggregate_artist_profile,
     extract_rhythm_and_key,
 )
+from semantic_index.archive_match import ArchiveNameMatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -436,8 +437,12 @@ def _process_hour_worker(
 def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
     """Aggregate per-artist profiles and write to the audio_profile table.
 
-    Only writes profiles for artists that exist in the ``artist`` table
-    and don't already have a profile (preserves existing AcousticBrainz data).
+    Resolves each archive artist name to one or more production ``artist.id``
+    rows via :class:`ArchiveNameMatcher`, which folds across case,
+    diacritics, HTML entities, nickname quoting, brackets, ``the`` prefixes,
+    ``&`` ↔ ``and``, and multi-artist credits. Compilation/VA names are
+    skipped. Existing profiles are preserved (so AcousticBrainz-derived
+    rows are not overwritten by archive-derived ones).
 
     Args:
         db_path: Path to the pipeline SQLite database.
@@ -446,13 +451,13 @@ def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
     Returns:
         Number of profiles written.
     """
-    by_artist: dict[str, list[SegmentFeatures]] = defaultdict(list)
+    segs_by_archive_name: dict[str, list[SegmentFeatures]] = defaultdict(list)
     for seg in segments:
-        by_artist[seg.artist_name].append(seg)
+        segs_by_archive_name[seg.artist_name].append(seg)
 
     logger.info(
-        "Aggregating profiles for %d artists from %d segments",
-        len(by_artist),
+        "Aggregating profiles for %d archive names from %d segments",
+        len(segs_by_archive_name),
         len(segments),
     )
 
@@ -466,27 +471,42 @@ def write_profiles_to_db(db_path: str, segments: list[SegmentFeatures]) -> int:
             conn.execute(f"ALTER TABLE audio_profile ADD COLUMN {col} {ctype}")
     conn.commit()
 
+    canonical_to_id = {
+        row["canonical_name"]: row["id"]
+        for row in conn.execute("SELECT canonical_name, id FROM artist")
+    }
+    matcher = ArchiveNameMatcher(canonical_to_id=canonical_to_id)
+
+    existing_profile_ids = {
+        row["artist_id"] for row in conn.execute("SELECT artist_id FROM audio_profile")
+    }
+
+    # Group segments by production artist_id (a single archive name can
+    # resolve to multiple ids via multi-artist splits, and multiple archive
+    # names can resolve to the same id via diacritic / quote variants).
+    segs_by_id: dict[int, list[SegmentFeatures]] = defaultdict(list)
+    id_to_display_name: dict[int, str] = {}
+    for archive_name, archive_segs in segs_by_archive_name.items():
+        for artist_id in matcher.resolve(archive_name):
+            segs_by_id[artist_id].extend(archive_segs)
+            id_to_display_name.setdefault(artist_id, archive_name)
+
+    logger.info(
+        "Match stats: exact=%d normalized=%d split=%d compilation_skip=%d unmatched=%d",
+        matcher.stats["exact"],
+        matcher.stats["normalized"],
+        matcher.stats["split"],
+        matcher.stats["compilation_skip"],
+        matcher.stats["unmatched"],
+    )
+
     written = 0
-
     try:
-        for artist_name, artist_segments in sorted(by_artist.items()):
-            row = conn.execute(
-                "SELECT id FROM artist WHERE canonical_name = ?",
-                (artist_name,),
-            ).fetchone()
-            if row is None:
-                continue
-            artist_id = row["id"]
-
-            # Don't overwrite existing profiles (AcousticBrainz data)
-            existing = conn.execute(
-                "SELECT recording_count FROM audio_profile WHERE artist_id = ?",
-                (artist_id,),
-            ).fetchone()
-            if existing is not None:
+        for artist_id, artist_segments in sorted(segs_by_id.items()):
+            if artist_id in existing_profile_ids:
                 continue
 
-            profile = aggregate_artist_profile(artist_name, artist_segments)
+            profile = aggregate_artist_profile(id_to_display_name[artist_id], artist_segments)
             now = datetime.now(UTC).isoformat()
 
             conn.execute(
