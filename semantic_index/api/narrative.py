@@ -66,9 +66,12 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
 def _get_cache_db(db_path: str) -> sqlite3.Connection:
     """Open a writable connection to the sidecar narrative cache database.
 
-    Drops and recreates ``narrative_cache`` whenever its column set has drifted
-    from the current schema. Safe because this is a regenerable cache; the
-    drop is the "evict stale entries" mechanism for prompt-version bumps.
+    Cache eviction is by exclusion: ``prompt_version`` is part of the row's
+    primary key and reads filter on the current ``_PROMPT_VERSION``, so rows
+    written under prior versions stay on disk but are never returned. The
+    initial schema-mismatch drop here only fires for caches built before
+    ``prompt_version`` (or ``edge_type``) was added — once the column exists,
+    subsequent version bumps don't change the schema.
     """
     cache_path = db_path + ".narrative-cache.db"
     conn = sqlite3.connect(cache_path, check_same_thread=False)
@@ -81,21 +84,24 @@ def _get_cache_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def _compute_aa_neighbors(
+def _rank_shared_neighbors_by_aa(
     db: sqlite3.Connection,
     source_id: int,
     target_id: int,
     top_k: int = _SHARED_NEIGHBORS_TOP_K,
 ) -> list[dict]:
-    """Adamic-Adar ranked shared neighbors of two artists.
+    """Rank the shared ``dj_transition`` neighbors of two artists by AA contribution.
 
-    Each shared neighbor's contribution is ``1 / log(degree)``, where ``degree``
-    is the artist's count of distinct ``dj_transition`` partners. Surfaces
-    informative mid-degree neighbors over generic high-degree hubs.
+    Each returned neighbor's score is its Adamic-Adar *contribution* —
+    ``1 / log(degree)``, where ``degree`` is its number of distinct
+    ``dj_transition`` partners. Note this is the per-neighbor term, not the
+    full Adamic-Adar similarity of the source/target *pair* (which would be
+    the sum of these terms over all shared neighbors). Sorting neighbors by
+    their AA contribution surfaces informative mid-degree connections over
+    generic high-degree hubs, which is what the prompt wants.
 
-    Returns a list of dicts ``{name, degree, aa_score}`` sorted descending by
-    ``aa_score``, capped at ``top_k``. Skips neighbors with degree < 2 because
-    ``log(1) = 0`` is undefined and a degree-1 hit is not meaningful anyway.
+    Returns a list of ``{name, degree, aa_score}`` dicts sorted descending by
+    ``aa_score``, capped at ``top_k``.
     """
     rows = db.execute(
         """
@@ -122,6 +128,9 @@ def _compute_aa_neighbors(
     scored: list[dict] = []
     for r in rows:
         deg = r["degree"]
+        # Unreachable: a shared neighbor connects to both source and target,
+        # so degree >= 2. Kept as a guard against log(1) = 0 in case the SQL
+        # is ever broadened to include non-shared neighbors.
         if deg < 2:
             continue
         scored.append(
@@ -397,9 +406,9 @@ def get_narrative(
     dj_name = _lookup_dj_name(db, dj_id) if dj_id else None
     faceted_count = _compute_faceted_pair_count(db, source_id, target_id, month, dj_id)
 
-    # Adamic-Adar reranked shared neighbors — surfaces specific mid-degree
-    # connections instead of generic high-degree hubs in the prompt.
-    shared_neighbors = _compute_aa_neighbors(db, source_id, target_id)
+    # AA-ranked shared neighbors — surfaces specific mid-degree connections
+    # instead of generic high-degree hubs in the prompt.
+    shared_neighbors = _rank_shared_neighbors_by_aa(db, source_id, target_id)
 
     user_message = _build_prompt(
         source_meta=source_meta,
