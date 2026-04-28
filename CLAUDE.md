@@ -164,8 +164,8 @@ CREATE TABLE entity (
 
 CREATE TABLE artist_style (
     artist_id INTEGER NOT NULL REFERENCES artist(id),
-    style TEXT NOT NULL,
-    PRIMARY KEY (artist_id, style)
+    style_tag TEXT NOT NULL,
+    PRIMARY KEY (artist_id, style_tag)
 );
 
 CREATE TABLE reconciliation_log (
