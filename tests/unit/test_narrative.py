@@ -451,10 +451,15 @@ class TestAudioProfileEnrichment:
     async def test_prompt_includes_audio_profile(
         self, narrative_db_path: str, narrative_artist_ids: dict[str, int]
     ) -> None:
-        """When an audio profile exists, the prompt includes audio features."""
+        """When an audio profile exists, the prompt carries qualitative descriptors only.
+
+        Verifies no raw decimals reach the prompt and that extreme values get
+        their human-readable labels.
+        """
         _clear_narrative_cache(narrative_db_path)
 
-        # Insert an audio profile for Autechre
+        # Insert an audio profile for Autechre with extreme values across the
+        # board so every descriptor has something to render.
         ae_id = narrative_artist_ids["Autechre"]
         conn = sqlite3.connect(narrative_db_path)
         conn.execute(
@@ -465,7 +470,6 @@ class TestAudioProfileEnrichment:
             "recording_count INTEGER NOT NULL DEFAULT 0, "
             "created_at TEXT NOT NULL DEFAULT '')"
         )
-        # Build a 59-dim feature vector with known mood values
         centroid = [0.0] * 59
         # Moods at indices 9-15: acoustic=0.2, aggressive=0.6, electronic=0.8,
         # happy=0.1, party=0.3, relaxed=0.1, sad=0.2
@@ -477,10 +481,10 @@ class TestAudioProfileEnrichment:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ae_id,
-                0.35,
+                0.15,  # < 0.3 → "minimal pulse"
                 "electronic",
-                0.7,
-                0.15,
+                0.85,  # > 0.7 → "clearly electronic"
+                0.10,  # < 0.2 → "instrumental"
                 json.dumps(centroid),
                 12,
                 "2026-01-01T00:00:00Z",
@@ -501,16 +505,24 @@ class TestAudioProfileEnrichment:
 
         last_call = mock_client.messages.create.call_args
         messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
-        prompt_data = json.loads(messages[0]["content"])
+        user_message = messages[0]["content"]
+        prompt_data = json.loads(user_message)
 
         source_audio = prompt_data["source"].get("audio")
         assert source_audio is not None
-        assert source_audio["primary_genre"] == "electronic"
-        assert source_audio["danceability"] == 0.35
+        assert source_audio["primary_genre"] == "clearly electronic"
+        assert source_audio["danceability"] == "minimal pulse"
         assert source_audio["voice_instrumental"] == "instrumental"
         assert "electronic" in source_audio["top_moods"]
         assert "aggressive" in source_audio["top_moods"]
         assert source_audio["recording_count"] == 12
+
+        # No raw decimals anywhere in the prompt — the model should have no
+        # number to quote. The stringified prompt must not contain the input
+        # decimal values.
+        assert "0.15" not in user_message
+        assert "0.85" not in user_message
+        assert "0.10" not in user_message
 
     @pytest.mark.asyncio
     async def test_prompt_graceful_without_audio_profile(
@@ -1136,3 +1148,111 @@ class TestStylesCap:
         conn.close()
 
         assert meta["styles"] == ["Indie", "Krautrock", "Post-Rock"]
+
+
+def _make_audio_row(**fields) -> sqlite3.Row:
+    """Build a sqlite3.Row stand-in for ``_qualitative_audio_descriptors`` tests."""
+    defaults = {
+        "avg_danceability": None,
+        "primary_genre": None,
+        "primary_genre_probability": None,
+        "voice_instrumental_ratio": None,
+        "feature_centroid": None,
+        "recording_count": 1,
+    }
+    defaults.update(fields)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cols = ", ".join(defaults.keys())
+    placeholders = ", ".join("?" * len(defaults))
+    conn.execute(f"CREATE TABLE t ({cols})")  # noqa: S608
+    conn.execute(f"INSERT INTO t VALUES ({placeholders})", tuple(defaults.values()))  # noqa: S608
+    return conn.execute("SELECT * FROM t").fetchone()
+
+
+class TestQualitativeAudioDescriptors:
+    """Boundary tests for ``_qualitative_audio_descriptors``.
+
+    The principle is: describe extremes, omit middles. Values in the middle
+    band must produce *no* corresponding key in the output so the model has
+    no number to quote.
+    """
+
+    def test_high_danceability_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(avg_danceability=0.7), None)
+        assert desc["danceability"] == "highly danceable"
+
+    def test_low_danceability_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(avg_danceability=0.2), None)
+        assert desc["danceability"] == "minimal pulse"
+
+    def test_middle_danceability_omitted(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(avg_danceability=0.45), None)
+        assert "danceability" not in desc
+
+    def test_vocal_forward_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(voice_instrumental_ratio=0.85), None)
+        assert desc["voice_instrumental"] == "vocal-forward"
+
+    def test_instrumental_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(voice_instrumental_ratio=0.05), None)
+        assert desc["voice_instrumental"] == "instrumental"
+
+    def test_ambiguous_voice_omitted(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(voice_instrumental_ratio=0.5), None)
+        assert "voice_instrumental" not in desc
+
+    def test_confident_genre_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(primary_genre="rock", primary_genre_probability=0.9), None
+        )
+        assert desc["primary_genre"] == "clearly rock"
+
+    def test_low_confidence_genre_omitted(self) -> None:
+        """Below 0.7 confidence the model just learns wrong — drop the genre entirely."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(primary_genre="rock", primary_genre_probability=0.5), None
+        )
+        assert "primary_genre" not in desc
+
+    def test_missing_audio_profile_returns_minimal(self) -> None:
+        """All-None inputs return only ``recording_count`` (a non-decimal count)."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(recording_count=3), None)
+        assert desc == {"recording_count": 3}
+
+    def test_no_raw_numbers_in_output(self) -> None:
+        """No value in the descriptor dict (except recording_count) should be a float."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(
+                avg_danceability=0.05,
+                primary_genre="ambient",
+                primary_genre_probability=0.95,
+                voice_instrumental_ratio=0.99,
+                recording_count=5,
+            ),
+            None,
+        )
+        for key, value in desc.items():
+            if key == "recording_count":
+                continue
+            assert not isinstance(value, float), f"{key} leaks a raw float: {value!r}"
