@@ -1728,3 +1728,110 @@ class TestFewShotExamples:
                 f"banned phrasing {banned!r} found in few-shot examples — "
                 f"would teach the model the failure-mode phrasing"
             )
+
+
+class TestTokenMatchScorer:
+    """Token-match: always-on production gate for generated narratives (#228).
+
+    Score = (unmatched content words) / (total content words). Pure string
+    comparison — zero LLM calls. The scoring_methods experiment showed
+    100% correct ranking (BASELINE > BEST) across 13 calibration pairs.
+    Threshold 0.5 flags ungrounded narratives for regeneration (loop in #229).
+    """
+
+    def test_all_content_words_grounded_returns_zero(self) -> None:
+        """Every content word in the narrative appears in the input data → score 0."""
+        from semantic_index.api.narrative import _token_match_score
+
+        narrative = "Stereolab Tortoise"
+        input_data = {
+            "source": {"name": "Stereolab"},
+            "shared_neighbors": [{"name": "Tortoise"}],
+        }
+        assert _token_match_score(narrative, input_data) == 0.0
+
+    def test_unmatched_word_lifts_score(self) -> None:
+        """A word not in the input is unmatched → score > 0."""
+        from semantic_index.api.narrative import _token_match_score
+
+        narrative = "Stereolab Beethoven"
+        input_data = {"source": {"name": "Stereolab"}}
+        # 1 of 2 content words unmatched.
+        assert _token_match_score(narrative, input_data) == 0.5
+
+    def test_stopwords_dont_count_as_unmatched(self) -> None:
+        """Common narrative prose terms are allowlisted — they're connective tissue,
+        not claims about the artist that need grounding."""
+        from semantic_index.api.narrative import _token_match_score
+
+        # WXYC, DJs, play, alongside, and, in, the are all allowlisted prose.
+        # The only content claim is "Stereolab", which is in the input → score 0.
+        narrative = "WXYC DJs play Stereolab alongside Stereolab in the show."
+        input_data = {"source": {"name": "Stereolab"}}
+        assert _token_match_score(narrative, input_data) == 0.0
+
+    def test_stem_match_matches_morphological_variant(self) -> None:
+        """``ambient`` in narrative should match ``ambience`` in input via stemming.
+
+        The issue calls out this case: tag "ambience" in styles, model writes
+        "ambient" — they share the stem ``ambien`` and shouldn't be flagged as
+        unmatched.
+        """
+        from semantic_index.api.narrative import _token_match_score
+
+        narrative = "Stereolab plays ambient music."
+        input_data = {"source": {"name": "Stereolab", "styles": ["Ambience"]}}
+        # "ambient" should match "ambience"; only content words are
+        # "Stereolab" (matched) and "ambient" (matched via stem) and "music"
+        # (not in input). 1 of 3 unmatched → 0.333…
+        score = _token_match_score(narrative, input_data)
+        assert score == pytest.approx(1 / 3, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_response_carries_token_match_score(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Every successful generation surfaces ``token_match_score`` in the response."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        body = resp.json()
+        assert "token_match_score" in body
+        assert isinstance(body["token_match_score"], float)
+        assert 0.0 <= body["token_match_score"] <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_low_grounding_flag_set_when_score_above_threshold(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the model emits ungrounded prose, ``low_grounding`` is True.
+
+        Lower the threshold so the well-grounded fixture narrative trips it.
+        Default threshold (0.5) is a deploy-time tuning surface; making it
+        configurable lets us test both sides.
+        """
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.0")
+        _clear_narrative_cache(narrative_db_path)
+
+        # The mock returns a narrative with words not in the input.
+        ungrounded = (
+            "Stereolab summons unprecedented metaphysical resonance through baroque counterpoint."
+        )
+        mock_client = _mock_anthropic_client(ungrounded)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+        assert body["low_grounding"] is True
+        assert body["token_match_score"] > 0.0
