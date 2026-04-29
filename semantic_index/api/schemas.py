@@ -127,6 +127,7 @@ class NarrativeResponse(BaseModel):
     insufficient_signal: bool = False
     token_match_score: float = 0.0
     low_grounding: bool = False
+    retry_count: int = 0
 
 
 class BioResponse(BaseModel):

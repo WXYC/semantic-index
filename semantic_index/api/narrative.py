@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -21,7 +22,49 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 10
+_PROMPT_VERSION = 11
+
+
+def _env_int(name: str, default: int, *, min_value: int | None = None) -> int:
+    """Read an int env var with default + warning-on-malformed + optional clamp."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
+    return max(min_value, value) if min_value is not None else value
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var with default + warning-on-malformed."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
+
+
+# Per the closed-loop experiment, 100% of the 18% that retry converge within
+# 2 iterations. Overrideable so ops can disable (=0) or extend (>2) without a
+# redeploy.
+_DEFAULT_MAX_REGEN_RETRIES = 2
+
+
+def _max_regen_retries() -> int:
+    return _env_int("NARRATIVE_MAX_REGEN_RETRIES", _DEFAULT_MAX_REGEN_RETRIES, min_value=0)
+
+
+# Pathologically ungrounded narratives could otherwise inflate the retry
+# prompt past the model's input budget. Empirically narratives are <80 words
+# and unmatched lists are small; this is a safety ceiling, not an expected
+# case.
+_RETRY_OFFENDER_CAP = 50
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -29,38 +72,14 @@ _DEFAULT_ANON_PLAY_THRESHOLD = 800
 
 
 def _anon_threshold() -> int:
-    """Read NARRATIVE_ANON_PLAY_THRESHOLD from env, falling back to default."""
-    raw = os.environ.get("NARRATIVE_ANON_PLAY_THRESHOLD")
-    if raw is None:
-        return _DEFAULT_ANON_PLAY_THRESHOLD
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid NARRATIVE_ANON_PLAY_THRESHOLD=%r; using default %d",
-            raw,
-            _DEFAULT_ANON_PLAY_THRESHOLD,
-        )
-        return _DEFAULT_ANON_PLAY_THRESHOLD
+    return _env_int("NARRATIVE_ANON_PLAY_THRESHOLD", _DEFAULT_ANON_PLAY_THRESHOLD)
 
 
 _DEFAULT_TOKEN_MATCH_THRESHOLD = 0.5
 
 
 def _token_match_threshold() -> float:
-    """Read NARRATIVE_TOKEN_MATCH_THRESHOLD from env, falling back to default."""
-    raw = os.environ.get("NARRATIVE_TOKEN_MATCH_THRESHOLD")
-    if raw is None:
-        return _DEFAULT_TOKEN_MATCH_THRESHOLD
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid NARRATIVE_TOKEN_MATCH_THRESHOLD=%r; using default %.2f",
-            raw,
-            _DEFAULT_TOKEN_MATCH_THRESHOLD,
-        )
-        return _DEFAULT_TOKEN_MATCH_THRESHOLD
+    return _env_float("NARRATIVE_TOKEN_MATCH_THRESHOLD", _DEFAULT_TOKEN_MATCH_THRESHOLD)
 
 
 # Long Discogs style lists invite hallucination — a model fed Outkast's 53
@@ -101,17 +120,7 @@ _BPM_FAST = 130
 
 
 def _min_aa_score() -> float:
-    """Read the AA-score threshold from the environment, falling back to default."""
-    raw = os.environ.get("NARRATIVE_MIN_AA_SCORE")
-    if raw is None:
-        return _DEFAULT_MIN_AA_SCORE
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid NARRATIVE_MIN_AA_SCORE=%r; using default %.2f", raw, _DEFAULT_MIN_AA_SCORE
-        )
-        return _DEFAULT_MIN_AA_SCORE
+    return _env_float("NARRATIVE_MIN_AA_SCORE", _DEFAULT_MIN_AA_SCORE)
 
 
 MONTH_NAMES = [
@@ -177,6 +186,7 @@ _REQUIRED_CACHE_COLUMNS = {
     "prompt_version",
     "insufficient_signal",
     "token_match_score",
+    "retry_count",
 }
 
 _CACHE_SCHEMA = """
@@ -189,6 +199,7 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
     prompt_version INTEGER NOT NULL DEFAULT 1,
     insufficient_signal INTEGER NOT NULL DEFAULT 0,
     token_match_score REAL NOT NULL DEFAULT 0.0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
     narrative TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (source_id, target_id, month, dj_id, edge_type, prompt_version)
@@ -228,13 +239,14 @@ def _write_cache_entry(
     narrative: str,
     insufficient_signal: bool,
     token_match_score: float = 0.0,
+    retry_count: int = 0,
 ) -> None:
     """Insert (or replace) a cache row at the current ``_PROMPT_VERSION``."""
     cache_db.execute(
         "INSERT OR REPLACE INTO narrative_cache "
         "(source_id, target_id, month, dj_id, edge_type, prompt_version, "
-        "insufficient_signal, token_match_score, narrative, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "insufficient_signal, token_match_score, retry_count, narrative, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             lo,
             hi,
@@ -244,6 +256,7 @@ def _write_cache_entry(
             _PROMPT_VERSION,
             int(insufficient_signal),
             float(token_match_score),
+            int(retry_count),
             narrative,
             datetime.now(UTC).isoformat(),
         ),
@@ -604,28 +617,65 @@ def _stem(word: str) -> str:
     return word
 
 
-def _token_match_score(narrative: str, input_data: dict) -> float:
-    """Fraction of content words in ``narrative`` that don't appear in ``input_data``.
+def _compute_input_stems(input_data: dict) -> set[str]:
+    """Stem set for every alpha word reachable in ``input_data`` (recursing JSON)."""
+    raw = re.findall(r"[A-Za-z]+", json.dumps(input_data).lower())
+    return {_stem(w) for w in raw}
 
-    Score = unmatched / total content-words, where content words exclude the
-    stopword + narrative-prose allowlist (``WXYC DJs``, ``appears``, etc.).
-    Lower is better — a fully-grounded narrative scores 0; a hallucinated
-    narrative trends toward 1.
 
-    Word match uses suffix-stripped stems (``ambient`` ↔ ``ambience``) so the
-    model's morphological variation against the input tags doesn't get flagged
-    as unmatched.
+def _classify_narrative_words(narrative: str, input_stems: set[str]) -> tuple[list[str], list[str]]:
+    """Split content words into ``(matched, unmatched)`` against precomputed stems.
+
+    Both lists preserve duplicates and order of first appearance in the
+    narrative, so callers can either count tokens (the scorer) or dedup for a
+    word list (the regen offender feed). Allowlist words are filtered before
+    classification — they're connective tissue, not grounding claims.
     """
-    import re
-
     raw_words = re.findall(r"[A-Za-z]+", narrative.lower())
-    content_words = [w for w in raw_words if w not in _TOKEN_MATCH_ALLOWLIST]
-    if not content_words:
-        return 0.0
-    input_raw = re.findall(r"[A-Za-z]+", json.dumps(input_data).lower())
-    input_stems = {_stem(w) for w in input_raw}
-    unmatched = sum(1 for w in content_words if _stem(w) not in input_stems)
-    return unmatched / len(content_words)
+    matched: list[str] = []
+    unmatched: list[str] = []
+    for w in raw_words:
+        if w in _TOKEN_MATCH_ALLOWLIST:
+            continue
+        if _stem(w) in input_stems:
+            matched.append(w)
+        else:
+            unmatched.append(w)
+    return matched, unmatched
+
+
+def _token_match_score(narrative: str, input_data: dict) -> float:
+    """Fraction of content words in ``narrative`` whose stems aren't in ``input_data``.
+
+    Lower is better — a fully-grounded narrative scores 0; a hallucinated one
+    trends toward 1. Stem-match means ``ambient`` matches ``ambience``.
+    Allowlist words (stopwords + narrative-prose frame) are filtered before
+    counting so prose connective tissue doesn't dilute the score.
+    """
+    matched, unmatched = _classify_narrative_words(narrative, _compute_input_stems(input_data))
+    total = len(matched) + len(unmatched)
+    return (len(unmatched) / total) if total else 0.0
+
+
+def _dedupe_preserving_order(words: list[str]) -> list[str]:
+    """Remove duplicate words while keeping each word's first-occurrence position."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+def _unmatched_content_words(narrative: str, input_data: dict) -> list[str]:
+    """Deduplicated content words in ``narrative`` whose stems aren't in ``input_data``.
+
+    Preserves the lowercase surface form and the order of first occurrence;
+    suitable for inclusion in a constraint addendum on the prompt.
+    """
+    _, raw_unmatched = _classify_narrative_words(narrative, _compute_input_stems(input_data))
+    return _dedupe_preserving_order(raw_unmatched)
 
 
 def _build_anonymization_map(source: dict, target: dict, threshold: int) -> dict[str, str]:
@@ -660,8 +710,6 @@ def _reverse_anonymization(narrative: str, sub_map: dict[str, str]) -> str:
     distinctive (``Artist A``, ``Neighbor 1``); the boundary is a safety net
     for the rare alias that happens to be a real substring.
     """
-    import re
-
     if not sub_map:
         return narrative
     out = narrative
@@ -759,7 +807,8 @@ def get_narrative(
     cache_db = _get_cache_db(request.app.state.db_path)
     try:
         cached_row = cache_db.execute(
-            "SELECT narrative, insufficient_signal, token_match_score FROM narrative_cache "
+            "SELECT narrative, insufficient_signal, token_match_score, retry_count "
+            "FROM narrative_cache "
             "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? "
             "AND edge_type = ? AND prompt_version = ?",
             (lo, hi, cache_month, cache_dj, cache_edge_type, _PROMPT_VERSION),
@@ -776,6 +825,7 @@ def get_narrative(
                 # Threshold is read live so a deploy-time tuning change takes
                 # effect even on cached entries without invalidating them.
                 low_grounding=cached_score > _token_match_threshold(),
+                retry_count=int(cached_row["retry_count"]),
             )
     finally:
         pass  # keep cache_db open for potential write below
@@ -861,24 +911,6 @@ def get_narrative(
         faceted_pair_count=faceted_count,
     )
 
-    # Call LLM
-    try:
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        narrative = response.content[0].text
-    except Exception:
-        logger.exception("Anthropic API call failed")
-        cache_db.close()
-        raise HTTPException(status_code=502, detail="Narrative generation failed") from None
-
-    # Restore real names in the output before caching/returning so the cache
-    # holds the user-facing text, not aliases.
-    narrative = _reverse_anonymization(narrative, sub_map)
-
     # Score grounding against the post-anonymization-restored narrative AND the
     # un-anonymized input meta — the score reflects what the user sees vs the
     # data we actually had, not the model's internal representation. Facet
@@ -895,7 +927,56 @@ def get_narrative(
         score_input["facet_month"] = MONTH_NAMES[month] if 1 <= month <= 12 else str(month)
     if dj_name is not None:
         score_input["facet_dj"] = dj_name
-    token_score = _token_match_score(narrative, score_input)
+
+    threshold = _token_match_threshold()
+    max_retries = _max_regen_retries()
+    # Stem set is invariant across retries within a request — compute once,
+    # pass to the classifier each iteration to avoid re-tokenizing the input.
+    input_stems = _compute_input_stems(score_input)
+    retry_count = 0
+    current_message = user_message
+    while True:
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=150,
+                system=_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": current_message}],
+            )
+            # Per-call API errors are not part of the regen budget — a 502
+            # short-circuits immediately rather than burning retry attempts.
+            narrative = response.content[0].text
+        except Exception:
+            logger.exception("Anthropic API call failed")
+            cache_db.close()
+            raise HTTPException(status_code=502, detail="Narrative generation failed") from None
+
+        # Restore real names before scoring so the score reflects user-visible text.
+        narrative = _reverse_anonymization(narrative, sub_map)
+        matched, offenders = _classify_narrative_words(narrative, input_stems)
+        total = len(matched) + len(offenders)
+        token_score = (len(offenders) / total) if total else 0.0
+
+        if token_score <= threshold or retry_count >= max_retries:
+            break
+
+        # Cap the offenders so a pathologically long unmatched run can't
+        # inflate the retry prompt past Haiku's input budget.
+        capped = _dedupe_preserving_order(offenders)[:_RETRY_OFFENDER_CAP]
+        retry_count += 1
+        logger.info(
+            "narrative regen %d/%d: score=%.3f offenders=%s",
+            retry_count,
+            max_retries,
+            token_score,
+            capped[:10],
+        )
+        current_message = (
+            user_message
+            + "\n\nThe previous attempt used words not in the input data. "
+            + "Do NOT use these words in your response: "
+            + ", ".join(capped)
+        )
 
     # Write to cache
     try:
@@ -909,6 +990,7 @@ def get_narrative(
             narrative,
             False,
             token_score,
+            retry_count,
         )
     finally:
         cache_db.close()
@@ -919,5 +1001,6 @@ def get_narrative(
         narrative=narrative,
         cached=False,
         token_match_score=token_score,
-        low_grounding=token_score > _token_match_threshold(),
+        low_grounding=token_score > threshold,
+        retry_count=retry_count,
     )
