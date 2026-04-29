@@ -54,8 +54,8 @@ _INSUFFICIENT_SIGNAL_NARRATIVE = (
 # model has no number to quote.
 _DANCEABILITY_LOW = 0.3
 _DANCEABILITY_HIGH = 0.6
-_VOICE_INSTRUMENTAL_INSTRUMENTAL = 0.2
-_VOICE_INSTRUMENTAL_VOCAL = 0.8
+_VOICE_INSTRUMENTAL_LOW = 0.2
+_VOICE_INSTRUMENTAL_HIGH = 0.8
 _GENRE_CONFIDENCE_THRESHOLD = 0.7
 _MOOD_THRESHOLD = 0.3
 _BPM_SLOW = 90
@@ -331,11 +331,15 @@ def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | 
     Returns a dict containing only fields whose values are *remarkable* — high
     or low extremes get a label, unremarkable middles are omitted entirely so
     the prompt has no number to quote. ``primary_genre`` is included only when
-    classifier confidence clears ``_GENRE_CONFIDENCE_THRESHOLD``; otherwise
-    omitted because a low-confidence guess just teaches the model wrong.
+    classifier confidence clears the threshold; a low-confidence guess just
+    teaches the model wrong.
 
     ``recording_count`` is kept as an integer (not a perceptual decimal) — the
-    model uses it as a confidence signal but it has no leak-as-prose problem.
+    model uses it as a confidence signal — but the descriptor block is
+    suppressed entirely if no other remarkable field surfaces. A bare
+    ``{"recording_count": N}`` just tells the model there's audio data
+    without anchoring it to anything, which over-confidently primes phrases
+    like "based on audio analysis" with nothing real to back them.
     """
     desc: dict = {"recording_count": profile["recording_count"]}
 
@@ -354,9 +358,9 @@ def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | 
 
     vi = profile["voice_instrumental_ratio"]
     if vi is not None:
-        if vi < _VOICE_INSTRUMENTAL_INSTRUMENTAL:
+        if vi < _VOICE_INSTRUMENTAL_LOW:
             desc["voice_instrumental"] = "instrumental"
-        elif vi > _VOICE_INSTRUMENTAL_VOCAL:
+        elif vi > _VOICE_INSTRUMENTAL_HIGH:
             desc["voice_instrumental"] = "vocal-forward"
         # else: ambiguous — omit.
 
@@ -384,6 +388,10 @@ def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | 
         if key:
             desc["key"] = key
 
+    # Drop the whole audio block if only ``recording_count`` survived the
+    # filters — see the docstring for why a bare count misleads the model.
+    if len(desc) <= 1:
+        return {}
     return desc
 
 
