@@ -43,6 +43,25 @@ def _mock_anthropic_client(response_text: str = MOCK_NARRATIVE) -> MagicMock:
     return client
 
 
+def _mock_anthropic_client_seq(response_texts: list[str]) -> MagicMock:
+    """Mock that returns a different narrative on each successive call.
+
+    Exhausting the sequence raises ``StopIteration`` so an unexpected extra
+    call surfaces as a test failure rather than silently reusing the last
+    response.
+    """
+    client = MagicMock()
+    messages = []
+    for text in response_texts:
+        mock_message = MagicMock()
+        mock_block = MagicMock()
+        mock_block.text = text
+        mock_message.content = [mock_block]
+        messages.append(mock_message)
+    client.messages.create.side_effect = messages
+    return client
+
+
 def _build_narrative_fixture_db() -> str:
     """Build a fixture DB with base tables, edges, and facet tables."""
     path = tempfile.mktemp(suffix=".db")
@@ -187,6 +206,19 @@ def _disable_aa_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     exercise the threshold logic explicitly.
     """
     monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0")
+
+
+@pytest.fixture(autouse=True)
+def _disable_regen_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the token-match regen loop for default narrative tests.
+
+    Many tests use the shared ``MOCK_NARRATIVE`` (about Autechre/Stereolab)
+    against pairs that don't contain those names — which would score as
+    ungrounded and trigger retries the mocks don't expect. Tests in
+    ``TestRegenLoop`` and ``TestTokenMatchScorer`` re-set the env var to
+    exercise the threshold and regen behavior explicitly.
+    """
+    monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "1.0")
 
 
 @pytest_asyncio.fixture
@@ -1736,7 +1768,7 @@ class TestTokenMatchScorer:
     Score = (unmatched content words) / (total content words). Pure string
     comparison — zero LLM calls. The scoring_methods experiment showed
     100% correct ranking (BASELINE > BEST) across 13 calibration pairs.
-    Threshold 0.5 flags ungrounded narratives for regeneration (loop in #229).
+    Threshold 0.5 flags ungrounded narratives for regeneration.
     """
 
     def test_all_content_words_grounded_returns_zero(self) -> None:
@@ -1919,3 +1951,245 @@ class TestTokenMatchScorer:
         assert body["low_grounding"] is False, (
             "score == threshold should NOT trigger low_grounding (convention is strict above)"
         )
+
+
+class TestRegenLoop:
+    """Generate-score-regenerate loop.
+
+    When the token-match score crosses the threshold, retry the LLM with the
+    ungrounded terms appended as "do NOT use these words" constraints. Cap at
+    2 retries (3 total calls). The closed-loop experiment showed 82% pass on
+    first try; the 18% that retry converge 100% within 2 iterations.
+    """
+
+    def test_unmatched_content_words_lists_ungrounded_terms(self) -> None:
+        """Identify which content words in the narrative aren't in the input data."""
+        from semantic_index.api.narrative import _unmatched_content_words
+
+        narrative = "Stereolab next to Beethoven."
+        input_data = {"source": {"name": "Stereolab"}}
+        # "next" and "to" are allowlisted; "Stereolab" matches; "Beethoven" doesn't.
+        assert _unmatched_content_words(narrative, input_data) == ["beethoven"]
+
+    def test_unmatched_content_words_preserves_first_occurrence_order(self) -> None:
+        """When several offenders appear, return them in narrative order."""
+        from semantic_index.api.narrative import _unmatched_content_words
+
+        narrative = "Beethoven Mozart Bach Stereolab"
+        input_data = {"source": {"name": "Stereolab"}}
+        assert _unmatched_content_words(narrative, input_data) == [
+            "beethoven",
+            "mozart",
+            "bach",
+        ]
+
+    def test_unmatched_content_words_dedupes_repeats(self) -> None:
+        """A repeated offender appears only once in the output, at its first position."""
+        from semantic_index.api.narrative import _unmatched_content_words
+
+        narrative = "Beethoven Mozart Beethoven Bach Mozart"
+        input_data = {"source": {"name": "Stereolab"}}
+        assert _unmatched_content_words(narrative, input_data) == [
+            "beethoven",
+            "mozart",
+            "bach",
+        ]
+
+    def test_unmatched_content_words_empty_narrative(self) -> None:
+        """An empty narrative has no offenders."""
+        from semantic_index.api.narrative import _unmatched_content_words
+
+        assert _unmatched_content_words("", {"source": {"name": "X"}}) == []
+
+    def test_unmatched_content_words_all_grounded_returns_empty(self) -> None:
+        """A fully-grounded narrative has no offenders — even if it has many words."""
+        from semantic_index.api.narrative import _unmatched_content_words
+
+        narrative = "Stereolab Stereolab Stereolab"
+        input_data = {"source": {"name": "Stereolab"}}
+        assert _unmatched_content_words(narrative, input_data) == []
+
+    @pytest.mark.asyncio
+    async def test_above_threshold_triggers_one_retry(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Above-threshold first attempt → retry; second attempt grounded → stop.
+
+        Sequenced mock returns an ungrounded narrative first, a grounded one
+        second. The endpoint should call the LLM twice, return the grounded
+        narrative, and report ``retry_count=1`` and ``low_grounding=False``.
+        """
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        _clear_narrative_cache(narrative_db_path)
+
+        ungrounded = "Stereolab summons baroque counterpoint and metaphysical resonance."
+        grounded = "WXYC DJs play Stereolab next to Stereolab."
+        mock_client = _mock_anthropic_client_seq([ungrounded, grounded])
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+
+        assert mock_client.messages.create.call_count == 2, "expected one retry"
+        assert body["narrative"] == grounded
+        assert body["retry_count"] == 1
+        assert body["low_grounding"] is False
+
+    @pytest.mark.asyncio
+    async def test_retry_capped_at_two(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Always-ungrounded mock → exactly 3 LLM calls (initial + 2 retries),
+        retry_count saturates at 2, low_grounding stays True."""
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        _clear_narrative_cache(narrative_db_path)
+
+        ungrounded = "Stereolab summons baroque counterpoint and metaphysical resonance."
+        # Mock always returns ungrounded; the loop must stop after 2 retries.
+        mock_client = _mock_anthropic_client_seq([ungrounded] * 5)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+
+        assert mock_client.messages.create.call_count == 3, "expected initial + 2 retries, no more"
+        assert body["retry_count"] == 2
+        assert body["low_grounding"] is True
+        assert body["narrative"] == ungrounded
+
+    @pytest.mark.asyncio
+    async def test_first_pass_grounded_no_retry(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A grounded first attempt → no retry, retry_count=0, single LLM call."""
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        _clear_narrative_cache(narrative_db_path)
+
+        # MOCK_NARRATIVE mentions Autechre + Stereolab + roots — all in input.
+        mock_client = _mock_anthropic_client()
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+
+        assert mock_client.messages.create.call_count == 1, "no retry expected"
+        assert body["retry_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_retry_message_lists_offending_words(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The retry user message includes the offending words verbatim."""
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        _clear_narrative_cache(narrative_db_path)
+
+        ungrounded = "Stereolab summons baroque counterpoint."
+        grounded = "WXYC DJs play Stereolab next to Stereolab."
+        mock_client = _mock_anthropic_client_seq([ungrounded, grounded])
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+
+        # Inspect the second call's user message — it should carry the
+        # "do NOT use these words" addendum naming the offenders from call 1.
+        second_call = mock_client.messages.create.call_args_list[1]
+        messages = second_call.kwargs.get("messages") or second_call[1]["messages"]
+        retry_message = messages[0]["content"]
+        assert "Do NOT use these words" in retry_message
+        # Words from the ungrounded narrative that aren't in the input.
+        assert "summons" in retry_message
+        assert "baroque" in retry_message
+        assert "counterpoint" in retry_message
+
+    @pytest.mark.asyncio
+    async def test_max_retries_env_override_disables_loop(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``NARRATIVE_MAX_REGEN_RETRIES=0`` disables retries even above threshold."""
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        monkeypatch.setenv("NARRATIVE_MAX_REGEN_RETRIES", "0")
+        _clear_narrative_cache(narrative_db_path)
+
+        ungrounded = "Stereolab summons baroque counterpoint."
+        mock_client = _mock_anthropic_client_seq([ungrounded] * 5)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+
+        assert mock_client.messages.create.call_count == 1, "max=0 → no retries"
+        assert body["retry_count"] == 0
+        assert body["low_grounding"] is True
+
+    @pytest.mark.asyncio
+    async def test_max_retries_env_override_extends_loop(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``NARRATIVE_MAX_REGEN_RETRIES=4`` allows 5 total calls before giving up."""
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", "0.5")
+        monkeypatch.setenv("NARRATIVE_MAX_REGEN_RETRIES", "4")
+        _clear_narrative_cache(narrative_db_path)
+
+        ungrounded = "Stereolab summons baroque counterpoint."
+        mock_client = _mock_anthropic_client_seq([ungrounded] * 10)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp.json()
+
+        assert mock_client.messages.create.call_count == 5, "1 initial + 4 retries"
+        assert body["retry_count"] == 4
