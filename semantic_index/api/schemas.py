@@ -111,6 +111,13 @@ class NarrativeResponse(BaseModel):
     deterministic placeholder ``narrative`` for these pairs — DJs do play
     them together, but with no consistent neighborhood context to narrate.
     Clients can render these differently (muted card, hint, etc.).
+
+    ``token_match_score`` is the unmatched-content-words ratio of the
+    generated narrative against the input data (#228). 0 = fully grounded,
+    1 = fully ungrounded. Computed on every successful generation, including
+    cached responses. ``low_grounding`` is ``True`` when the score crosses
+    the threshold (``NARRATIVE_TOKEN_MATCH_THRESHOLD``, default 0.5) — a
+    signal to the client that the narrative is suspect.
     """
 
     source: ArtistSummary
@@ -118,6 +125,8 @@ class NarrativeResponse(BaseModel):
     narrative: str
     cached: bool
     insufficient_signal: bool = False
+    token_match_score: float = 0.0
+    low_grounding: bool = False
 
 
 class BioResponse(BaseModel):

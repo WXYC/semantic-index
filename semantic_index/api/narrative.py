@@ -21,7 +21,7 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 9
+_PROMPT_VERSION = 10
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -42,6 +42,25 @@ def _anon_threshold() -> int:
             _DEFAULT_ANON_PLAY_THRESHOLD,
         )
         return _DEFAULT_ANON_PLAY_THRESHOLD
+
+
+_DEFAULT_TOKEN_MATCH_THRESHOLD = 0.5
+
+
+def _token_match_threshold() -> float:
+    """Read NARRATIVE_TOKEN_MATCH_THRESHOLD from env, falling back to default."""
+    raw = os.environ.get("NARRATIVE_TOKEN_MATCH_THRESHOLD")
+    if raw is None:
+        return _DEFAULT_TOKEN_MATCH_THRESHOLD
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid NARRATIVE_TOKEN_MATCH_THRESHOLD=%r; using default %.2f",
+            raw,
+            _DEFAULT_TOKEN_MATCH_THRESHOLD,
+        )
+        return _DEFAULT_TOKEN_MATCH_THRESHOLD
 
 
 # Long Discogs style lists invite hallucination — a model fed Outkast's 53
@@ -153,7 +172,12 @@ _PLACEHOLDER_VALUES = frozenset(
     {"unknown", "various", "various artists", "v/a", "v.a.", "n/a", "none", ""}
 )
 
-_REQUIRED_CACHE_COLUMNS = {"edge_type", "prompt_version", "insufficient_signal"}
+_REQUIRED_CACHE_COLUMNS = {
+    "edge_type",
+    "prompt_version",
+    "insufficient_signal",
+    "token_match_score",
+}
 
 _CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS narrative_cache (
@@ -164,6 +188,7 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
     edge_type TEXT NOT NULL DEFAULT '',
     prompt_version INTEGER NOT NULL DEFAULT 1,
     insufficient_signal INTEGER NOT NULL DEFAULT 0,
+    token_match_score REAL NOT NULL DEFAULT 0.0,
     narrative TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (source_id, target_id, month, dj_id, edge_type, prompt_version)
@@ -202,13 +227,14 @@ def _write_cache_entry(
     cache_edge_type: str,
     narrative: str,
     insufficient_signal: bool,
+    token_match_score: float = 0.0,
 ) -> None:
     """Insert (or replace) a cache row at the current ``_PROMPT_VERSION``."""
     cache_db.execute(
         "INSERT OR REPLACE INTO narrative_cache "
         "(source_id, target_id, month, dj_id, edge_type, prompt_version, "
-        "insufficient_signal, narrative, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "insufficient_signal, token_match_score, narrative, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             lo,
             hi,
@@ -217,6 +243,7 @@ def _write_cache_entry(
             cache_edge_type,
             _PROMPT_VERSION,
             int(insufficient_signal),
+            float(token_match_score),
             narrative,
             datetime.now(UTC).isoformat(),
         ),
@@ -480,6 +507,127 @@ def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | 
     return desc
 
 
+# Connective tissue and narrative prose that doesn't need grounding against
+# the input. Stopwords + the small set of recurring frame phrases the prompt
+# encourages ("WXYC DJs play X alongside Y").
+_TOKEN_MATCH_ALLOWLIST = frozenset(
+    {
+        # English stopwords
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "these",
+        "this",
+        "those",
+        "to",
+        "was",
+        "were",
+        "with",
+        # Narrative-prose recurring frame
+        "across",
+        "alongside",
+        "also",
+        "appear",
+        "appears",
+        "both",
+        "common",
+        "djs",
+        "frequently",
+        "neighbor",
+        "neighbors",
+        "next",
+        "occasionally",
+        "often",
+        "pair",
+        "pairs",
+        "place",
+        "places",
+        "play",
+        "plays",
+        "share",
+        "shared",
+        "shares",
+        "show",
+        "shows",
+        "tag",
+        "together",
+        "transition",
+        "transitions",
+        "uncommon",
+        "wxyc",
+        "library",
+        "flowsheet",
+        "flowsheets",
+        "between",
+        "though",
+        "while",
+    }
+)
+
+
+def _stem(word: str) -> str:
+    """Trivial suffix-strip stemmer — matches ``ambient`` to ``ambience``.
+
+    Strips a small set of common English suffixes; intentionally not Porter
+    stemming since we don't need linguistic precision, just light morphology
+    so tag/word morphological variants line up.
+
+    Trace for the motivating example:
+      ``_stem("ambient")``  → ``"ambien"`` (suffix ``"t"`` stripped, len 7 > 3)
+      ``_stem("ambience")`` → ``"ambien"`` (suffix ``"ce"`` stripped, len 8 > 4)
+    Both reduce to ``"ambien"``, so the stems match.
+    """
+    for suffix in ("ies", "ing", "ed", "es", "ce", "cy", "ly", "s", "y", "t", "e"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _token_match_score(narrative: str, input_data: dict) -> float:
+    """Fraction of content words in ``narrative`` that don't appear in ``input_data``.
+
+    Score = unmatched / total content-words, where content words exclude the
+    stopword + narrative-prose allowlist (``WXYC DJs``, ``appears``, etc.).
+    Lower is better — a fully-grounded narrative scores 0; a hallucinated
+    narrative trends toward 1.
+
+    Word match uses suffix-stripped stems (``ambient`` ↔ ``ambience``) so the
+    model's morphological variation against the input tags doesn't get flagged
+    as unmatched.
+    """
+    import re
+
+    raw_words = re.findall(r"[A-Za-z]+", narrative.lower())
+    content_words = [w for w in raw_words if w not in _TOKEN_MATCH_ALLOWLIST]
+    if not content_words:
+        return 0.0
+    input_raw = re.findall(r"[A-Za-z]+", json.dumps(input_data).lower())
+    input_stems = {_stem(w) for w in input_raw}
+    unmatched = sum(1 for w in content_words if _stem(w) not in input_stems)
+    return unmatched / len(content_words)
+
+
 def _build_anonymization_map(source: dict, target: dict, threshold: int) -> dict[str, str]:
     """Map artist names with ``total_plays > threshold`` to placeholder aliases.
 
@@ -611,18 +759,23 @@ def get_narrative(
     cache_db = _get_cache_db(request.app.state.db_path)
     try:
         cached_row = cache_db.execute(
-            "SELECT narrative, insufficient_signal FROM narrative_cache "
+            "SELECT narrative, insufficient_signal, token_match_score FROM narrative_cache "
             "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? "
             "AND edge_type = ? AND prompt_version = ?",
             (lo, hi, cache_month, cache_dj, cache_edge_type, _PROMPT_VERSION),
         ).fetchone()
         if cached_row:
+            cached_score = float(cached_row["token_match_score"])
             return NarrativeResponse(
                 source=source,
                 target=target,
                 narrative=cached_row["narrative"],
                 cached=True,
                 insufficient_signal=bool(cached_row["insufficient_signal"]),
+                token_match_score=cached_score,
+                # Threshold is read live so a deploy-time tuning change takes
+                # effect even on cached entries without invalidating them.
+                low_grounding=cached_score >= _token_match_threshold(),
             )
     finally:
         pass  # keep cache_db open for potential write below
@@ -724,12 +877,38 @@ def get_narrative(
     # holds the user-facing text, not aliases.
     narrative = _reverse_anonymization(narrative, sub_map)
 
+    # Score grounding against the post-anonymization-restored narrative AND the
+    # un-anonymized input meta — the score reflects what the user sees vs the
+    # data we actually had, not the model's internal representation.
+    score_input = {
+        "source": source_meta,
+        "target": target_meta,
+        "relationships": relationships,
+        "shared_neighbors": shared_neighbors,
+    }
+    token_score = _token_match_score(narrative, score_input)
+
     # Write to cache
     try:
         _write_cache_entry(
-            cache_db, lo, hi, cache_month, cache_dj, cache_edge_type, narrative, False
+            cache_db,
+            lo,
+            hi,
+            cache_month,
+            cache_dj,
+            cache_edge_type,
+            narrative,
+            False,
+            token_score,
         )
     finally:
         cache_db.close()
 
-    return NarrativeResponse(source=source, target=target, narrative=narrative, cached=False)
+    return NarrativeResponse(
+        source=source,
+        target=target,
+        narrative=narrative,
+        cached=False,
+        token_match_score=token_score,
+        low_grounding=token_score >= _token_match_threshold(),
+    )
