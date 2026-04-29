@@ -21,7 +21,7 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 4
+_PROMPT_VERSION = 5
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -46,6 +46,20 @@ _INSUFFICIENT_SIGNAL_NARRATIVE = (
     "enough specific musical context — same labels, similar styles, common "
     "collaborators — to characterize a meaningful connection."
 )
+
+# Audio-profile decimals (danceability, voice/instrumental ratio, genre
+# confidence, BPM) leak into prose verbatim — past generations quoted
+# "(0.68 danceability)" and "(0.34 danceability)". Convert them to qualitative
+# descriptors at extremes only, omitting unremarkable middles entirely so the
+# model has no number to quote.
+_DANCEABILITY_LOW = 0.3
+_DANCEABILITY_HIGH = 0.6
+_VOICE_INSTRUMENTAL_INSTRUMENTAL = 0.2
+_VOICE_INSTRUMENTAL_VOCAL = 0.8
+_GENRE_CONFIDENCE_THRESHOLD = 0.7
+_MOOD_THRESHOLD = 0.3
+_BPM_SLOW = 90
+_BPM_FAST = 130
 
 
 def _min_aa_score() -> float:
@@ -286,7 +300,7 @@ def _lookup_artist_metadata(
         "styles": styles,
     }
 
-    # Audio profile: add descriptive features when available
+    # Audio profile: add qualitative descriptors when available
     try:
         profile = db.execute(
             "SELECT avg_danceability, primary_genre, primary_genre_probability, "
@@ -295,48 +309,82 @@ def _lookup_artist_metadata(
             (artist_id,),
         ).fetchone()
         if profile and profile["feature_centroid"]:
-            centroid = json.loads(profile["feature_centroid"])
-            # Extract narratively useful features from the 59-dim centroid
-            mood_labels = [
-                "acoustic",
-                "aggressive",
-                "electronic",
-                "happy",
-                "party",
-                "relaxed",
-                "sad",
-            ]
-            mood_vector = centroid[9:16]
-            top_moods = sorted(
-                zip(mood_labels, mood_vector, strict=True), key=lambda x: x[1], reverse=True
-            )
-            audio_meta: dict = {
-                "primary_genre": profile["primary_genre"],
-                "danceability": round(profile["avg_danceability"], 2),
-                "voice_instrumental": (
-                    "vocal" if profile["voice_instrumental_ratio"] > 0.5 else "instrumental"
-                ),
-                "top_moods": [m for m, v in top_moods[:3] if v > 0.3],
-                "recording_count": profile["recording_count"],
-            }
-            # Add BPM and key if available (columns may not exist on older DBs)
             try:
                 bpm_row = db.execute(
                     "SELECT avg_bpm, primary_key FROM audio_profile WHERE artist_id = ?",
                     (artist_id,),
                 ).fetchone()
-                if bpm_row:
-                    if bpm_row["avg_bpm"]:
-                        audio_meta["bpm"] = round(bpm_row["avg_bpm"])
-                    if bpm_row["primary_key"]:
-                        audio_meta["key"] = bpm_row["primary_key"]
             except sqlite3.OperationalError:
-                pass  # avg_bpm/primary_key columns may not exist
-            meta["audio"] = audio_meta
+                bpm_row = None  # avg_bpm/primary_key columns may not exist
+            audio_meta = _qualitative_audio_descriptors(profile, bpm_row)
+            if audio_meta:
+                meta["audio"] = audio_meta
     except sqlite3.OperationalError:
         pass  # audio_profile table may not exist
 
     return meta
+
+
+def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | None) -> dict:
+    """Convert raw audio-profile decimals into qualitative descriptors.
+
+    Returns a dict containing only fields whose values are *remarkable* — high
+    or low extremes get a label, unremarkable middles are omitted entirely so
+    the prompt has no number to quote. ``primary_genre`` is included only when
+    classifier confidence clears ``_GENRE_CONFIDENCE_THRESHOLD``; otherwise
+    omitted because a low-confidence guess just teaches the model wrong.
+
+    ``recording_count`` is kept as an integer (not a perceptual decimal) — the
+    model uses it as a confidence signal but it has no leak-as-prose problem.
+    """
+    desc: dict = {"recording_count": profile["recording_count"]}
+
+    genre = profile["primary_genre"]
+    genre_prob = profile["primary_genre_probability"]
+    if genre and genre_prob is not None and genre_prob > _GENRE_CONFIDENCE_THRESHOLD:
+        desc["primary_genre"] = f"clearly {genre}"
+
+    dance = profile["avg_danceability"]
+    if dance is not None:
+        if dance < _DANCEABILITY_LOW:
+            desc["danceability"] = "minimal pulse"
+        elif dance > _DANCEABILITY_HIGH:
+            desc["danceability"] = "highly danceable"
+        # else: unremarkable middle — omit so the model has no number to quote.
+
+    vi = profile["voice_instrumental_ratio"]
+    if vi is not None:
+        if vi < _VOICE_INSTRUMENTAL_INSTRUMENTAL:
+            desc["voice_instrumental"] = "instrumental"
+        elif vi > _VOICE_INSTRUMENTAL_VOCAL:
+            desc["voice_instrumental"] = "vocal-forward"
+        # else: ambiguous — omit.
+
+    centroid_raw = profile["feature_centroid"]
+    if centroid_raw:
+        centroid = json.loads(centroid_raw)
+        mood_labels = ["acoustic", "aggressive", "electronic", "happy", "party", "relaxed", "sad"]
+        mood_vector = centroid[9:16]
+        top_moods = sorted(
+            zip(mood_labels, mood_vector, strict=True), key=lambda x: x[1], reverse=True
+        )
+        moods = [m for m, v in top_moods[:3] if v > _MOOD_THRESHOLD]
+        if moods:
+            desc["top_moods"] = moods
+
+    if bpm_row:
+        bpm = bpm_row["avg_bpm"]
+        if bpm is not None:
+            if bpm < _BPM_SLOW:
+                desc["tempo"] = "slow"
+            elif bpm > _BPM_FAST:
+                desc["tempo"] = "fast"
+            # else: unremarkable — omit.
+        key = bpm_row["primary_key"]
+        if key:
+            desc["key"] = key
+
+    return desc
 
 
 def _lookup_dj_name(db: sqlite3.Connection, dj_id: int) -> str | None:
