@@ -13,7 +13,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.narrative import _rank_shared_neighbors_by_aa
+from semantic_index.api.narrative import (
+    _INSUFFICIENT_SIGNAL_NARRATIVE,
+    _SHARED_NEIGHBORS_TOP_K,
+    _rank_shared_neighbors_by_aa,
+)
 from semantic_index.facet_export import export_facet_tables
 from semantic_index.models import ArtistStats, PmiEdge, SharedPersonnelEdge, SharedStyleEdge
 from semantic_index.sqlite_export import export_sqlite
@@ -623,8 +627,13 @@ class TestAdamicAdarReranking:
         assert joe["aa_score"] == round(1.0 / math.log(2), 3)
         assert ylt["aa_score"] == round(1.0 / math.log(50), 3)
 
-    def test_top_k_caps_result(self) -> None:
-        """top_k=1 returns only the highest-scoring shared neighbor."""
+    def test_returns_full_list_uncapped(self) -> None:
+        """The function returns ALL shared neighbors — top-K capping is the caller's job.
+
+        Locks the contract: the threshold check needs the full sum to match true
+        pair AA, not a top-K underestimate. If a future refactor pushes capping
+        back inside this function, this test fails first.
+        """
         path = _build_aa_fixture_db()
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -633,13 +642,11 @@ class TestAdamicAdarReranking:
             for r in conn.execute("SELECT id, canonical_name FROM artist")
         }
 
-        result = _rank_shared_neighbors_by_aa(
-            conn, ids["Father John Misty"], ids["Caetano Veloso"], top_k=1
-        )
+        result = _rank_shared_neighbors_by_aa(conn, ids["Father John Misty"], ids["Caetano Veloso"])
         conn.close()
 
-        assert len(result) == 1
-        assert result[0]["name"] == "Joe McPhee"
+        # Fixture has exactly 2 shared neighbors (Joe McPhee, Yo La Tengo).
+        assert [r["name"] for r in result] == ["Joe McPhee", "Yo La Tengo"]
 
     def test_no_shared_neighbors_returns_empty(self) -> None:
         """Artists with no shared neighbors return an empty list."""
@@ -839,10 +846,7 @@ class TestAaThreshold:
         body = resp.json()
         assert body["insufficient_signal"] is True
         assert body["cached"] is False
-        assert (
-            "no consistent" in body["narrative"].lower()
-            or "occasionally" in body["narrative"].lower()
-        )
+        assert body["narrative"] == _INSUFFICIENT_SIGNAL_NARRATIVE
         assert mock_client.messages.create.call_count == 0, (
             "LLM should not be called below threshold"
         )
@@ -927,6 +931,83 @@ class TestAaThreshold:
         assert second.json()["cached"] is True
         assert second.json()["insufficient_signal"] is True
         assert mock_client.messages.create.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_threshold_uses_full_pair_aa_not_top_k_sum(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The threshold sums the full ranked list, not just the top-K surfaced.
+
+        Constructs a graph with 6 shared neighbors (one more than top-K=5),
+        each at degree 50 (AA contribution ~0.256). The top-K sum is ~1.28;
+        the full sum is ~1.535. With NARRATIVE_MIN_AA_SCORE=1.4, a buggy
+        implementation that summed only the surfaced top-K would short-circuit;
+        the correct implementation reaches the LLM.
+        """
+        # Sanity: top-K is 5, so we need >5 shared neighbors to exercise the gap.
+        assert _SHARED_NEIGHBORS_TOP_K == 5, "test designed around top-K = 5"
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE artist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT NOT NULL UNIQUE,
+                genre TEXT,
+                total_plays INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE dj_transition (
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                raw_count INTEGER NOT NULL,
+                pmi REAL NOT NULL,
+                PRIMARY KEY (source_id, target_id)
+            );
+            """
+        )
+        shared = [f"Shared {i}" for i in range(6)]
+        fillers = [f"Filler {i:02d}" for i in range(48)]
+        names = ["A", "B", *shared, *fillers]
+        conn.executemany("INSERT INTO artist (canonical_name) VALUES (?)", [(n,) for n in names])
+        ids = {r[0]: r[1] for r in conn.execute("SELECT canonical_name, id FROM artist").fetchall()}
+        edges: list[tuple[int, int]] = []
+        # Each shared neighbor connects to A, B, and all 48 fillers → degree 50.
+        for s in shared:
+            edges.append((ids["A"], ids[s]))
+            edges.append((ids["B"], ids[s]))
+            for f in fillers:
+                edges.append((ids[s], ids[f]))
+        conn.executemany(
+            "INSERT INTO dj_transition (source_id, target_id, raw_count, pmi) "
+            "VALUES (?, ?, 1, 1.0)",
+            edges,
+        )
+        conn.commit()
+        conn.close()
+
+        # Threshold is between top-5 (~1.28) and full-6 (~1.54).
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "1.4")
+        _clear_narrative_cache(path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ids['A']}/explain/{ids['B']}/narrative")
+
+        body = resp.json()
+        assert body["insufficient_signal"] is False, (
+            "threshold should sum all 6 shared neighbors, not just top-5"
+        )
+        assert mock_client.messages.create.call_count == 1
+        # Sanity: prompt was capped to top-K so the LLM input stays bounded.
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        prompt_data = json.loads(messages[0]["content"])
+        assert len(prompt_data["shared_neighbors"]) == _SHARED_NEIGHBORS_TOP_K
 
     @pytest.mark.asyncio
     async def test_invalid_threshold_falls_back_to_default(
