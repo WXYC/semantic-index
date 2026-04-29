@@ -1835,3 +1835,87 @@ class TestTokenMatchScorer:
         body = resp.json()
         assert body["low_grounding"] is True
         assert body["token_match_score"] > 0.0
+
+    @pytest.mark.asyncio
+    async def test_facet_month_name_counts_as_grounded(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+    ) -> None:
+        """A month-faceted narrative mentioning ``January`` shouldn't be penalized.
+
+        ``_build_prompt`` passes ``facet.month`` as the resolved name (``"January"``
+        for ``month=1``); the scorer must see the same so the model isn't
+        flagged for using the input data as instructed.
+        """
+        _clear_narrative_cache(narrative_db_path)
+        # Mock returns a narrative that says only allowlisted prose + the month name.
+        # If the scorer sees the facet, "January" is matched and the score is 0.
+        # If it doesn't, "January" is unmatched and the score is positive.
+        ungrounded_if_no_facet = "WXYC DJs pair these in January."
+        mock_client = _mock_anthropic_client(ungrounded_if_no_facet)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(
+                f"/graph/artists/{ae_id}/explain/{sl_id}/narrative", params={"month": 1}
+            )
+        body = resp.json()
+        # Source/target names from the fixture ("Autechre", "Stereolab") and
+        # "January" are all in the input the model received. The narrative
+        # uses none of those names — only "January" — so the score reflects
+        # whether the facet field is in the score input.
+        assert body["token_match_score"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_low_grounding_strict_above_threshold(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A score equal to the threshold is *not* low_grounding (issue: 'above 0.5').
+
+        The boundary convention is strict greater-than — at exactly the
+        threshold, narratives count as acceptable. Lock this so a future swap
+        to ``>=`` trips the test.
+        """
+        # Generate a narrative with a known score, then set the threshold to that
+        # exact value and assert low_grounding is False.
+        _clear_narrative_cache(narrative_db_path)
+        # Narrative with one unmatched content word out of two → score = 0.5.
+        # ("WXYC", "DJs", "play" are allowlist; "Stereolab" matches input;
+        # "Beethoven" doesn't.)
+        partial = "WXYC DJs play Stereolab and Beethoven."
+        mock_client = _mock_anthropic_client(partial)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+
+        # First call to populate score, threshold doesn't matter.
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        score = resp.json()["token_match_score"]
+        assert score == pytest.approx(0.5, abs=1e-6), (
+            f"test relies on a score of exactly 0.5; got {score}"
+        )
+
+        # Set threshold to the exact score value; expect low_grounding to be False
+        # because the convention is strict above.
+        monkeypatch.setenv("NARRATIVE_TOKEN_MATCH_THRESHOLD", str(score))
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp2 = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        body = resp2.json()
+        assert body["cached"] is True, "second call should hit the cache"
+        assert body["token_match_score"] == pytest.approx(score, abs=1e-6)
+        assert body["low_grounding"] is False, (
+            "score == threshold should NOT trigger low_grounding (convention is strict above)"
+        )

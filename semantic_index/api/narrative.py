@@ -775,7 +775,7 @@ def get_narrative(
                 token_match_score=cached_score,
                 # Threshold is read live so a deploy-time tuning change takes
                 # effect even on cached entries without invalidating them.
-                low_grounding=cached_score >= _token_match_threshold(),
+                low_grounding=cached_score > _token_match_threshold(),
             )
     finally:
         pass  # keep cache_db open for potential write below
@@ -788,7 +788,9 @@ def get_narrative(
     total_aa = sum(n["aa_score"] for n in all_shared_neighbors)
     if total_aa < _min_aa_score():
         # No real connection — skip the LLM, cache a deterministic placeholder
-        # so subsequent identical requests stay cheap.
+        # so subsequent identical requests stay cheap. token_match_score is
+        # left at the default 0.0 here: the canned narrative is grounded by
+        # construction (we wrote it), so we don't run the scorer on it.
         narrative = _INSUFFICIENT_SIGNAL_NARRATIVE
         _write_cache_entry(
             cache_db, lo, hi, cache_month, cache_dj, cache_edge_type, narrative, True
@@ -879,13 +881,20 @@ def get_narrative(
 
     # Score grounding against the post-anonymization-restored narrative AND the
     # un-anonymized input meta — the score reflects what the user sees vs the
-    # data we actually had, not the model's internal representation.
-    score_input = {
+    # data we actually had, not the model's internal representation. Facet
+    # context (resolved month name, DJ name) is included so a narrative that
+    # correctly mentions "January" or the DJ doesn't get penalized for using
+    # input the model was given.
+    score_input: dict = {
         "source": source_meta,
         "target": target_meta,
         "relationships": relationships,
         "shared_neighbors": shared_neighbors,
     }
+    if month is not None:
+        score_input["facet_month"] = MONTH_NAMES[month] if 1 <= month <= 12 else str(month)
+    if dj_name is not None:
+        score_input["facet_dj"] = dj_name
     token_score = _token_match_score(narrative, score_input)
 
     # Write to cache
@@ -910,5 +919,5 @@ def get_narrative(
         narrative=narrative,
         cached=False,
         token_match_score=token_score,
-        low_grounding=token_score >= _token_match_threshold(),
+        low_grounding=token_score > _token_match_threshold(),
     )
