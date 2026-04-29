@@ -1151,7 +1151,11 @@ class TestStylesCap:
 
 
 def _make_audio_row(**fields) -> sqlite3.Row:
-    """Build a sqlite3.Row stand-in for ``_qualitative_audio_descriptors`` tests."""
+    """Build a sqlite3.Row stand-in for ``_qualitative_audio_descriptors`` tests.
+
+    sqlite3.Row holds the column data after the connection closes, so it's
+    safe to close the connection before returning the row.
+    """
     defaults = {
         "avg_danceability": None,
         "primary_genre": None,
@@ -1162,12 +1166,29 @@ def _make_audio_row(**fields) -> sqlite3.Row:
     }
     defaults.update(fields)
     conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    cols = ", ".join(defaults.keys())
-    placeholders = ", ".join("?" * len(defaults))
-    conn.execute(f"CREATE TABLE t ({cols})")  # noqa: S608
-    conn.execute(f"INSERT INTO t VALUES ({placeholders})", tuple(defaults.values()))  # noqa: S608
-    return conn.execute("SELECT * FROM t").fetchone()
+    try:
+        conn.row_factory = sqlite3.Row
+        cols = ", ".join(defaults.keys())
+        placeholders = ", ".join("?" * len(defaults))
+        conn.execute(f"CREATE TABLE t ({cols})")  # noqa: S608
+        conn.execute(  # noqa: S608
+            f"INSERT INTO t VALUES ({placeholders})", tuple(defaults.values())
+        )
+        return conn.execute("SELECT * FROM t").fetchone()
+    finally:
+        conn.close()
+
+
+def _make_bpm_row(avg_bpm: float | None = None, primary_key: str | None = None) -> sqlite3.Row:
+    """Build a sqlite3.Row stand-in for the BPM/key fetch in the helper."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE t (avg_bpm REAL, primary_key TEXT)")
+        conn.execute("INSERT INTO t VALUES (?, ?)", (avg_bpm, primary_key))
+        return conn.execute("SELECT * FROM t").fetchone()
+    finally:
+        conn.close()
 
 
 class TestQualitativeAudioDescriptors:
@@ -1231,12 +1252,92 @@ class TestQualitativeAudioDescriptors:
         )
         assert "primary_genre" not in desc
 
-    def test_missing_audio_profile_returns_minimal(self) -> None:
-        """All-None inputs return only ``recording_count`` (a non-decimal count)."""
+    def test_only_recording_count_returns_empty(self) -> None:
+        """A bare recording_count with no remarkable fields suppresses the whole block.
+
+        A descriptor of ``{"recording_count": 3}`` alone tells the model there's
+        audio data without anchoring it to anything, so the caller drops the
+        ``audio`` field entirely.
+        """
         from semantic_index.api.narrative import _qualitative_audio_descriptors
 
         desc = _qualitative_audio_descriptors(_make_audio_row(recording_count=3), None)
-        assert desc == {"recording_count": 3}
+        assert desc == {}
+
+    def test_recording_count_kept_when_other_field_remarkable(self) -> None:
+        """When one remarkable field surfaces, recording_count rides along."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(avg_danceability=0.8, recording_count=3), None
+        )
+        assert desc["danceability"] == "highly danceable"
+        assert desc["recording_count"] == 3
+
+    def test_danceability_low_boundary_omitted(self) -> None:
+        """Exactly ``_DANCEABILITY_LOW`` (0.3) sits in the omit band — the cutoff is strict."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(avg_danceability=0.3), None)
+        assert "danceability" not in desc
+
+    def test_danceability_high_boundary_omitted(self) -> None:
+        """Exactly ``_DANCEABILITY_HIGH`` (0.6) sits in the omit band — the cutoff is strict."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(
+                avg_danceability=0.6, primary_genre="rock", primary_genre_probability=0.9
+            ),
+            None,
+        )
+        # Genre forces a non-empty descriptor so we can read it back.
+        assert "danceability" not in desc
+
+    def test_slow_tempo_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(avg_danceability=0.7),
+            _make_bpm_row(avg_bpm=70.0),
+        )
+        assert desc["tempo"] == "slow"
+
+    def test_fast_tempo_labeled(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(avg_danceability=0.7),
+            _make_bpm_row(avg_bpm=145.0),
+        )
+        assert desc["tempo"] == "fast"
+
+    def test_middle_tempo_omitted(self) -> None:
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(avg_danceability=0.7),
+            _make_bpm_row(avg_bpm=110.0),
+        )
+        assert "tempo" not in desc
+
+    def test_key_passes_through(self) -> None:
+        """Key is a string ('C major'), not a number — passes through unchanged."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(
+            _make_audio_row(avg_danceability=0.7),
+            _make_bpm_row(primary_key="C major"),
+        )
+        assert desc["key"] == "C major"
+
+    def test_missing_bpm_row_skips_tempo_and_key(self) -> None:
+        """A None bpm_row (older schema) cleanly omits tempo + key without erroring."""
+        from semantic_index.api.narrative import _qualitative_audio_descriptors
+
+        desc = _qualitative_audio_descriptors(_make_audio_row(avg_danceability=0.7), None)
+        assert "tempo" not in desc
+        assert "key" not in desc
 
     def test_no_raw_numbers_in_output(self) -> None:
         """No value in the descriptor dict (except recording_count) should be a float."""
