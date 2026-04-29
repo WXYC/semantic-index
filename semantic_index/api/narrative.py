@@ -21,9 +21,28 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 7
+_PROMPT_VERSION = 8
 
 _SHARED_NEIGHBORS_TOP_K = 5
+
+_DEFAULT_ANON_PLAY_THRESHOLD = 800
+
+
+def _anon_threshold() -> int:
+    """Read NARRATIVE_ANON_PLAY_THRESHOLD from env, falling back to default."""
+    raw = os.environ.get("NARRATIVE_ANON_PLAY_THRESHOLD")
+    if raw is None:
+        return _DEFAULT_ANON_PLAY_THRESHOLD
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid NARRATIVE_ANON_PLAY_THRESHOLD=%r; using default %d",
+            raw,
+            _DEFAULT_ANON_PLAY_THRESHOLD,
+        )
+        return _DEFAULT_ANON_PLAY_THRESHOLD
+
 
 # Long Discogs style lists invite hallucination — a model fed Outkast's 53
 # styles latches onto an outlier ("makina", "breakbeat") and describes a hip
@@ -439,6 +458,48 @@ def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | 
     return desc
 
 
+def _build_anonymization_map(source: dict, target: dict, threshold: int) -> dict[str, str]:
+    """Map artist names with ``total_plays > threshold`` to placeholder aliases.
+
+    The cutoff is strict ``>``: a name at exactly the threshold is *not*
+    anonymized. Source maps to ``Artist A``, target to ``Artist B``.
+    """
+    sub_map: dict[str, str] = {}
+    if source.get("total_plays", 0) > threshold:
+        sub_map[source["name"]] = "Artist A"
+    if target.get("total_plays", 0) > threshold:
+        sub_map[target["name"]] = "Artist B"
+    return sub_map
+
+
+def _apply_anonymization(meta: dict, sub_map: dict[str, str]) -> dict:
+    """Return a copy of ``meta`` with ``name`` swapped for its alias if mapped."""
+    if not sub_map:
+        return meta
+    out = dict(meta)
+    if out.get("name") in sub_map:
+        out["name"] = sub_map[out["name"]]
+    return out
+
+
+def _reverse_anonymization(narrative: str, sub_map: dict[str, str]) -> str:
+    """Substitute aliases in ``narrative`` back to their real names.
+
+    Uses word-boundary matching (``\\b``) so ``Tina`` doesn't match the ``tina``
+    inside ``Argentina``. Aliases are still expected to be deliberately
+    distinctive (``Artist A``, ``Neighbor 1``); the boundary is a safety net
+    for the rare alias that happens to be a real substring.
+    """
+    import re
+
+    if not sub_map:
+        return narrative
+    out = narrative
+    for real_name, alias in sub_map.items():
+        out = re.sub(rf"\b{re.escape(alias)}\b", real_name, out)
+    return out
+
+
 def _lookup_dj_name(db: sqlite3.Connection, dj_id: int) -> str | None:
     """Look up a DJ's display name from the dj table."""
     try:
@@ -606,9 +667,16 @@ def get_narrative(
     # Cap to top-K only for the prompt; threshold check above used the full sum.
     shared_neighbors = all_shared_neighbors[:_SHARED_NEIGHBORS_TOP_K]
 
+    # Anonymize >threshold-play artists so the model can't activate pretraining
+    # knowledge about famous names (#227). The map is empty when neither artist
+    # clears the threshold, in which case _apply_anonymization is a no-op.
+    sub_map = _build_anonymization_map(source_meta, target_meta, _anon_threshold())
+    prompt_source = _apply_anonymization(source_meta, sub_map)
+    prompt_target = _apply_anonymization(target_meta, sub_map)
+
     user_message = _build_prompt(
-        source_meta=source_meta,
-        target_meta=target_meta,
+        source_meta=prompt_source,
+        target_meta=prompt_target,
         relationships=relationships,
         shared_neighbors=shared_neighbors,
         month=month,
@@ -629,6 +697,10 @@ def get_narrative(
         logger.exception("Anthropic API call failed")
         cache_db.close()
         raise HTTPException(status_code=502, detail="Narrative generation failed") from None
+
+    # Restore real names in the output before caching/returning so the cache
+    # holds the user-facing text, not aliases.
+    narrative = _reverse_anonymization(narrative, sub_map)
 
     # Write to cache
     try:
