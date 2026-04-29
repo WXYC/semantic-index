@@ -103,12 +103,21 @@ class EntityArtists(BaseModel):
 
 
 class NarrativeResponse(BaseModel):
-    """Response for GET /graph/artists/{id}/explain/{target_id}/narrative."""
+    """Response for GET /graph/artists/{id}/explain/{target_id}/narrative.
+
+    ``insufficient_signal`` is ``True`` when the pair's total Adamic-Adar
+    contribution from shared neighbors falls below ``NARRATIVE_MIN_AA_SCORE``
+    (default 0.8). The endpoint short-circuits the LLM call and returns a
+    deterministic placeholder ``narrative`` for these pairs — DJs do play
+    them together, but with no consistent neighborhood context to narrate.
+    Clients can render these differently (muted card, hint, etc.).
+    """
 
     source: ArtistSummary
     target: ArtistSummary
     narrative: str
     cached: bool
+    insufficient_signal: bool = False
 
 
 class BioResponse(BaseModel):
