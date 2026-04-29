@@ -21,7 +21,7 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 5
+_PROMPT_VERSION = 6
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -97,7 +97,17 @@ _SYSTEM_PROMPT = (
     "Given structured data about the relationship between two artists in the station's play "
     "history, write 2-3 sentences (under 80 words) explaining their connection in plain "
     "English. Be specific — mention shared genres, personnel names, labels, or play patterns "
-    "from the data. Do not add information not present in the data."
+    "from the data. Do not add information not present in the data. "
+    "If the input includes a 'caveat' field naming an artist with limited metadata, "
+    "describe only the co-occurrence pattern (which DJs play these together, when, in which "
+    "neighborhood). Do NOT characterize the named artist's sound, genre, or style."
+)
+
+# Treat these as content-bearing-equivalent to None — placeholder values that
+# tempt the model to invent context just to fill the field. Comparison is
+# case-insensitive and trims whitespace.
+_PLACEHOLDER_VALUES = frozenset(
+    {"unknown", "various", "various artists", "v/a", "v.a.", "n/a", "none", ""}
 )
 
 _REQUIRED_CACHE_COLUMNS = {"edge_type", "prompt_version", "insufficient_signal"}
@@ -262,10 +272,18 @@ def _build_prompt(
     data: dict = {
         "source": source_meta,
         "target": target_meta,
-        "relationships": relationships,
     }
+    if relationships:
+        data["relationships"] = relationships
     if shared_neighbors:
         data["shared_neighbors"] = shared_neighbors
+
+    # Limited-metadata caveat: name the artist(s) so the system prompt's
+    # "describe only the co-occurrence pattern" instruction can target them
+    # specifically. Without this the model fills in genre/style invention.
+    limited = [m["name"] for m in (source_meta, target_meta) if _has_limited_metadata(m)]
+    if limited:
+        data["caveat"] = f"limited metadata for {', '.join(limited)}"
     if month is not None or dj_name is not None:
         facet: dict = {}
         if month is not None:
@@ -279,26 +297,41 @@ def _build_prompt(
     return json.dumps(data, separators=(",", ":"))
 
 
+def _is_placeholder(value: str | None) -> bool:
+    """Treat None and known placeholder strings ('Unknown', 'Various', etc.) as missing."""
+    if value is None:
+        return True
+    return value.strip().lower() in _PLACEHOLDER_VALUES
+
+
 def _lookup_artist_metadata(
     db: sqlite3.Connection, artist_id: int, artist_name: str, genre: str | None, total_plays: int
 ) -> dict:
-    """Build an artist metadata dict with genre, total_plays, Discogs styles, and audio profile."""
-    styles: list[str] = []
+    """Build an artist metadata dict, omitting empty/placeholder/unreliable fields.
+
+    Always emits ``name`` and ``total_plays``. Other fields appear only when
+    they have content-bearing values — empty lists, ``None``, and placeholder
+    strings ("Unknown", "Various", etc.) are dropped so the model has no empty
+    field to fill with invention.
+    """
+    meta: dict = {
+        "name": artist_name,
+        "total_plays": total_plays,
+    }
+
+    if not _is_placeholder(genre):
+        meta["genre"] = genre
+
     try:
         rows = db.execute(
             "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag LIMIT ?",
             (artist_id, _STYLES_TOP_N),
         ).fetchall()
-        styles = [r["style_tag"] for r in rows]
+        styles = [r["style_tag"] for r in rows if not _is_placeholder(r["style_tag"])]
+        if styles:
+            meta["styles"] = styles
     except sqlite3.OperationalError:
         pass  # artist_style table may not exist
-
-    meta: dict = {
-        "name": artist_name,
-        "genre": genre,
-        "total_plays": total_plays,
-        "styles": styles,
-    }
 
     # Audio profile: add qualitative descriptors when available
     try:
@@ -323,6 +356,15 @@ def _lookup_artist_metadata(
         pass  # audio_profile table may not exist
 
     return meta
+
+
+def _has_limited_metadata(meta: dict) -> bool:
+    """An artist is 'limited metadata' when only ``name`` and ``total_plays`` survived filtering.
+
+    Triggers the system-prompt branch that tells the model to describe only
+    the co-occurrence pattern, not the artist's sound.
+    """
+    return set(meta.keys()) <= {"name", "total_plays"}
 
 
 def _qualitative_audio_descriptors(profile: sqlite3.Row, bpm_row: sqlite3.Row | None) -> dict:

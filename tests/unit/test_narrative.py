@@ -427,10 +427,14 @@ class TestPromptContent:
         assert set(prompt_data["target"]["styles"]) == {"Post-Rock", "Krautrock"}
 
     @pytest.mark.asyncio
-    async def test_prompt_metadata_graceful_without_styles(
+    async def test_prompt_metadata_omits_empty_styles(
         self, client: AsyncClient, narrative_artist_ids: dict[str, int]
     ) -> None:
-        """Artists without style tags should have an empty styles list."""
+        """Artists with no style tags get the ``styles`` key omitted entirely.
+
+        Empty fields invite the model to invent — it doesn't conclude "this is
+        a data gap," it concludes "I should fill this." So drop the key.
+        """
         ae_id = narrative_artist_ids["Autechre"]
         cp_id = narrative_artist_ids["Cat Power"]
         resp = await client.get(f"/graph/artists/{ae_id}/explain/{cp_id}/narrative")
@@ -442,7 +446,7 @@ class TestPromptContent:
         prompt_data = json.loads(messages[0]["content"])
 
         assert prompt_data["target"]["name"] == "Cat Power"
-        assert prompt_data["target"]["styles"] == []
+        assert "styles" not in prompt_data["target"]
         assert prompt_data["target"]["total_plays"] == 20
 
 
@@ -1357,3 +1361,144 @@ class TestQualitativeAudioDescriptors:
             if key == "recording_count":
                 continue
             assert not isinstance(value, float), f"{key} leaks a raw float: {value!r}"
+
+
+class TestOmitEmptyAndPlaceholderFields:
+    """The ``Konono No 1`` failure mode: empty fields tempt the model to invent.
+
+    Verifies that empty lists, ``None``, and placeholder strings ("Unknown",
+    "Various", "Various Artists", "V/A", etc.) are stripped before the prompt
+    is built, and that the system prompt is told via a ``caveat`` field when
+    an artist has only ``name`` + ``total_plays`` after filtering.
+    """
+
+    def test_konono_empty_styles_drops_key(self) -> None:
+        """An artist with zero Discogs styles gets ``styles`` omitted from the prompt."""
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT, genre TEXT);
+            CREATE TABLE artist_style (artist_id INTEGER, style_tag TEXT,
+                                       PRIMARY KEY (artist_id, style_tag));
+            INSERT INTO artist (id, canonical_name, genre)
+                VALUES (1, 'Konono No 1', 'World');
+            """
+        )
+        meta = _lookup_artist_metadata(conn, 1, "Konono No 1", "World", 25)
+        conn.close()
+
+        assert "styles" not in meta, "empty styles should be omitted, not emitted as []"
+        assert meta["genre"] == "World"
+        assert meta["name"] == "Konono No 1"
+
+    def test_unknown_genre_dropped(self) -> None:
+        """Genre = 'Unknown' is a placeholder; treat as missing."""
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            "CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT);"
+            "CREATE TABLE artist_style (artist_id INTEGER, style_tag TEXT,"
+            " PRIMARY KEY (artist_id, style_tag));"
+            "INSERT INTO artist (id, canonical_name) VALUES (1, 'Test');"
+        )
+        meta = _lookup_artist_metadata(conn, 1, "Test", "Unknown", 5)
+        conn.close()
+
+        assert "genre" not in meta
+
+    def test_various_artists_genre_dropped(self) -> None:
+        """Genre = 'Various Artists' is a compilation indicator, not a real genre."""
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            "CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT);"
+            "CREATE TABLE artist_style (artist_id INTEGER, style_tag TEXT,"
+            " PRIMARY KEY (artist_id, style_tag));"
+            "INSERT INTO artist (id, canonical_name) VALUES (1, 'Test');"
+        )
+        for placeholder in ("Various Artists", "Various", "V/A", "v.a.", "  unknown "):
+            meta = _lookup_artist_metadata(conn, 1, "Test", placeholder, 5)
+            assert "genre" not in meta, f"placeholder {placeholder!r} should be dropped"
+        conn.close()
+
+    def test_placeholder_styles_filtered_out(self) -> None:
+        """Individual placeholder style tags drop out of the styles list."""
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            "CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT);"
+            "CREATE TABLE artist_style (artist_id INTEGER, style_tag TEXT,"
+            " PRIMARY KEY (artist_id, style_tag));"
+            "INSERT INTO artist (id, canonical_name) VALUES (1, 'Test');"
+            "INSERT INTO artist_style VALUES (1, 'Folk'), (1, 'Unknown'),"
+            " (1, 'Rock'), (1, 'N/A');"
+        )
+        meta = _lookup_artist_metadata(conn, 1, "Test", None, 5)
+        conn.close()
+
+        assert meta["styles"] == ["Folk", "Rock"]
+
+    def test_empty_relationships_omitted_from_prompt(self) -> None:
+        """An empty ``relationships`` list is dropped — no key in the prompt JSON."""
+        from semantic_index.api.narrative import _build_prompt
+
+        prompt = _build_prompt(
+            source_meta={"name": "A", "total_plays": 10, "genre": "Rock"},
+            target_meta={"name": "B", "total_plays": 8, "genre": "Jazz"},
+            relationships=[],
+        )
+        data = json.loads(prompt)
+        assert "relationships" not in data
+
+    def test_limited_metadata_sets_caveat(self) -> None:
+        """Artist with only name + total_plays after filtering triggers the caveat."""
+        from semantic_index.api.narrative import _build_prompt
+
+        prompt = _build_prompt(
+            source_meta={"name": "Konono No 1", "total_plays": 25},
+            target_meta={"name": "Stereolab", "total_plays": 30, "genre": "Rock"},
+            relationships=[{"type": "djTransition", "raw_count": 3, "pmi": 2.1}],
+        )
+        data = json.loads(prompt)
+        assert "caveat" in data
+        assert "Konono No 1" in data["caveat"]
+        assert "Stereolab" not in data["caveat"]
+
+    def test_no_caveat_when_both_artists_rich(self) -> None:
+        """Both artists with content fields → no caveat in the prompt."""
+        from semantic_index.api.narrative import _build_prompt
+
+        prompt = _build_prompt(
+            source_meta={"name": "A", "total_plays": 10, "genre": "Rock"},
+            target_meta={"name": "B", "total_plays": 8, "styles": ["Jazz"]},
+            relationships=[{"type": "djTransition", "raw_count": 3, "pmi": 2.1}],
+        )
+        data = json.loads(prompt)
+        assert "caveat" not in data
+
+    def test_caveat_lists_both_when_both_limited(self) -> None:
+        """Both artists thin → caveat names both."""
+        from semantic_index.api.narrative import _build_prompt
+
+        prompt = _build_prompt(
+            source_meta={"name": "Konono No 1", "total_plays": 25},
+            target_meta={"name": "Pastor T.L. Barrett", "total_plays": 12},
+            relationships=[],
+        )
+        data = json.loads(prompt)
+        assert "caveat" in data
+        assert "Konono No 1" in data["caveat"]
+        assert "Pastor T.L. Barrett" in data["caveat"]
