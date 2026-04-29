@@ -16,6 +16,7 @@ from semantic_index.api.app import create_app
 from semantic_index.api.narrative import (
     _INSUFFICIENT_SIGNAL_NARRATIVE,
     _SHARED_NEIGHBORS_TOP_K,
+    _STYLES_TOP_N,
     _rank_shared_neighbors_by_aa,
 )
 from semantic_index.facet_export import export_facet_tables
@@ -1033,3 +1034,105 @@ class TestAaThreshold:
         # Default 0.8 should have applied; below-threshold pair short-circuits.
         assert resp.json()["insufficient_signal"] is True
         assert mock_client.messages.create.call_count == 0
+
+
+class TestStylesCap:
+    def test_long_style_list_capped_in_metadata(self) -> None:
+        """An artist with 10 styles surfaces only ``_STYLES_TOP_N`` in the prompt metadata.
+
+        Prevents the Outkast/Destroyer hallucination mode where the model latches
+        onto a minor-release outlier ("makina", "breakbeat") and describes a hip
+        hop or indie-rock artist as channeling it.
+
+        Uses an isolated fixture and calls ``_lookup_artist_metadata`` directly
+        so the test doesn't mutate the shared module-scoped narrative fixture.
+        """
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE artist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT NOT NULL UNIQUE,
+                genre TEXT,
+                total_plays INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE artist_style (
+                artist_id INTEGER NOT NULL,
+                style_tag TEXT NOT NULL,
+                PRIMARY KEY (artist_id, style_tag)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO artist (canonical_name, genre, total_plays) VALUES (?, ?, ?)",
+            ("Outkast", "Hip Hop", 200),
+        )
+        artist_id = conn.execute("SELECT id FROM artist").fetchone()["id"]
+
+        # 10 styles, deliberately not in alphabetical order so the SQL ORDER BY
+        # is exercised. Alphabetical top-5 = ['Crunk', 'Dirty South', 'Funk',
+        # 'Hip Hop', 'P.Funk'].
+        ten_styles = [
+            "Hip Hop",
+            "Soul",
+            "P.Funk",
+            "Crunk",
+            "Funk",
+            "Trip Hop",
+            "Rap",
+            "RnB",
+            "Reggae",
+            "Dirty South",
+        ]
+        conn.executemany(
+            "INSERT INTO artist_style (artist_id, style_tag) VALUES (?, ?)",
+            [(artist_id, s) for s in ten_styles],
+        )
+        conn.commit()
+
+        meta = _lookup_artist_metadata(conn, artist_id, "Outkast", "Hip Hop", 200)
+        conn.close()
+
+        assert len(meta["styles"]) == _STYLES_TOP_N, (
+            f"10 styles should be capped at {_STYLES_TOP_N}; got {len(meta['styles'])}"
+        )
+        assert meta["styles"] == sorted(ten_styles)[:_STYLES_TOP_N]
+
+    def test_short_style_list_unaffected(self) -> None:
+        """An artist with fewer than ``_STYLES_TOP_N`` styles passes them all."""
+        from semantic_index.api.narrative import _lookup_artist_metadata
+
+        path = tempfile.mktemp(suffix=".db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE artist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT NOT NULL UNIQUE,
+                genre TEXT,
+                total_plays INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE artist_style (
+                artist_id INTEGER NOT NULL,
+                style_tag TEXT NOT NULL,
+                PRIMARY KEY (artist_id, style_tag)
+            );
+            """
+        )
+        conn.execute("INSERT INTO artist (canonical_name) VALUES ('Stereolab')")
+        artist_id = conn.execute("SELECT id FROM artist").fetchone()["id"]
+        conn.executemany(
+            "INSERT INTO artist_style (artist_id, style_tag) VALUES (?, ?)",
+            [(artist_id, s) for s in ("Krautrock", "Post-Rock", "Indie")],
+        )
+        conn.commit()
+
+        meta = _lookup_artist_metadata(conn, artist_id, "Stereolab", None, 0)
+        conn.close()
+
+        assert meta["styles"] == ["Indie", "Krautrock", "Post-Rock"]
