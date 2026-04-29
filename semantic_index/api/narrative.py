@@ -21,7 +21,7 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 8
+_PROMPT_VERSION = 9
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -122,6 +122,28 @@ _SYSTEM_PROMPT = (
     "If the input includes a 'caveat' field naming an artist with limited metadata, "
     "describe only the co-occurrence pattern (which DJs play these together, when, in which "
     "neighborhood). Do NOT characterize the named artist's sound, genre, or style."
+    "\n\n"
+    "Two examples of grounded narratives. Match this structure and tone — stay close to "
+    "what's in the input, do not reach for extra context.\n\n"
+    "<example_rich>\n"
+    'Input: {"source": {"name": "Stereolab", "genre": "Rock", "styles": '
+    '["Indie Rock", "Post-Rock"], "total_plays": 412}, "target": {"name": "Yo La Tengo", '
+    '"genre": "Rock", "styles": ["Indie Rock", "Indie Pop"], "total_plays": 524}, '
+    '"relationships": [{"type": "djTransition", "raw_count": 8, "pmi": 3.5}, '
+    '{"type": "sharedStyle", "shared_tags": ["Indie Rock"], "jaccard": 0.5}], '
+    '"shared_neighbors": [{"name": "Tortoise"}, {"name": "Lambchop"}]}\n'
+    "Narrative: WXYC DJs pair Stereolab with Yo La Tengo across 8 transitions in our "
+    "flowsheets. Both share the Indie Rock tag, and Tortoise and Lambchop appear as "
+    "common neighbors.\n"
+    "</example_rich>\n\n"
+    "<example_thin>\n"
+    'Input: {"source": {"name": "Pastor T.L. Barrett", "total_plays": 18}, '
+    '"target": {"name": "Konono No 1", "total_plays": 25}, "relationships": '
+    '[{"type": "djTransition", "raw_count": 3, "pmi": 1.8}], '
+    '"caveat": "limited metadata for Pastor T.L. Barrett, Konono No 1"}\n'
+    "Narrative: WXYC DJs place Pastor T.L. Barrett next to Konono No 1 in 3 transitions "
+    "across our flowsheets, an uncommon pairing in the station's library.\n"
+    "</example_thin>"
 )
 
 # Treat these as content-bearing-equivalent to None — placeholder values that
