@@ -1533,3 +1533,128 @@ class TestNamingOnlyInstruction:
             "When naming shared neighbors, state ONLY their names. "
             "Do not describe, characterize, or categorize the neighbors in any way."
         ) in system_prompt
+
+
+class TestAnonymization:
+    """Anonymize >threshold-play artist names before generation, restore after (#227)."""
+
+    def test_no_anonymization_below_threshold(self) -> None:
+        """Both artists under the threshold → empty substitution map."""
+        from semantic_index.api.narrative import _build_anonymization_map
+
+        source = {"name": "Niche A", "total_plays": 50}
+        target = {"name": "Niche B", "total_plays": 100}
+        sub_map = _build_anonymization_map(source, target, threshold=800)
+        assert sub_map == {}
+
+    def test_high_fame_source_mapped_to_artist_a(self) -> None:
+        from semantic_index.api.narrative import _build_anonymization_map
+
+        source = {"name": "Bob Dylan", "total_plays": 1500}
+        target = {"name": "Niche Folk", "total_plays": 80}
+        sub_map = _build_anonymization_map(source, target, threshold=800)
+        assert sub_map == {"Bob Dylan": "Artist A"}
+
+    def test_high_fame_target_mapped_to_artist_b(self) -> None:
+        from semantic_index.api.narrative import _build_anonymization_map
+
+        source = {"name": "Niche Folk", "total_plays": 80}
+        target = {"name": "Joni Mitchell", "total_plays": 1200}
+        sub_map = _build_anonymization_map(source, target, threshold=800)
+        assert sub_map == {"Joni Mitchell": "Artist B"}
+
+    def test_both_high_fame(self) -> None:
+        from semantic_index.api.narrative import _build_anonymization_map
+
+        source = {"name": "Bob Dylan", "total_plays": 1500}
+        target = {"name": "Joan Baez", "total_plays": 950}
+        sub_map = _build_anonymization_map(source, target, threshold=800)
+        assert sub_map == {"Bob Dylan": "Artist A", "Joan Baez": "Artist B"}
+
+    def test_threshold_is_strict_greater(self) -> None:
+        """Exactly at threshold → not anonymized. The cutoff is strict ``>``."""
+        from semantic_index.api.narrative import _build_anonymization_map
+
+        source = {"name": "Edge Case", "total_plays": 800}
+        target = {"name": "Niche", "total_plays": 50}
+        sub_map = _build_anonymization_map(source, target, threshold=800)
+        assert sub_map == {}
+
+    def test_apply_substitution_replaces_name_in_meta_dict(self) -> None:
+        """Apply the sub map to an artist meta dict — name field gets the alias."""
+        from semantic_index.api.narrative import _apply_anonymization
+
+        meta = {"name": "Bob Dylan", "total_plays": 1500, "genre": "Folk"}
+        sub_map = {"Bob Dylan": "Artist A"}
+        out = _apply_anonymization(meta, sub_map)
+        assert out["name"] == "Artist A"
+        # Other fields untouched.
+        assert out["genre"] == "Folk"
+        assert out["total_plays"] == 1500
+
+    def test_apply_substitution_no_op_when_name_not_in_map(self) -> None:
+        from semantic_index.api.narrative import _apply_anonymization
+
+        meta = {"name": "Niche", "total_plays": 50}
+        out = _apply_anonymization(meta, {"Bob Dylan": "Artist A"})
+        assert out["name"] == "Niche"
+
+    def test_reverse_anonymization_restores_real_names(self) -> None:
+        """``Artist A`` in the model output gets swapped back to the real name."""
+        from semantic_index.api.narrative import _reverse_anonymization
+
+        sub_map = {"Bob Dylan": "Artist A", "Joan Baez": "Artist B"}
+        narrative = "WXYC DJs pair Artist A with Artist B in 12 transitions."
+        out = _reverse_anonymization(narrative, sub_map)
+        assert out == "WXYC DJs pair Bob Dylan with Joan Baez in 12 transitions."
+
+    def test_reverse_anonymization_uses_word_boundaries(self) -> None:
+        """Don't substitute ``Tina`` inside ``Argentina`` — issue's stated robustness criterion."""
+        from semantic_index.api.narrative import _reverse_anonymization
+
+        # Place an alias that's a substring of an unrelated word in the narrative.
+        sub_map = {"Tina Turner": "Tina"}
+        narrative = "Argentina's tradition pairs Tina with the local scene."
+        out = _reverse_anonymization(narrative, sub_map)
+        # The standalone "Tina" gets restored; the "tina" inside "Argentina" doesn't.
+        assert out == "Argentina's tradition pairs Tina Turner with the local scene."
+
+    @pytest.mark.asyncio
+    async def test_high_fame_pair_anonymized_in_prompt_and_restored_in_response(
+        self,
+        narrative_db_path: str,
+        narrative_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: high-fame source has its name anonymized in the LLM prompt,
+        and the LLM's response (which references ``Artist A``) gets the real name
+        substituted back before being returned and cached."""
+        # Force Autechre into the high-fame band for this test.
+        monkeypatch.setenv("NARRATIVE_ANON_PLAY_THRESHOLD", "10")
+        _clear_narrative_cache(narrative_db_path)
+
+        # Mock returns the canned alias-shaped response.
+        anon_response = "WXYC DJs pair Artist A with Stereolab across many transitions."
+        mock_client = _mock_anthropic_client(anon_response)
+        app = create_app(narrative_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        ae_id = narrative_artist_ids["Autechre"]  # 50 plays in fixture
+        sl_id = narrative_artist_ids["Stereolab"]  # 30 plays in fixture
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        # The prompt sent to the mock contains the alias, not the real name.
+        last_call = mock_client.messages.create.call_args
+        messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+        sent_prompt = messages[0]["content"]
+        assert "Artist A" in sent_prompt
+        assert "Autechre" not in sent_prompt, "real high-fame name leaked into the prompt"
+
+        # The response we return has the real name back.
+        body = resp.json()
+        assert "Autechre" in body["narrative"]
+        assert "Artist A" not in body["narrative"]
