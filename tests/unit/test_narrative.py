@@ -1502,3 +1502,34 @@ class TestOmitEmptyAndPlaceholderFields:
         assert "caveat" in data
         assert "Konono No 1" in data["caveat"]
         assert "Pastor T.L. Barrett" in data["caveat"]
+
+
+class TestNamingOnlyInstruction:
+    """The matrix experiment's biggest single lever: 45% → 20% hallucination.
+
+    Adding "When naming shared neighbors, state ONLY their names" to the
+    system prompt cut neighbor-characterization hallucination dramatically
+    (the model inventing adjectives like "folk innovators like Astor Piazzolla"
+    or "introspective indie voices like Jamila Woods" for shared neighbors).
+    """
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_includes_naming_only_instruction(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """The Anthropic call's ``system=`` argument carries the naming-only sentence."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        system_prompt = last_call.kwargs.get("system") or last_call[1].get("system", "")
+
+        # Lock the exact instruction so a future edit that softens or drops it
+        # trips the test.
+        assert (
+            "When naming shared neighbors, state ONLY their names. "
+            "Do not describe, characterize, or categorize the neighbors in any way."
+        ) in system_prompt
