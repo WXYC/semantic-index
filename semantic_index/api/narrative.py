@@ -21,9 +21,18 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 3
+_PROMPT_VERSION = 4
 
 _SHARED_NEIGHBORS_TOP_K = 5
+
+# Long Discogs style lists invite hallucination — a model fed Outkast's 53
+# styles latches onto an outlier ("makina", "breakbeat") and describes a hip
+# hop group as channeling it. Cap to the most prominent N. Ordering is
+# alphabetical for now because the upstream ``artist_style`` table doesn't
+# persist a release_count column; proper "top N by release count" ranking is a
+# pipeline-side follow-up. Even alphabetical-top-N drops the bulk of garbage —
+# 53 entries → 5.
+_STYLES_TOP_N = 5
 
 # Minimum total Adamic-Adar contribution across surfaced shared neighbors for a
 # pair to be worth narrating. Pairs below this floor share only generic hubs
@@ -263,8 +272,8 @@ def _lookup_artist_metadata(
     styles: list[str] = []
     try:
         rows = db.execute(
-            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag",
-            (artist_id,),
+            "SELECT style_tag FROM artist_style WHERE artist_id = ? ORDER BY style_tag LIMIT ?",
+            (artist_id, _STYLES_TOP_N),
         ).fetchall()
         styles = [r["style_tag"] for r in rows]
     except sqlite3.OperationalError:
