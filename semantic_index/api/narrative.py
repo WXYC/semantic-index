@@ -152,20 +152,18 @@ def _rank_shared_neighbors_by_aa(
     db: sqlite3.Connection,
     source_id: int,
     target_id: int,
-    top_k: int = _SHARED_NEIGHBORS_TOP_K,
 ) -> list[dict]:
-    """Rank the shared ``dj_transition`` neighbors of two artists by AA contribution.
+    """Rank ALL shared ``dj_transition`` neighbors of two artists by AA contribution.
 
     Each returned neighbor's score is its Adamic-Adar *contribution* —
     ``1 / log(degree)``, where ``degree`` is its number of distinct
     ``dj_transition`` partners. Note this is the per-neighbor term, not the
     full Adamic-Adar similarity of the source/target *pair* (which would be
-    the sum of these terms over all shared neighbors). Sorting neighbors by
-    their AA contribution surfaces informative mid-degree connections over
-    generic high-degree hubs, which is what the prompt wants.
+    the sum of these terms over all shared neighbors).
 
-    Returns a list of ``{name, degree, aa_score}`` dicts sorted descending by
-    ``aa_score``, capped at ``top_k``.
+    Returns the full ranked list — *no* top-K cap applied here. Callers slice
+    for the prompt; the AA-score threshold (#220) sums the full list so it
+    matches the true pair AA, not a top-K underestimate.
     """
     rows = db.execute(
         """
@@ -205,7 +203,7 @@ def _rank_shared_neighbors_by_aa(
             }
         )
     scored.sort(key=lambda x: x["aa_score"], reverse=True)
-    return scored[:top_k]
+    return scored
 
 
 def _get_anthropic_client(request: Request):
@@ -438,9 +436,11 @@ def get_narrative(
         pass  # keep cache_db open for potential write below
 
     # AA-ranked shared neighbors are computed up-front because the threshold
-    # check below can short-circuit the LLM call entirely.
-    shared_neighbors = _rank_shared_neighbors_by_aa(db, source_id, target_id)
-    total_aa = sum(n["aa_score"] for n in shared_neighbors)
+    # check below can short-circuit the LLM call entirely. The full ranked
+    # list is summed for the threshold (so it matches true pair AA), then
+    # sliced to top-K for the prompt to keep the LLM input bounded.
+    all_shared_neighbors = _rank_shared_neighbors_by_aa(db, source_id, target_id)
+    total_aa = sum(n["aa_score"] for n in all_shared_neighbors)
     if total_aa < _min_aa_score():
         # No real connection — skip the LLM, cache a deterministic placeholder
         # so subsequent identical requests stay cheap.
@@ -493,6 +493,9 @@ def get_narrative(
     # Facet context
     dj_name = _lookup_dj_name(db, dj_id) if dj_id else None
     faceted_count = _compute_faceted_pair_count(db, source_id, target_id, month, dj_id)
+
+    # Cap to top-K only for the prompt; threshold check above used the full sum.
+    shared_neighbors = all_shared_neighbors[:_SHARED_NEIGHBORS_TOP_K]
 
     user_message = _build_prompt(
         source_meta=source_meta,
