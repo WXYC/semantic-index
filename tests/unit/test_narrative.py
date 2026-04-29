@@ -1658,3 +1658,73 @@ class TestAnonymization:
         body = resp.json()
         assert "Autechre" in body["narrative"]
         assert "Artist A" not in body["narrative"]
+
+
+class TestFewShotExamples:
+    """Two gold-standard narratives in the system prompt — the matrix experiment's
+    second-largest lever (45% → 21% baseline-wide; 7% on HIGH+RICH+SAME).
+
+    Few-shot demonstrates what a grounded output looks like more reliably than
+    negative instructions alone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_includes_both_examples(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Both rich-data and thin-data examples appear in the system prompt."""
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        system_prompt = last_call.kwargs.get("system") or last_call[1].get("system", "")
+
+        assert "<example_rich>" in system_prompt
+        assert "</example_rich>" in system_prompt
+        assert "<example_thin>" in system_prompt
+        assert "</example_thin>" in system_prompt
+
+        # Both example narratives are present verbatim — guards against accidental
+        # truncation or whitespace mangling in future edits.
+        assert "Stereolab" in system_prompt
+        assert "Yo La Tengo" in system_prompt
+        assert "Tortoise" in system_prompt
+        assert "Pastor T.L. Barrett" in system_prompt
+        assert "Konono No 1" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_examples_avoid_banned_phrasings(
+        self, client: AsyncClient, narrative_artist_ids: dict[str, int]
+    ) -> None:
+        """Few-shot must not teach the model the failure-mode phrasings.
+
+        ``occupy`` / ``reach for`` / ``represent`` are flagged as banned in
+        plan §4 — symptomatic of the inventing-context failure mode. Examples
+        that contain them would teach the model to produce them too.
+        """
+        import re
+
+        ae_id = narrative_artist_ids["Autechre"]
+        sl_id = narrative_artist_ids["Stereolab"]
+        resp = await client.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
+        assert resp.status_code == 200
+
+        mock_client = client._transport.app.state.anthropic_client  # type: ignore[union-attr]
+        last_call = mock_client.messages.create.call_args
+        system_prompt = last_call.kwargs.get("system") or last_call[1].get("system", "")
+
+        # Extract just the example narratives so we don't false-trigger on
+        # instruction text that legitimately uses words like "characterize".
+        examples_text = "\n".join(
+            re.findall(r"<example_\w+>(.*?)</example_\w+>", system_prompt, re.DOTALL)
+        )
+        assert examples_text, "examples should be extractable from system prompt"
+
+        for banned in ("occupy", "reach for", "represent"):
+            assert banned.lower() not in examples_text.lower(), (
+                f"banned phrasing {banned!r} found in few-shot examples — "
+                f"would teach the model the failure-mode phrasing"
+            )
