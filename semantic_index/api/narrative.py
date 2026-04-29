@@ -21,7 +21,7 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 6
+_PROMPT_VERSION = 7
 
 _SHARED_NEIGHBORS_TOP_K = 5
 
@@ -98,6 +98,8 @@ _SYSTEM_PROMPT = (
     "history, write 2-3 sentences (under 80 words) explaining their connection in plain "
     "English. Be specific — mention shared genres, personnel names, labels, or play patterns "
     "from the data. Do not add information not present in the data. "
+    "When naming shared neighbors, state ONLY their names. Do not describe, characterize, "
+    "or categorize the neighbors in any way. "
     "If the input includes a 'caveat' field naming an artist with limited metadata, "
     "describe only the co-occurrence pattern (which DJs play these together, when, in which "
     "neighborhood). Do NOT characterize the named artist's sound, genre, or style."
