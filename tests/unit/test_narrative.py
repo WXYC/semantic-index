@@ -172,6 +172,18 @@ def _clear_narrative_cache(db_path: str) -> None:
             pass
 
 
+@pytest.fixture(autouse=True)
+def _disable_aa_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the AA-score threshold for default narrative tests.
+
+    The shared fixture only has two adjacency pairs and no shared neighbors,
+    so every pair would otherwise short-circuit on ``insufficient_signal`` and
+    skip the mock LLM. Tests in ``TestAaThreshold`` re-set the env var to
+    exercise the threshold logic explicitly.
+    """
+    monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0")
+
+
 @pytest_asyncio.fixture
 async def client(narrative_db_path: str) -> AsyncClient:
     _clear_narrative_cache(narrative_db_path)
@@ -711,3 +723,232 @@ class TestPromptVersionEviction:
             # And the new version becomes the warm cache.
             resp_warm = await ac.get(f"/graph/artists/{ae_id}/explain/{sl_id}/narrative")
             assert resp_warm.json()["cached"] is True
+
+
+def _build_aa_threshold_fixture_db() -> str:
+    """Build a graph with one above-threshold pair and one below-threshold pair.
+
+    - Above: ``A_above`` and ``B_above`` share two degree-2 neighbors
+      (``Niche 1``, ``Niche 2``). Each contributes ~1.44 → total ~2.88, above
+      the 0.8 default.
+    - Below: ``A_below`` and ``B_below`` share one degree-50 neighbor
+      (``Mega Hub``) plus 49 disjoint fillers. Total ~0.26, below the floor.
+    """
+    path = tempfile.mktemp(suffix=".db")
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE artist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_name TEXT NOT NULL UNIQUE,
+            genre TEXT,
+            total_plays INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE dj_transition (
+            source_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL,
+            raw_count INTEGER NOT NULL,
+            pmi REAL NOT NULL,
+            PRIMARY KEY (source_id, target_id)
+        );
+        """
+    )
+
+    fillers = [f"Mega Filler {i:02d}" for i in range(49)]
+    names = [
+        "Aldous Harding",  # A_above
+        "Cate Le Bon",  # B_above
+        "Beverly Glenn-Copeland",  # niche 1 (deg 2)
+        "Hermanos Gutiérrez",  # niche 2 (deg 2)
+        "Frank Sinatra",  # A_below
+        "Sun Ra",  # B_below
+        "Mega Hub",  # deg 50 shared neighbor
+        *fillers,
+    ]
+    conn.executemany(
+        "INSERT INTO artist (canonical_name) VALUES (?)",
+        [(n,) for n in names],
+    )
+
+    name_to_id = {
+        r[1]: r[0] for r in conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    }
+
+    edges = [
+        # Above-threshold pair shares two niche neighbors.
+        (name_to_id["Aldous Harding"], name_to_id["Beverly Glenn-Copeland"]),
+        (name_to_id["Cate Le Bon"], name_to_id["Beverly Glenn-Copeland"]),
+        (name_to_id["Aldous Harding"], name_to_id["Hermanos Gutiérrez"]),
+        (name_to_id["Cate Le Bon"], name_to_id["Hermanos Gutiérrez"]),
+        # Below-threshold pair shares only a high-degree hub.
+        (name_to_id["Frank Sinatra"], name_to_id["Mega Hub"]),
+        (name_to_id["Sun Ra"], name_to_id["Mega Hub"]),
+    ]
+    # Pump Mega Hub up to degree 50 with 49 disjoint fillers.
+    for filler in fillers:
+        edges.append((name_to_id["Mega Hub"], name_to_id[filler]))
+    conn.executemany(
+        "INSERT INTO dj_transition (source_id, target_id, raw_count, pmi) VALUES (?, ?, 1, 1.0)",
+        edges,
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.fixture(scope="module")
+def threshold_db_path() -> str:
+    return _build_aa_threshold_fixture_db()
+
+
+@pytest.fixture(scope="module")
+def threshold_artist_ids(threshold_db_path: str) -> dict[str, int]:
+    conn = sqlite3.connect(threshold_db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT id, canonical_name FROM artist").fetchall()
+    conn.close()
+    return {r["canonical_name"]: r["id"] for r in rows}
+
+
+class TestAaThreshold:
+    @pytest.mark.asyncio
+    async def test_below_threshold_short_circuits_llm(
+        self,
+        threshold_db_path: str,
+        threshold_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pair whose total AA falls below the floor returns the canned narrative.
+
+        The LLM client is set on the app but should never be called.
+        """
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0.8")
+        _clear_narrative_cache(threshold_db_path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(threshold_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        sinatra = threshold_artist_ids["Frank Sinatra"]
+        sun_ra = threshold_artist_ids["Sun Ra"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{sinatra}/explain/{sun_ra}/narrative")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["insufficient_signal"] is True
+        assert body["cached"] is False
+        assert (
+            "no consistent" in body["narrative"].lower()
+            or "occasionally" in body["narrative"].lower()
+        )
+        assert mock_client.messages.create.call_count == 0, (
+            "LLM should not be called below threshold"
+        )
+
+    @pytest.mark.asyncio
+    async def test_above_threshold_calls_llm(
+        self,
+        threshold_db_path: str,
+        threshold_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pair whose total AA clears the floor reaches the LLM normally."""
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0.8")
+        _clear_narrative_cache(threshold_db_path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(threshold_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        aldous = threshold_artist_ids["Aldous Harding"]
+        cate = threshold_artist_ids["Cate Le Bon"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{aldous}/explain/{cate}/narrative")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["insufficient_signal"] is False
+        assert body["narrative"] == MOCK_NARRATIVE
+        assert mock_client.messages.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_threshold_env_var_overrides_default(
+        self,
+        threshold_db_path: str,
+        threshold_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lowering ``NARRATIVE_MIN_AA_SCORE`` lifts the below-default pair above the floor."""
+        # Drop the threshold so the previously-below pair clears it.
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0.1")
+        _clear_narrative_cache(threshold_db_path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(threshold_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        sinatra = threshold_artist_ids["Frank Sinatra"]
+        sun_ra = threshold_artist_ids["Sun Ra"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{sinatra}/explain/{sun_ra}/narrative")
+
+        body = resp.json()
+        assert body["insufficient_signal"] is False
+        assert mock_client.messages.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_response_is_cached(
+        self,
+        threshold_db_path: str,
+        threshold_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A below-threshold response is cached so repeat requests stay cheap."""
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "0.8")
+        _clear_narrative_cache(threshold_db_path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(threshold_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        sinatra = threshold_artist_ids["Frank Sinatra"]
+        sun_ra = threshold_artist_ids["Sun Ra"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            first = await ac.get(f"/graph/artists/{sinatra}/explain/{sun_ra}/narrative")
+            second = await ac.get(f"/graph/artists/{sinatra}/explain/{sun_ra}/narrative")
+
+        assert first.json()["cached"] is False
+        assert first.json()["insufficient_signal"] is True
+        assert second.json()["cached"] is True
+        assert second.json()["insufficient_signal"] is True
+        assert mock_client.messages.create.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_threshold_falls_back_to_default(
+        self,
+        threshold_db_path: str,
+        threshold_artist_ids: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A garbage ``NARRATIVE_MIN_AA_SCORE`` reverts to the 0.8 default."""
+        monkeypatch.setenv("NARRATIVE_MIN_AA_SCORE", "not-a-float")
+        _clear_narrative_cache(threshold_db_path)
+        mock_client = _mock_anthropic_client()
+        app = create_app(threshold_db_path, anthropic_api_key="test-key")
+        app.state.anthropic_client = mock_client
+        transport = ASGITransport(app=app)
+
+        sinatra = threshold_artist_ids["Frank Sinatra"]
+        sun_ra = threshold_artist_ids["Sun Ra"]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{sinatra}/explain/{sun_ra}/narrative")
+
+        # Default 0.8 should have applied; below-threshold pair short-circuits.
+        assert resp.json()["insufficient_signal"] is True
+        assert mock_client.messages.create.call_count == 0

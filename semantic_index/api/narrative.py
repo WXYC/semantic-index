@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 from datetime import UTC, datetime
 
@@ -20,9 +21,37 @@ narrative_router = APIRouter(prefix="/graph", tags=["graph"])
 
 # Bump whenever the prompt's structure or content changes so the sidecar cache
 # evicts stale entries instead of serving them indefinitely.
-_PROMPT_VERSION = 2
+_PROMPT_VERSION = 3
 
 _SHARED_NEIGHBORS_TOP_K = 5
+
+# Minimum total Adamic-Adar contribution across surfaced shared neighbors for a
+# pair to be worth narrating. Pairs below this floor share only generic hubs
+# (Frank Sinatra, The Beatles), and even AA reranking can't manufacture a real
+# story. Empirical sweet spot from compare_neighbor_weighting.py was 0.8 —
+# overrideable via NARRATIVE_MIN_AA_SCORE for tuning without a redeploy.
+_DEFAULT_MIN_AA_SCORE = 0.8
+
+_INSUFFICIENT_SIGNAL_NARRATIVE = (
+    "WXYC DJs occasionally play these artists together, but they don't share "
+    "enough specific musical context — same labels, similar styles, common "
+    "collaborators — to characterize a meaningful connection."
+)
+
+
+def _min_aa_score() -> float:
+    """Read the AA-score threshold from the environment, falling back to default."""
+    raw = os.environ.get("NARRATIVE_MIN_AA_SCORE")
+    if raw is None:
+        return _DEFAULT_MIN_AA_SCORE
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid NARRATIVE_MIN_AA_SCORE=%r; using default %.2f", raw, _DEFAULT_MIN_AA_SCORE
+        )
+        return _DEFAULT_MIN_AA_SCORE
+
 
 MONTH_NAMES = [
     "",
@@ -48,6 +77,8 @@ _SYSTEM_PROMPT = (
     "from the data. Do not add information not present in the data."
 )
 
+_REQUIRED_CACHE_COLUMNS = {"edge_type", "prompt_version", "insufficient_signal"}
+
 _CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS narrative_cache (
     source_id INTEGER NOT NULL,
@@ -56,6 +87,7 @@ CREATE TABLE IF NOT EXISTS narrative_cache (
     dj_id INTEGER NOT NULL DEFAULT 0,
     edge_type TEXT NOT NULL DEFAULT '',
     prompt_version INTEGER NOT NULL DEFAULT 1,
+    insufficient_signal INTEGER NOT NULL DEFAULT 0,
     narrative TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (source_id, target_id, month, dj_id, edge_type, prompt_version)
@@ -69,19 +101,51 @@ def _get_cache_db(db_path: str) -> sqlite3.Connection:
     Cache eviction is by exclusion: ``prompt_version`` is part of the row's
     primary key and reads filter on the current ``_PROMPT_VERSION``, so rows
     written under prior versions stay on disk but are never returned. The
-    initial schema-mismatch drop here only fires for caches built before
-    ``prompt_version`` (or ``edge_type``) was added — once the column exists,
-    subsequent version bumps don't change the schema.
+    schema-mismatch drop fires for caches missing any required column — once
+    a release adds a column (e.g. ``insufficient_signal``) the next connect
+    drops and rebuilds. Subsequent version bumps that don't change the schema
+    rely on read-side filtering instead.
     """
     cache_path = db_path + ".narrative-cache.db"
     conn = sqlite3.connect(cache_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(narrative_cache)")}
-    if cols and ("edge_type" not in cols or "prompt_version" not in cols):
+    if cols and not _REQUIRED_CACHE_COLUMNS.issubset(cols):
         conn.execute("DROP TABLE narrative_cache")
     conn.executescript(_CACHE_SCHEMA)
     return conn
+
+
+def _write_cache_entry(
+    cache_db: sqlite3.Connection,
+    lo: int,
+    hi: int,
+    cache_month: int,
+    cache_dj: int,
+    cache_edge_type: str,
+    narrative: str,
+    insufficient_signal: bool,
+) -> None:
+    """Insert (or replace) a cache row at the current ``_PROMPT_VERSION``."""
+    cache_db.execute(
+        "INSERT OR REPLACE INTO narrative_cache "
+        "(source_id, target_id, month, dj_id, edge_type, prompt_version, "
+        "insufficient_signal, narrative, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            lo,
+            hi,
+            cache_month,
+            cache_dj,
+            cache_edge_type,
+            _PROMPT_VERSION,
+            int(insufficient_signal),
+            narrative,
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+    cache_db.commit()
 
 
 def _rank_shared_neighbors_by_aa(
@@ -357,17 +421,41 @@ def get_narrative(
     cache_db = _get_cache_db(request.app.state.db_path)
     try:
         cached_row = cache_db.execute(
-            "SELECT narrative FROM narrative_cache "
+            "SELECT narrative, insufficient_signal FROM narrative_cache "
             "WHERE source_id = ? AND target_id = ? AND month = ? AND dj_id = ? "
             "AND edge_type = ? AND prompt_version = ?",
             (lo, hi, cache_month, cache_dj, cache_edge_type, _PROMPT_VERSION),
         ).fetchone()
         if cached_row:
             return NarrativeResponse(
-                source=source, target=target, narrative=cached_row["narrative"], cached=True
+                source=source,
+                target=target,
+                narrative=cached_row["narrative"],
+                cached=True,
+                insufficient_signal=bool(cached_row["insufficient_signal"]),
             )
     finally:
         pass  # keep cache_db open for potential write below
+
+    # AA-ranked shared neighbors are computed up-front because the threshold
+    # check below can short-circuit the LLM call entirely.
+    shared_neighbors = _rank_shared_neighbors_by_aa(db, source_id, target_id)
+    total_aa = sum(n["aa_score"] for n in shared_neighbors)
+    if total_aa < _min_aa_score():
+        # No real connection — skip the LLM, cache a deterministic placeholder
+        # so subsequent identical requests stay cheap.
+        narrative = _INSUFFICIENT_SIGNAL_NARRATIVE
+        _write_cache_entry(
+            cache_db, lo, hi, cache_month, cache_dj, cache_edge_type, narrative, True
+        )
+        cache_db.close()
+        return NarrativeResponse(
+            source=source,
+            target=target,
+            narrative=narrative,
+            cached=False,
+            insufficient_signal=True,
+        )
 
     # Check for Anthropic client
     client = _get_anthropic_client(request)
@@ -406,10 +494,6 @@ def get_narrative(
     dj_name = _lookup_dj_name(db, dj_id) if dj_id else None
     faceted_count = _compute_faceted_pair_count(db, source_id, target_id, month, dj_id)
 
-    # AA-ranked shared neighbors — surfaces specific mid-degree connections
-    # instead of generic high-degree hubs in the prompt.
-    shared_neighbors = _rank_shared_neighbors_by_aa(db, source_id, target_id)
-
     user_message = _build_prompt(
         source_meta=source_meta,
         target_meta=target_meta,
@@ -436,23 +520,9 @@ def get_narrative(
 
     # Write to cache
     try:
-        cache_db.execute(
-            "INSERT OR REPLACE INTO narrative_cache "
-            "(source_id, target_id, month, dj_id, edge_type, prompt_version, "
-            "narrative, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                lo,
-                hi,
-                cache_month,
-                cache_dj,
-                cache_edge_type,
-                _PROMPT_VERSION,
-                narrative,
-                datetime.now(UTC).isoformat(),
-            ),
+        _write_cache_entry(
+            cache_db, lo, hi, cache_month, cache_dj, cache_edge_type, narrative, False
         )
-        cache_db.commit()
     finally:
         cache_db.close()
 
