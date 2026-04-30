@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from semantic_index.api.bio import bio_router
 from semantic_index.api.narrative import narrative_router
+from semantic_index.api.narrative_audit_routes import narrative_audit_router
 from semantic_index.api.preview import preview_router
 from semantic_index.api.routes import router
 
@@ -57,6 +58,7 @@ def create_app(
     app.include_router(narrative_router)
     app.include_router(bio_router)
     app.include_router(preview_router)
+    app.include_router(narrative_audit_router)
 
     @app.get("/health", include_in_schema=False)
     def health() -> JSONResponse:
