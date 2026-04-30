@@ -52,6 +52,9 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/api/schemas.py` | Pydantic response models for the Graph API (ArtistSummary, ArtistDetail, EntityArtists, SearchResponse, NeighborsResponse, ExplainResponse, FacetsResponse, DjSummary, NarrativeResponse, CommunitiesResponse, DiscoveryResponse, PreviewResponse). |
 | `semantic_index/api/routes.py` | Graph API query endpoints: search, artist detail, neighbors by edge type (with optional month/DJ facet filters), explain relationships, entity artist groups, available facets, community metadata, discovery (underplayed sonic fits). |
 | `semantic_index/api/narrative.py` | LLM-generated edge narrative endpoint. Calls Claude Haiku to explain artist relationships in plain English. Caches results in a sidecar SQLite database. Facet-aware. Enriches prompts with audio profile features (genre, mood, danceability) when available. |
+| `semantic_index/narrative_audit.py` | Periodic claim-ratio audit on cached narratives. Samples N narratives, looks up source/target metadata from the production DB so the verifier sees the same data the live narrative endpoint scored against, runs each through a Haiku verifier prompt that decomposes them into grounded/ungrounded claims, and records ratios to a sidecar audit DB for review. Catches structural-claim hallucinations the always-on token-match gate can miss. |
+| `semantic_index/api/narrative_audit_routes.py` | Read-only endpoint exposing the most-recent audit rows from the audit sidecar at `/graph/narrative-audit/recent`. |
+| `scripts/audit_narratives.py` | CLI entry point for the claim-ratio audit. Sample-and-score with a configurable threshold; writes to the audit sidecar DB. |
 | `semantic_index/api/preview.py` | Audio preview URL endpoint with multi-source fallback (iTunes lookup, Spotify, Bandcamp, Deezer, iTunes search). Caches results in a sidecar SQLite database. Powers the in-card transition player in the graph explorer. |
 | `semantic_index/pg_source.py` | Query Backend-Service PostgreSQL (`wxyc_schema.*`) for pipeline input data. Returns the same types as `sql_parser.py` (FlowsheetEntry, LibraryCode, LibraryRelease). Used by the nightly sync instead of SQL dump parsing. |
 | `semantic_index/nightly_sync.py` | Nightly sync orchestrator: query PG → resolve → PMI → stats → export → entity dedup → facets → graph metrics → atomic DB swap. Preserves enrichment tables from the existing database. |
@@ -420,6 +423,23 @@ app = create_app("data/wxyc_artist_graph.db")
 | `GET` | `/graph/communities?min_size=5&limit=50` | Louvain community metadata (size, label, top genres, top artists). Gracefully returns empty on databases without the `community` table. |
 | `GET` | `/graph/artists/{id}/explain/{target_id}/narrative?month=&dj_id=` | LLM-generated natural-language explanation of the relationship between two artists. Uses Claude Haiku. Cached in sidecar SQLite DB. Returns 501 when `ANTHROPIC_API_KEY` is not set. |
 | `GET` | `/graph/artists/{id}/preview` | Audio preview URL for an artist. Multi-source fallback: iTunes lookup (by Apple Music ID) -> Spotify top tracks (by Spotify ID, requires credentials) -> Bandcamp (by bandcamp_id, scrapes track stream) -> Deezer search (by name) -> iTunes search (by name). Cached in sidecar `.preview-cache.db`. |
+| `GET` | `/graph/narrative-audit/recent?limit=50&flagged_only=false` | Most-recent narrative-audit rows from the audit sidecar (`<db>.narrative-audit-cache.db`). Returns an empty list when no audits have run yet. |
+
+### Narrative claim-ratio audit
+
+Periodic offline check that catches structural-claim hallucinations the always-on token-match gate can miss. Samples N cached narratives, opens a read-only connection to the production DB to reconstruct each pair's source/target metadata (the same shape the live narrative endpoint scored against), runs each narrative through a Haiku verifier prompt that decomposes it into grounded vs ungrounded claims, and records the resulting ratio to `<db_path>.narrative-audit-cache.db`. Narratives with `ungrounded / total > threshold` are flagged for review or regeneration.
+
+```bash
+ANTHROPIC_API_KEY=sk-... python scripts/audit_narratives.py \
+    --db-path data/wxyc_artist_graph.db \
+    [--n 100] [--threshold 0.2]
+```
+
+- `--db-path` / `DB_PATH` — production SQLite database (the narrative cache lives at `<db-path>.narrative-cache.db`).
+- `--n` — sample size (default `100`).
+- `--threshold` / `NARRATIVE_AUDIT_CLAIM_THRESHOLD` — claim-ratio above which a narrative is flagged (default `0.2`, strict `>` boundary).
+
+The audit DB is a separate sidecar from the narrative cache so audit history survives cache-version bumps. Recent rows are exposed via `GET /graph/narrative-audit/recent`. Scheduling (nightly or periodic invocation) is a follow-up; for now the script is run manually or by external cron.
 
 ### Deployment
 
