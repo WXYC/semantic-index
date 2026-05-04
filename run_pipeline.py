@@ -197,6 +197,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Minimum cosine similarity for acoustic similarity edges (default: 0.98)",
     )
     parser.add_argument(
+        "--acoustic-similarity-top-k",
+        type=int,
+        default=50,
+        help=(
+            "Per-artist neighbor cap for acoustic_similarity. Pass 0 to disable pruning "
+            "(default: 50). The threshold-based table grows to millions of near-uniform "
+            "edges that contribute almost no ranking signal; capping at top-K shrinks "
+            "the affinity I/O footprint without changing top-N rankings in practice."
+        ),
+    )
+    parser.add_argument(
         "--compilation-track-artist-dump",
         default=None,
         help="Path to a SQL dump file containing the COMPILATION_TRACK_ARTIST table. "
@@ -1046,7 +1057,10 @@ def run(args: argparse.Namespace) -> None:
                     _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
                     store_audio_profiles(_ab_conn, profiles)
                     acoustic_edge_count = compute_acoustic_similarity(
-                        _ab_conn, profiles, threshold=args.acoustic_similarity_threshold
+                        _ab_conn,
+                        profiles,
+                        threshold=args.acoustic_similarity_threshold,
+                        top_k_per_artist=args.acoustic_similarity_top_k or None,
                     )
                     _ab_conn.close()
                     log.info("  %d acoustic similarity edges", acoustic_edge_count)
@@ -1150,7 +1164,10 @@ def run(args: argparse.Namespace) -> None:
                     _ab_conn = _ab_sqlite3.connect(str(sqlite_path))
                     store_audio_profiles(_ab_conn, profiles)
                     acoustic_edge_count = compute_acoustic_similarity(
-                        _ab_conn, profiles, threshold=args.acoustic_similarity_threshold
+                        _ab_conn,
+                        profiles,
+                        threshold=args.acoustic_similarity_threshold,
+                        top_k_per_artist=args.acoustic_similarity_top_k or None,
                     )
                     _ab_conn.close()
                     log.info("  %d acoustic similarity edges", acoustic_edge_count)
