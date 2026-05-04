@@ -799,19 +799,24 @@ def compute_acoustic_similarity(
     conn: sqlite3.Connection,
     profiles: dict[int, ArtistAudioProfile],
     threshold: float = 0.85,
+    top_k_per_artist: int | None = None,
 ) -> int:
     """Compute pairwise cosine similarity between artist audio profiles.
 
     Only stores edges where similarity >= threshold. Stores edges in
-    canonical order (artist_a_id < artist_b_id).
+    canonical order (artist_a_id < artist_b_id). When ``top_k_per_artist``
+    is set, the table is pruned to each artist's top-K neighbors after
+    computation (see :func:`prune_acoustic_similarity`).
 
     Args:
         conn: SQLite connection to the graph database.
         profiles: Mapping of artist ID → ArtistAudioProfile.
         threshold: Minimum similarity to emit an edge.
+        top_k_per_artist: If set, retain only this many top-similarity
+            neighbors per artist after computing all edges.
 
     Returns:
-        Number of similarity edges created.
+        Number of similarity edges in the table after prune (if any).
     """
     import time as _time
 
@@ -886,4 +891,100 @@ def compute_acoustic_similarity(
         threshold,
         elapsed,
     )
+    if top_k_per_artist is not None:
+        _, edge_count = prune_acoustic_similarity(conn, top_k_per_artist)
+        conn.commit()
     return edge_count
+
+
+def prune_acoustic_similarity(
+    conn: sqlite3.Connection,
+    top_k: int,
+) -> tuple[int, int]:
+    """Prune ``acoustic_similarity`` to top-K most-similar edges per artist.
+
+    For each artist X, the K edges with the highest similarity to X are kept.
+    An edge (a, b) is retained if it appears in either A's or B's top-K — so
+    every artist always has at least their best matches present, even if the
+    other endpoint is heavily connected.
+
+    Why: with the production threshold of 0.97, the table grows to millions of
+    near-uniform edges (avg similarity 0.977) that contribute almost no
+    discriminating signal after per-source max-normalization. Top-K-per-artist
+    keeps the meaningful tail and shrinks the I/O footprint of every affinity
+    query.
+
+    Args:
+        conn: SQLite connection to the graph database. The caller is
+            responsible for committing or rolling back; this function does
+            not commit so it composes cleanly with dry-run wrappers.
+        top_k: Per-artist neighbor cap (must be > 0).
+
+    Returns:
+        ``(rows_before, rows_after)`` count tuple for reporting.
+    """
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}")
+
+    before = conn.execute("SELECT COUNT(*) FROM acoustic_similarity").fetchone()[0]
+    if before == 0:
+        return 0, 0
+
+    # Compute (artist_a_id, artist_b_id) pairs to keep into a temp table.
+    # For each row, rn_a = rank within artist_a_id's neighbors, rn_b = rank within
+    # artist_b_id's neighbors. We keep rows where either rank is <= top_k.
+    # Tiebreaker on artist id for determinism.
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS _keep_acoustic;
+        CREATE TEMP TABLE _keep_acoustic (
+            artist_a_id INTEGER NOT NULL,
+            artist_b_id INTEGER NOT NULL,
+            PRIMARY KEY (artist_a_id, artist_b_id)
+        );
+        """
+    )
+    # For each artist X, rank ALL neighbors (regardless of canonical direction) by
+    # similarity. Keep edges where either endpoint considers the other a top-K
+    # neighbor, then re-canonicalize to (a < b) order via MIN/MAX.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO _keep_acoustic (artist_a_id, artist_b_id)
+        SELECT MIN(x_id, y_id), MAX(x_id, y_id) FROM (
+            SELECT x_id, y_id, ROW_NUMBER() OVER (
+                PARTITION BY x_id ORDER BY similarity DESC, y_id
+            ) AS rn
+            FROM (
+                SELECT artist_a_id AS x_id, artist_b_id AS y_id, similarity
+                FROM acoustic_similarity
+                UNION ALL
+                SELECT artist_b_id, artist_a_id, similarity
+                FROM acoustic_similarity
+            )
+        )
+        WHERE rn <= ?
+        """,
+        (top_k,),
+    )
+
+    conn.execute(
+        """
+        DELETE FROM acoustic_similarity
+        WHERE NOT EXISTS (
+            SELECT 1 FROM _keep_acoustic k
+            WHERE k.artist_a_id = acoustic_similarity.artist_a_id
+              AND k.artist_b_id = acoustic_similarity.artist_b_id
+        )
+        """
+    )
+    conn.execute("DROP TABLE _keep_acoustic")
+
+    after = conn.execute("SELECT COUNT(*) FROM acoustic_similarity").fetchone()[0]
+    logger.info(
+        "Acoustic similarity prune: %d → %d edges (top_k=%d, kept %.1f%%)",
+        before,
+        after,
+        top_k,
+        (after / before * 100) if before else 0,
+    )
+    return before, after

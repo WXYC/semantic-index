@@ -18,6 +18,7 @@ from semantic_index.acousticbrainz import (
     build_audio_profiles,
     cosine_similarity,
     load_audio_profiles,
+    prune_acoustic_similarity,
     store_audio_profiles,
 )
 
@@ -673,3 +674,119 @@ class TestTarAcousticBrainzLoader:
 
         assert len(profiles) == 2
         assert profiles[1].recording_count == 2
+
+
+# --- Top-K-per-artist prune ---
+
+
+@pytest.fixture
+def similarity_db(tmp_path: Path) -> sqlite3.Connection:
+    """Build a fresh DB with the acoustic_similarity schema and a known edge set."""
+    conn = sqlite3.connect(str(tmp_path / "sim.db"))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE acoustic_similarity (
+            artist_a_id INTEGER NOT NULL,
+            artist_b_id INTEGER NOT NULL,
+            similarity REAL NOT NULL,
+            PRIMARY KEY (artist_a_id, artist_b_id)
+        );
+        CREATE INDEX idx_acoustic_sim_a ON acoustic_similarity(artist_a_id);
+        CREATE INDEX idx_acoustic_sim_b ON acoustic_similarity(artist_b_id);
+        """
+    )
+    return conn
+
+
+def _all_edges(conn: sqlite3.Connection) -> set[tuple[int, int]]:
+    return {
+        (r["artist_a_id"], r["artist_b_id"])
+        for r in conn.execute("SELECT artist_a_id, artist_b_id FROM acoustic_similarity")
+    }
+
+
+def _seed_complete_graph(conn: sqlite3.Connection, n: int) -> None:
+    """Insert the complete graph on artists 1..n with similarity decreasing
+    so the order of (a,b) by similarity is reverse-lex on a, then b.
+
+    Concretely, for n=5:
+      (1,2)=.99 (1,3)=.98 (1,4)=.97 (1,5)=.96
+      (2,3)=.95 (2,4)=.94 (2,5)=.93
+      (3,4)=.92 (3,5)=.91
+      (4,5)=.90
+    """
+    s = 1.00
+    for a in range(1, n + 1):
+        for b in range(a + 1, n + 1):
+            s -= 0.01
+            conn.execute("INSERT INTO acoustic_similarity VALUES (?, ?, ?)", (a, b, round(s, 4)))
+    conn.commit()
+
+
+class TestPruneAcousticSimilarity:
+    """Top-K-per-artist (either-side) prune of the acoustic_similarity table."""
+
+    def test_top_k_keeps_top_neighbors_per_artist(self, similarity_db: sqlite3.Connection) -> None:
+        """Top-K=2 on a 5-artist complete graph: keep edges in either endpoint's top-2."""
+        _seed_complete_graph(similarity_db, 5)
+        # Hand-computed expected (top-2 per artist either side):
+        # 1: top-2 = (1,2)=.99, (1,3)=.98
+        # 2: top-2 = (1,2)=.99, (2,3)=.95
+        # 3: top-2 = (1,3)=.98, (2,3)=.95
+        # 4: top-2 = (1,4)=.97, (2,4)=.94
+        # 5: top-2 = (1,5)=.96, (2,5)=.93
+        # Union: {(1,2), (1,3), (2,3), (1,4), (2,4), (1,5), (2,5)} = 7 edges
+        # Pruned: (3,4), (3,5), (4,5)
+        before, after = prune_acoustic_similarity(similarity_db, top_k=2)
+        assert before == 10
+        assert after == 7
+        kept = _all_edges(similarity_db)
+        assert kept == {(1, 2), (1, 3), (2, 3), (1, 4), (2, 4), (1, 5), (2, 5)}
+
+    def test_either_side_semantics(self, similarity_db: sqlite3.Connection) -> None:
+        """An edge in B's top-K but not A's top-K must still be kept.
+
+        Construct a star-ish topology so artist 1 has many high-similarity
+        neighbors but artists 2..5 each have only one neighbor — themselves
+        connected to artist 1. With K=1, artist 1's top-1 is just (1,2),
+        but (1,3), (1,4), (1,5) are each the only edge for artists 3, 4, 5.
+        So all four edges should remain.
+        """
+        edges = [(1, 2, 0.99), (1, 3, 0.98), (1, 4, 0.97), (1, 5, 0.96)]
+        for a, b, s in edges:
+            similarity_db.execute("INSERT INTO acoustic_similarity VALUES (?, ?, ?)", (a, b, s))
+        similarity_db.commit()
+
+        before, after = prune_acoustic_similarity(similarity_db, top_k=1)
+        assert before == 4
+        assert after == 4  # 1's top-1 = (1,2); 3,4,5's top-1 = their only edge to 1
+        assert _all_edges(similarity_db) == {(1, 2), (1, 3), (1, 4), (1, 5)}
+
+    def test_large_k_keeps_everything(self, similarity_db: sqlite3.Connection) -> None:
+        _seed_complete_graph(similarity_db, 4)
+        # 4 artists -> C(4,2) = 6 edges, max 3 neighbors per artist
+        before, after = prune_acoustic_similarity(similarity_db, top_k=100)
+        assert before == 6
+        assert after == 6
+
+    def test_empty_table_no_error(self, similarity_db: sqlite3.Connection) -> None:
+        before, after = prune_acoustic_similarity(similarity_db, top_k=10)
+        assert before == 0
+        assert after == 0
+
+    def test_invalid_top_k_raises(self, similarity_db: sqlite3.Connection) -> None:
+        _seed_complete_graph(similarity_db, 3)
+        with pytest.raises(ValueError):
+            prune_acoustic_similarity(similarity_db, top_k=0)
+        with pytest.raises(ValueError):
+            prune_acoustic_similarity(similarity_db, top_k=-1)
+
+    def test_preserves_canonical_order(self, similarity_db: sqlite3.Connection) -> None:
+        """All retained edges must still satisfy artist_a_id < artist_b_id."""
+        _seed_complete_graph(similarity_db, 6)
+        prune_acoustic_similarity(similarity_db, top_k=3)
+        bad = similarity_db.execute(
+            "SELECT COUNT(*) FROM acoustic_similarity WHERE artist_a_id >= artist_b_id"
+        ).fetchone()[0]
+        assert bad == 0

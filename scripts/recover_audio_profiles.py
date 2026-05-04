@@ -59,6 +59,7 @@ def recover(
     *,
     min_recordings: int = DEFAULT_MIN_RECORDINGS,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    similarity_top_k: int | None = 50,
     dry_run: bool = False,
     rebuild_all: bool = False,
 ) -> dict[str, int]:
@@ -213,7 +214,10 @@ def recover(
         # Step 8: Recompute acoustic similarity for all profiles
         if all_profiles:
             similarity_count = compute_acoustic_similarity(
-                conn, all_profiles, threshold=similarity_threshold
+                conn,
+                all_profiles,
+                threshold=similarity_threshold,
+                top_k_per_artist=similarity_top_k,
             )
             logger.info("%d acoustic similarity edges", similarity_count)
 
@@ -282,6 +286,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Cosine similarity threshold for edges (default: {DEFAULT_SIMILARITY_THRESHOLD})",
     )
     parser.add_argument(
+        "--acoustic-similarity-top-k",
+        type=int,
+        default=50,
+        help="Per-artist neighbor cap; 0 disables prune (default: 50)",
+    )
+    parser.add_argument(
         "--rebuild-all",
         action="store_true",
         help="Clear existing profiles and rebuild from scratch (e.g. for dimension migration)",
@@ -320,6 +330,7 @@ def main(argv: list[str] | None = None) -> None:
         musicbrainz_cache_dsn=args.musicbrainz_cache_dsn,
         min_recordings=args.min_recordings,
         similarity_threshold=args.acoustic_similarity_threshold,
+        similarity_top_k=args.acoustic_similarity_top_k or None,
         dry_run=args.dry_run,
         rebuild_all=args.rebuild_all,
     )
