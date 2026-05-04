@@ -389,3 +389,59 @@ class TestFacetIgnoredForNonDjEdges:
         )
         # Should work (not error), facet is simply ignored
         assert resp.status_code == 200
+
+
+class TestBatchFacetedParity:
+    """The batched faceted code path must produce the same response as N individual GETs."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "facet",
+        [
+            pytest.param({}, id="no_facet"),
+            pytest.param({"month": 1}, id="month_only"),
+            pytest.param({"dj_id_name": "DJ Cool"}, id="dj_only"),
+            pytest.param({"month": 1, "dj_id_name": "DJ Cool"}, id="month_and_dj"),
+        ],
+    )
+    async def test_batch_dj_transition_matches_individual(
+        self,
+        client: AsyncClient,
+        faceted_artist_ids: dict[str, int],
+        faceted_dj_ids: dict[str, int],
+        facet: dict,
+    ) -> None:
+        ids = [
+            faceted_artist_ids["Autechre"],
+            faceted_artist_ids["Stereolab"],
+            faceted_artist_ids["Cat Power"],
+        ]
+        params: dict = {"type": "djTransition", "limit": 5, "heat": 0.5}
+        if "month" in facet:
+            params["month"] = facet["month"]
+        if "dj_id_name" in facet:
+            params["dj_id"] = faceted_dj_ids[facet["dj_id_name"]]
+
+        individual: dict[str, dict] = {}
+        for aid in ids:
+            r = await client.get(f"/graph/artists/{aid}/neighbors", params=params)
+            assert r.status_code == 200
+            individual[str(aid)] = r.json()
+
+        batch_resp = await client.post(
+            "/graph/artists/neighbors/batch", json={"artist_ids": ids, **params}
+        )
+        assert batch_resp.status_code == 200
+        batched = batch_resp.json()["results"]
+
+        for aid in ids:
+            key = str(aid)
+            assert batched[key]["artist"] == individual[key]["artist"]
+            assert batched[key]["edge_type"] == individual[key]["edge_type"]
+            ind_by_id = {n["artist"]["id"]: n for n in individual[key]["neighbors"]}
+            bat_by_id = {n["artist"]["id"]: n for n in batched[key]["neighbors"]}
+            assert set(ind_by_id) == set(bat_by_id), f"neighbor sets differ for artist {aid}"
+            for nid, ind_entry in ind_by_id.items():
+                bat_entry = bat_by_id[nid]
+                assert bat_entry["weight"] == pytest.approx(ind_entry["weight"])
+                assert bat_entry["detail"] == ind_entry["detail"]

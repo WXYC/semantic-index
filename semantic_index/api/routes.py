@@ -397,28 +397,32 @@ def get_neighbors_batch(
     has_facets = body.month is not None or body.dj_id is not None
     results: dict[str, NeighborsResponse] = {}
 
+    present = [aid for aid in artist_ids if aid in source_artists]
+
     if edge_type == EdgeType.AFFINITY:
-        present = [aid for aid in artist_ids if aid in source_artists]
-        affinity = _neighbors_affinity_batch(db, present, body.limit, heat=body.heat)
+        per_source = _neighbors_affinity_batch(db, present, body.limit, heat=body.heat)
+    elif has_facets and edge_type == EdgeType.DJ_TRANSITION:
+        per_source = _neighbors_dj_transition_faceted_batch(
+            db, present, body.limit, body.month, body.dj_id, heat=body.heat
+        )
+    else:
+        per_source = None
+
+    if per_source is not None:
         for aid in artist_ids:
             if aid not in source_artists:
                 continue
             results[str(aid)] = NeighborsResponse(
                 artist=source_artists[aid],
                 edge_type=edge_type.value,
-                neighbors=affinity.get(aid, []),
+                neighbors=per_source.get(aid, []),
             )
         return BatchNeighborsResponse(results=results)
 
     for artist_id in artist_ids:
         if artist_id not in source_artists:
             continue
-        if has_facets and edge_type == EdgeType.DJ_TRANSITION:
-            neighbors = _neighbors_dj_transition_faceted(
-                db, artist_id, body.limit, body.month, body.dj_id, heat=body.heat
-            )
-        else:
-            neighbors = _query_neighbors(db, artist_id, edge_type, body.limit, heat=body.heat)
+        neighbors = _query_neighbors(db, artist_id, edge_type, body.limit, heat=body.heat)
         results[str(artist_id)] = NeighborsResponse(
             artist=source_artists[artist_id], edge_type=edge_type.value, neighbors=neighbors
         )
@@ -653,120 +657,150 @@ def _neighbors_dj_transition_faceted(
 ) -> list[NeighborEntry]:
     """Compute faceted PMI neighbors dynamically from the play table.
 
-    Three query paths depending on active facets:
-    - Month only: marginals from artist_month_count, totals from month_total
-    - DJ only: marginals from artist_dj_count, totals from dj_total
-    - Both: marginals and totals computed dynamically from play table
+    Thin wrapper around :func:`_neighbors_dj_transition_faceted_batch` so the
+    single-artist GET endpoint and the batch endpoint share one implementation.
     """
-    # Step 1: Pair counts (self-join on play table, scoped to center artist)
-    pair_counts: dict[int, int] = defaultdict(int)
+    return _neighbors_dj_transition_faceted_batch(
+        db, [artist_id], limit, month, dj_id, heat=heat
+    ).get(artist_id, [])
 
-    # Forward: center plays at position N, neighbor at N+1
+
+def _neighbors_dj_transition_faceted_batch(
+    db: sqlite3.Connection,
+    artist_ids: list[int],
+    limit: int,
+    month: int | None = None,
+    dj_id: int | None = None,
+    *,
+    heat: float = 0.5,
+) -> dict[int, list[NeighborEntry]]:
+    """Compute faceted PMI neighbors for many source artists with one SQL pass.
+
+    Issues two play-table self-joins (forward + reverse) across all source
+    artists at once via ``WHERE p?.artist_id IN (…)``, then computes per-source
+    PMI in Python. Marginals and totals are fetched once for the union of
+    needed artist IDs.
+    """
+    if not artist_ids:
+        return {}
+
+    placeholders = ",".join("?" * len(artist_ids))
+
     forward_sql = (
-        "SELECT p2.artist_id AS neighbor_id, COUNT(*) AS pair_count "
+        "SELECT p1.artist_id AS center_id, p2.artist_id AS neighbor_id, COUNT(*) AS pair_count "
         "FROM play p1 "
         "JOIN play p2 ON p2.show_id = p1.show_id AND p2.sequence = p1.sequence + 1 "
-        "WHERE p1.artist_id = :center"
+        f"WHERE p1.artist_id IN ({placeholders})"  # noqa: S608
     )
-    # Reverse: neighbor plays at position N, center at N+1
     reverse_sql = (
-        "SELECT p1.artist_id AS neighbor_id, COUNT(*) AS pair_count "
+        "SELECT p2.artist_id AS center_id, p1.artist_id AS neighbor_id, COUNT(*) AS pair_count "
         "FROM play p1 "
         "JOIN play p2 ON p2.show_id = p1.show_id AND p2.sequence = p1.sequence + 1 "
-        "WHERE p2.artist_id = :center"
+        f"WHERE p2.artist_id IN ({placeholders})"  # noqa: S608
     )
+    forward_params: list = list(artist_ids)
+    reverse_params: list = list(artist_ids)
 
-    params: dict = {"center": artist_id}
-    facet_clauses = []
     if month is not None:
-        facet_clauses.append("p1.month = :month")
-        params["month"] = month
+        forward_sql += " AND p1.month = ?"
+        reverse_sql += " AND p2.month = ?"
+        forward_params.append(month)
+        reverse_params.append(month)
     if dj_id is not None:
-        facet_clauses.append("p1.dj_id = :dj_id")
-        params["dj_id"] = dj_id
+        forward_sql += " AND p1.dj_id = ?"
+        reverse_sql += " AND p2.dj_id = ?"
+        forward_params.append(dj_id)
+        reverse_params.append(dj_id)
 
-    if facet_clauses:
-        facet_where = " AND " + " AND ".join(facet_clauses)
-        forward_sql += facet_where
-        # For reverse, facets apply to p2 (the center's row)
-        reverse_facet = facet_where.replace("p1.", "p2.")
-        reverse_sql += reverse_facet
+    forward_sql += " GROUP BY p1.artist_id, p2.artist_id"
+    reverse_sql += " GROUP BY p2.artist_id, p1.artist_id"
 
-    forward_sql += " GROUP BY p2.artist_id"
-    reverse_sql += " GROUP BY p1.artist_id"
+    per_source_pair_counts: dict[int, dict[int, int]] = {
+        aid: defaultdict(int) for aid in artist_ids
+    }
+    for row in db.execute(forward_sql, forward_params):
+        cid = row["center_id"]
+        if cid in per_source_pair_counts:
+            per_source_pair_counts[cid][row["neighbor_id"]] += row["pair_count"]
+    for row in db.execute(reverse_sql, reverse_params):
+        cid = row["center_id"]
+        if cid in per_source_pair_counts:
+            per_source_pair_counts[cid][row["neighbor_id"]] += row["pair_count"]
 
-    for row in db.execute(forward_sql, params).fetchall():
-        pair_counts[row["neighbor_id"]] += row["pair_count"]
-    for row in db.execute(reverse_sql, params).fetchall():
-        pair_counts[row["neighbor_id"]] += row["pair_count"]
+    needed_ids: set[int] = set(artist_ids)
+    for pcs in per_source_pair_counts.values():
+        needed_ids.update(pcs.keys())
 
-    if not pair_counts:
-        return []
+    empty: dict[int, list[NeighborEntry]] = {aid: [] for aid in artist_ids}
+    if not needed_ids:
+        return empty
 
-    # Step 2: Marginals (play counts per artist in the filtered slice)
-    all_artist_ids = [artist_id, *pair_counts.keys()]
-    marginals = _get_faceted_marginals(db, all_artist_ids, month, dj_id)
-
-    # Step 3: Totals (total plays and pairs in the filtered slice)
+    marginals = _get_faceted_marginals(db, list(needed_ids), month, dj_id)
     total_plays, total_pairs = _get_faceted_totals(db, month, dj_id)
-
     if total_plays == 0 or total_pairs == 0:
-        return []
+        return empty
 
-    center_plays = marginals.get(artist_id, 0)
-    if center_plays == 0:
-        return []
-
-    # Step 4: Compute PMI
-    candidates: list[tuple[int, int, float]] = []  # (neighbor_id, raw_count, pmi)
-    for neighbor_id, raw_count in pair_counts.items():
-        neighbor_plays = marginals.get(neighbor_id, 0)
-        if neighbor_plays == 0:
+    per_source_top: dict[int, list[tuple[int, int, float, float]]] = {}
+    all_top_nids: set[int] = set()
+    for sid in artist_ids:
+        pair_counts = per_source_pair_counts[sid]
+        center_plays = marginals.get(sid, 0)
+        if not pair_counts or center_plays == 0:
+            per_source_top[sid] = []
             continue
 
-        p_pair = raw_count / total_pairs
+        candidates: list[tuple[int, int, float]] = []
         p_center = center_plays / total_plays
-        p_neighbor = neighbor_plays / total_plays
+        for neighbor_id, raw_count in pair_counts.items():
+            neighbor_plays = marginals.get(neighbor_id, 0)
+            if neighbor_plays == 0:
+                continue
+            p_pair = raw_count / total_pairs
+            p_neighbor = neighbor_plays / total_plays
+            denom = p_center * p_neighbor
+            if denom == 0:
+                continue
+            pmi = math.log2(p_pair / denom)
+            if pmi > 0:
+                candidates.append((neighbor_id, raw_count, pmi))
 
-        denominator = p_center * p_neighbor
-        if denominator == 0:
+        if not candidates:
+            per_source_top[sid] = []
             continue
 
-        pmi = math.log2(p_pair / denominator)
-        if pmi > 0:
-            candidates.append((neighbor_id, raw_count, pmi))
+        max_count = max(c[1] for c in candidates) or 1
+        max_pmi = max(c[2] for c in candidates) or 1
+        scored = [
+            (nid, rc, p, (1 - heat) * (rc / max_count) + heat * (p / max_pmi))
+            for nid, rc, p in candidates
+        ]
+        scored.sort(key=lambda x: x[3], reverse=True)
+        top = scored[:limit]
+        per_source_top[sid] = top
+        all_top_nids.update(s[0] for s in top)
 
-    if not candidates:
-        return []
+    if not all_top_nids:
+        return empty
 
-    # Step 4b: Rank by heat blend (cool=raw_count, hot=PMI)
-    max_count = max(c[1] for c in candidates) or 1
-    max_pmi = max(c[2] for c in candidates) or 1
-    scored = [
-        (nid, rc, p, (1 - heat) * (rc / max_count) + heat * (p / max_pmi))
-        for nid, rc, p in candidates
-    ]
-    scored.sort(key=lambda x: x[3], reverse=True)
-    scored = scored[:limit]
-
-    # Step 5: Build response (look up artist summaries)
-    neighbor_ids = [s[0] for s in scored]
-    placeholders = ",".join("?" * len(neighbor_ids))
+    nbr_placeholders = ",".join("?" * len(all_top_nids))
     artist_rows = db.execute(
-        f"SELECT {_scols()} FROM artist WHERE id IN ({placeholders})",  # noqa: S608
-        neighbor_ids,
+        f"SELECT {_scols()} FROM artist WHERE id IN ({nbr_placeholders})",  # noqa: S608
+        list(all_top_nids),
     ).fetchall()
     artist_map = {r["id"]: _artist_summary(r) for r in artist_rows}
 
-    return [
-        NeighborEntry(
-            artist=artist_map[nid],
-            weight=blend_score,
-            detail={"raw_count": raw_count, "pmi": round(pmi, 4)},
-        )
-        for nid, raw_count, pmi, blend_score in scored
-        if nid in artist_map
-    ]
+    results: dict[int, list[NeighborEntry]] = {}
+    for sid in artist_ids:
+        results[sid] = [
+            NeighborEntry(
+                artist=artist_map[nid],
+                weight=blend_score,
+                detail={"raw_count": raw_count, "pmi": round(pmi, 4)},
+            )
+            for nid, raw_count, pmi, blend_score in per_source_top.get(sid, [])
+            if nid in artist_map
+        ]
+    return results
 
 
 def _get_faceted_marginals(
@@ -898,133 +932,10 @@ def _neighbors_affinity(
 ) -> list[NeighborEntry]:
     """Composite affinity score across all edge types.
 
-    Queries every edge table, normalizes each score to 0-1, and sums
-    across dimensions. Neighbors connected on multiple dimensions rank
-    higher. The detail dict lists which edge types contributed.
-
-    ``heat`` controls how DJ transition scores are blended within the
-    affinity computation (0=raw_count, 1=PMI).
+    Thin wrapper around :func:`_neighbors_affinity_batch` so single-artist callers
+    (the GET endpoint, explain) and the batch endpoint share one implementation.
     """
-    # Build affinity source list from EDGE_REGISTRY + member_of
-    affinity_sources: list[tuple[str, EdgeSchema]] = [
-        (edge_type.value, schema)
-        for edge_type, schema in EDGE_REGISTRY.items()
-        if schema.affinity_score_expr is not None
-    ]
-    affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
-
-    edge_queries: list[tuple[str, tuple[int, ...]]] = []
-
-    # DJ transitions — special case: needs both pmi and raw_count for heat blending
-    edge_queries.append(
-        (
-            "SELECT target_id AS nid, 'djTransition' AS etype, pmi AS score, raw_count "
-            "FROM dj_transition WHERE source_id = ? "
-            "UNION ALL "
-            "SELECT source_id, 'djTransition', pmi, raw_count "
-            "FROM dj_transition WHERE target_id = ?",
-            (artist_id, artist_id),
-        )
-    )
-
-    # Generate queries from registry
-    for etype_default, source in affinity_sources:
-        etype = source.affinity_type_name or etype_default
-        edge_queries.append(
-            (
-                f"SELECT {source.col_b}, '{etype}', {source.affinity_score_expr} "
-                f"FROM {source.table} WHERE {source.col_a} = ? "
-                f"UNION ALL "
-                f"SELECT {source.col_a}, '{etype}', {source.affinity_score_expr} "
-                f"FROM {source.table} WHERE {source.col_b} = ?",
-                (artist_id, artist_id),
-            )
-        )
-
-    # Collect all edges, keyed by neighbor ID.
-    # DJ transition rows have an extra raw_count column for heat blending.
-    neighbor_edges: dict[int, list[tuple[str, float]]] = {}
-    dj_raw: dict[int, tuple[float, float]] = {}  # nid -> (pmi, raw_count)
-    for sql, params in edge_queries:
-        try:
-            for row in db.execute(sql, params):
-                nid = row[0]
-                etype = row[1]
-                score = float(row[2])
-                if etype == "djTransition":
-                    raw_count = float(row[3])
-                    dj_raw[nid] = (score, raw_count)
-                neighbor_edges.setdefault(nid, []).append((etype, score))
-        except sqlite3.OperationalError:
-            continue  # table doesn't exist
-
-    # Apply heat blend to DJ transition scores
-    if dj_raw:
-        max_pmi = max(p for p, _ in dj_raw.values()) or 1
-        max_rc = max(rc for _, rc in dj_raw.values()) or 1
-        for nid, (pmi, rc) in dj_raw.items():
-            blended = (1 - heat) * (rc / max_rc) + heat * (pmi / max_pmi)
-            edges = neighbor_edges[nid]
-            neighbor_edges[nid] = [
-                (etype, blended if etype == "djTransition" else score) for etype, score in edges
-            ]
-
-    if not neighbor_edges:
-        return []
-
-    # Compute per-type max scores for normalization
-    type_maxes: dict[str, float] = {}
-    for edges in neighbor_edges.values():
-        for etype, score in edges:
-            type_maxes[etype] = max(type_maxes.get(etype, 0), score)
-
-    # Dimension weights derived from registry
-    dim_weights: dict[str, float] = {"djTransition": 3.0}
-    for etype_default, source in affinity_sources:
-        dim_weights[source.affinity_type_name or etype_default] = source.affinity_weight
-
-    # Compute composite scores
-    scored: list[tuple[int, float, list[str]]] = []
-    for nid, edges in neighbor_edges.items():
-        composite = 0.0
-        types = []
-        seen_types: set[str] = set()
-        for etype, score in edges:
-            if etype in seen_types:
-                continue
-            seen_types.add(etype)
-            max_score = type_maxes.get(etype, 1) or 1
-            w = dim_weights.get(etype, 1.0)
-            composite += w * (score / max_score)  # weighted normalized score
-            types.append(etype)
-        scored.append((nid, composite, types))
-
-    # Sort by composite score descending, take top N
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:limit]
-
-    # Fetch artist details for the top neighbors
-    ids = [nid for nid, _, _ in top]
-    placeholders = ",".join("?" * len(ids))
-    artist_rows = db.execute(
-        f"SELECT {_scols()} FROM artist WHERE id IN ({placeholders})",  # noqa: S608
-        ids,
-    ).fetchall()
-    artist_map = {r["id"]: r for r in artist_rows}
-
-    results: list[NeighborEntry] = []
-    for nid, composite, types in top:
-        r = artist_map.get(nid)
-        if not r:
-            continue
-        results.append(
-            NeighborEntry(
-                artist=_artist_summary(r),
-                weight=round(composite, 3),
-                detail={"dimensions": len(types), "types": types},
-            )
-        )
-    return results
+    return _neighbors_affinity_batch(db, [artist_id], limit, heat=heat).get(artist_id, [])
 
 
 def _neighbors_affinity_batch(
