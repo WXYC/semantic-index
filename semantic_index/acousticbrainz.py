@@ -934,14 +934,17 @@ def prune_acoustic_similarity(
     # For each row, rn_a = rank within artist_a_id's neighbors, rn_b = rank within
     # artist_b_id's neighbors. We keep rows where either rank is <= top_k.
     # Tiebreaker on artist id for determinism.
-    conn.executescript(
+    # Use plain execute() rather than executescript(): the latter issues an
+    # implicit COMMIT, which would silently break the "caller manages the
+    # transaction" contract documented above (e.g., the dry-run wrapper).
+    conn.execute("DROP TABLE IF EXISTS _keep_acoustic")
+    conn.execute(
         """
-        DROP TABLE IF EXISTS _keep_acoustic;
         CREATE TEMP TABLE _keep_acoustic (
             artist_a_id INTEGER NOT NULL,
             artist_b_id INTEGER NOT NULL,
             PRIMARY KEY (artist_a_id, artist_b_id)
-        );
+        )
         """
     )
     # For each artist X, rank ALL neighbors (regardless of canonical direction) by

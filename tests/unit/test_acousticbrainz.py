@@ -790,3 +790,22 @@ class TestPruneAcousticSimilarity:
             "SELECT COUNT(*) FROM acoustic_similarity WHERE artist_a_id >= artist_b_id"
         ).fetchone()[0]
         assert bad == 0
+
+    def test_does_not_commit_so_rollback_works(self, similarity_db: sqlite3.Connection) -> None:
+        """Function must compose with caller-managed transactions.
+
+        The dry-run script depends on being able to run prune then rollback.
+        A previous version used ``conn.executescript`` which issues an
+        implicit COMMIT — this test guards against that regression.
+        """
+        _seed_complete_graph(similarity_db, 5)
+        similarity_db.commit()  # baseline state is committed
+
+        before, after = prune_acoustic_similarity(similarity_db, top_k=2)
+        assert before == 10
+        assert after == 7
+
+        similarity_db.rollback()
+        # After rollback the original 10 edges should be restored.
+        restored = similarity_db.execute("SELECT COUNT(*) FROM acoustic_similarity").fetchone()[0]
+        assert restored == 10
