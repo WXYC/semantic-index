@@ -397,6 +397,117 @@ class TestNeighbors:
         assert resp.status_code == 422
 
 
+class TestAffinityNeighbors:
+    @pytest.mark.asyncio
+    async def test_affinity_combines_edge_dimensions(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Affinity should rank Stereolab above Cat Power for Autechre.
+
+        Autechre↔Stereolab has 4 dimensions in the fixture (dj_transition,
+        sharedStyle, sharedPersonnel, wikidataInfluence); Autechre↔Cat Power
+        only has dj_transition.
+        """
+        aid = artist_ids["Autechre"]
+        resp = await client.get(
+            f"/graph/artists/{aid}/neighbors", params={"type": "affinity", "limit": 10}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["edge_type"] == "affinity"
+        names = [n["artist"]["canonical_name"] for n in data["neighbors"]]
+        assert names[0] == "Stereolab"
+        assert "Cat Power" in names
+        stereo = data["neighbors"][0]
+        assert stereo["detail"]["dimensions"] >= 3
+        assert "djTransition" in stereo["detail"]["types"]
+
+    @pytest.mark.asyncio
+    async def test_affinity_no_edges(self, client: AsyncClient, artist_ids: dict[str, int]) -> None:
+        aid = artist_ids["Father John Misty"]
+        resp = await client.get(f"/graph/artists/{aid}/neighbors", params={"type": "affinity"})
+        assert resp.status_code == 200
+        assert resp.json()["neighbors"] == []
+
+    @pytest.mark.asyncio
+    async def test_affinity_unknown_artist_404(self, client: AsyncClient) -> None:
+        resp = await client.get("/graph/artists/99999/neighbors", params={"type": "affinity"})
+        assert resp.status_code == 404
+
+
+class TestBatchNeighbors:
+    @pytest.mark.asyncio
+    async def test_batch_returns_results_per_artist(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        body = {
+            "artist_ids": [artist_ids["Autechre"], artist_ids["Stereolab"]],
+            "type": "djTransition",
+            "limit": 5,
+        }
+        resp = await client.post("/graph/artists/neighbors/batch", json=body)
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert str(artist_ids["Autechre"]) in results
+        assert str(artist_ids["Stereolab"]) in results
+        assert results[str(artist_ids["Autechre"])]["edge_type"] == "djTransition"
+
+    @pytest.mark.asyncio
+    async def test_batch_skips_unknown_artists(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        body = {
+            "artist_ids": [99999, artist_ids["Autechre"]],
+            "type": "djTransition",
+            "limit": 5,
+        }
+        resp = await client.post("/graph/artists/neighbors/batch", json=body)
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert "99999" not in results
+        assert str(artist_ids["Autechre"]) in results
+
+    @pytest.mark.asyncio
+    async def test_batch_affinity_matches_individual(
+        self, client: AsyncClient, artist_ids: dict[str, int]
+    ) -> None:
+        """Batch affinity must produce identical results to N individual calls.
+
+        This is the parity test that protects the batched-SQL optimization.
+        """
+        ids = [artist_ids["Autechre"], artist_ids["Stereolab"], artist_ids["Cat Power"]]
+        params = {"type": "affinity", "limit": 5, "heat": 0.5}
+
+        individual: dict[str, dict] = {}
+        for aid in ids:
+            r = await client.get(f"/graph/artists/{aid}/neighbors", params=params)
+            assert r.status_code == 200
+            individual[str(aid)] = r.json()
+
+        batch_resp = await client.post(
+            "/graph/artists/neighbors/batch",
+            json={"artist_ids": ids, **params},
+        )
+        assert batch_resp.status_code == 200
+        batched = batch_resp.json()["results"]
+
+        for aid in ids:
+            key = str(aid)
+            assert batched[key]["artist"] == individual[key]["artist"]
+            assert batched[key]["edge_type"] == individual[key]["edge_type"]
+            ind_neighbors = individual[key]["neighbors"]
+            bat_neighbors = batched[key]["neighbors"]
+            assert len(bat_neighbors) == len(ind_neighbors)
+            ind_by_id = {n["artist"]["id"]: n for n in ind_neighbors}
+            bat_by_id = {n["artist"]["id"]: n for n in bat_neighbors}
+            assert set(ind_by_id) == set(bat_by_id)
+            for nid, ind_entry in ind_by_id.items():
+                bat_entry = bat_by_id[nid]
+                assert bat_entry["weight"] == pytest.approx(ind_entry["weight"])
+                assert sorted(bat_entry["detail"]["types"]) == sorted(ind_entry["detail"]["types"])
+                assert bat_entry["detail"]["dimensions"] == ind_entry["detail"]["dimensions"]
+
+
 class TestWikidataInfluenceNeighbors:
     @pytest.mark.asyncio
     async def test_influence_neighbors_outbound(

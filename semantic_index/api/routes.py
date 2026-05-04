@@ -382,24 +382,45 @@ def get_neighbors_batch(
     HTTP connection waterfall on depth-2 graph expansion.
     """
     edge_type = EdgeType(body.type)
-    results: dict[str, NeighborsResponse] = {}
-    has_facets = body.month is not None or body.dj_id is not None
+    artist_ids = body.artist_ids[:20]  # cap at 20 to prevent abuse
+    if not artist_ids:
+        return BatchNeighborsResponse(results={})
 
-    for artist_id in body.artist_ids[:20]:  # cap at 20 to prevent abuse
-        try:
-            artist = _get_artist_or_404(db, artist_id)
-        except HTTPException:
+    _init_metrics_flag(db)
+    placeholders = ",".join("?" * len(artist_ids))
+    rows = db.execute(
+        f"SELECT {_scols()} FROM artist WHERE id IN ({placeholders})",  # noqa: S608
+        artist_ids,
+    ).fetchall()
+    source_artists: dict[int, ArtistSummary] = {r["id"]: _artist_summary(r) for r in rows}
+
+    has_facets = body.month is not None or body.dj_id is not None
+    results: dict[str, NeighborsResponse] = {}
+
+    if edge_type == EdgeType.AFFINITY:
+        present = [aid for aid in artist_ids if aid in source_artists]
+        affinity = _neighbors_affinity_batch(db, present, body.limit, heat=body.heat)
+        for aid in artist_ids:
+            if aid not in source_artists:
+                continue
+            results[str(aid)] = NeighborsResponse(
+                artist=source_artists[aid],
+                edge_type=edge_type.value,
+                neighbors=affinity.get(aid, []),
+            )
+        return BatchNeighborsResponse(results=results)
+
+    for artist_id in artist_ids:
+        if artist_id not in source_artists:
             continue
         if has_facets and edge_type == EdgeType.DJ_TRANSITION:
             neighbors = _neighbors_dj_transition_faceted(
                 db, artist_id, body.limit, body.month, body.dj_id, heat=body.heat
             )
-        elif edge_type == EdgeType.AFFINITY:
-            neighbors = _neighbors_affinity(db, artist_id, body.limit, heat=body.heat)
         else:
             neighbors = _query_neighbors(db, artist_id, edge_type, body.limit, heat=body.heat)
         results[str(artist_id)] = NeighborsResponse(
-            artist=artist, edge_type=edge_type.value, neighbors=neighbors
+            artist=source_artists[artist_id], edge_type=edge_type.value, neighbors=neighbors
         )
 
     return BatchNeighborsResponse(results=results)
@@ -1003,6 +1024,150 @@ def _neighbors_affinity(
                 detail={"dimensions": len(types), "types": types},
             )
         )
+    return results
+
+
+def _neighbors_affinity_batch(
+    db: sqlite3.Connection,
+    artist_ids: list[int],
+    limit: int,
+    *,
+    heat: float = 0.5,
+) -> dict[int, list[NeighborEntry]]:
+    """Compute affinity neighbors for many source artists with one SQL pass per edge table.
+
+    Mirrors :func:`_neighbors_affinity` but issues a single ``WHERE source_id IN (...)``
+    query per edge table instead of two-per-table-per-source. Per-source ranking
+    semantics (heat blend, type-max normalization, weighted composite) are unchanged.
+    """
+    if not artist_ids:
+        return {}
+
+    affinity_sources: list[tuple[str, EdgeSchema]] = [
+        (edge_type.value, schema)
+        for edge_type, schema in EDGE_REGISTRY.items()
+        if schema.affinity_score_expr is not None
+    ]
+    affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
+
+    placeholders = ",".join("?" * len(artist_ids))
+    params = list(artist_ids) + list(artist_ids)
+
+    per_source_edges: dict[int, dict[int, list[tuple[str, float]]]] = {
+        aid: {} for aid in artist_ids
+    }
+    per_source_dj_raw: dict[int, dict[int, tuple[float, float]]] = {aid: {} for aid in artist_ids}
+
+    dj_query = (
+        f"SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count "  # noqa: S608
+        f"FROM dj_transition WHERE source_id IN ({placeholders}) "
+        "UNION ALL "
+        "SELECT target_id, source_id, pmi, raw_count "
+        f"FROM dj_transition WHERE target_id IN ({placeholders})"
+    )
+    try:
+        for row in db.execute(dj_query, params):
+            sid, nid, score, raw_count = row[0], row[1], float(row[2]), float(row[3])
+            if sid not in per_source_edges:
+                continue
+            per_source_dj_raw[sid][nid] = (score, raw_count)
+            per_source_edges[sid].setdefault(nid, []).append(("djTransition", score))
+    except sqlite3.OperationalError:
+        pass
+
+    for etype_default, source in affinity_sources:
+        etype = source.affinity_type_name or etype_default
+        query = (
+            f"SELECT {source.col_a} AS sid, {source.col_b} AS nid, "  # noqa: S608
+            f"{source.affinity_score_expr} AS score "
+            f"FROM {source.table} WHERE {source.col_a} IN ({placeholders}) "
+            "UNION ALL "
+            f"SELECT {source.col_b}, {source.col_a}, {source.affinity_score_expr} "
+            f"FROM {source.table} WHERE {source.col_b} IN ({placeholders})"
+        )
+        try:
+            for row in db.execute(query, params):
+                sid, nid, score = row[0], row[1], float(row[2])
+                if sid not in per_source_edges:
+                    continue
+                per_source_edges[sid].setdefault(nid, []).append((etype, score))
+        except sqlite3.OperationalError:
+            continue
+
+    dim_weights: dict[str, float] = {"djTransition": 3.0}
+    for etype_default, source in affinity_sources:
+        dim_weights[source.affinity_type_name or etype_default] = source.affinity_weight
+
+    per_source_top: dict[int, list[tuple[int, float, list[str]]]] = {}
+    all_top_nids: set[int] = set()
+
+    for sid in artist_ids:
+        neighbor_edges = per_source_edges[sid]
+        if not neighbor_edges:
+            per_source_top[sid] = []
+            continue
+
+        dj_raw = per_source_dj_raw[sid]
+        if dj_raw:
+            max_pmi = max(p for p, _ in dj_raw.values()) or 1
+            max_rc = max(rc for _, rc in dj_raw.values()) or 1
+            for nid, (pmi, rc) in dj_raw.items():
+                blended = (1 - heat) * (rc / max_rc) + heat * (pmi / max_pmi)
+                neighbor_edges[nid] = [
+                    (etype, blended if etype == "djTransition" else score)
+                    for etype, score in neighbor_edges[nid]
+                ]
+
+        type_maxes: dict[str, float] = {}
+        for edges in neighbor_edges.values():
+            for etype, score in edges:
+                type_maxes[etype] = max(type_maxes.get(etype, 0), score)
+
+        scored: list[tuple[int, float, list[str]]] = []
+        for nid, edges in neighbor_edges.items():
+            composite = 0.0
+            types: list[str] = []
+            seen_types: set[str] = set()
+            for etype, score in edges:
+                if etype in seen_types:
+                    continue
+                seen_types.add(etype)
+                max_score = type_maxes.get(etype, 1) or 1
+                w = dim_weights.get(etype, 1.0)
+                composite += w * (score / max_score)
+                types.append(etype)
+            scored.append((nid, composite, types))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[:limit]
+        per_source_top[sid] = top
+        all_top_nids.update(nid for nid, _, _ in top)
+
+    if not all_top_nids:
+        return {sid: [] for sid in artist_ids}
+
+    nbr_placeholders = ",".join("?" * len(all_top_nids))
+    artist_rows = db.execute(
+        f"SELECT {_scols()} FROM artist WHERE id IN ({nbr_placeholders})",  # noqa: S608
+        list(all_top_nids),
+    ).fetchall()
+    artist_map = {r["id"]: r for r in artist_rows}
+
+    results: dict[int, list[NeighborEntry]] = {}
+    for sid in artist_ids:
+        entries: list[NeighborEntry] = []
+        for nid, composite, types in per_source_top.get(sid, []):
+            r = artist_map.get(nid)
+            if not r:
+                continue
+            entries.append(
+                NeighborEntry(
+                    artist=_artist_summary(r),
+                    weight=round(composite, 3),
+                    detail={"dimensions": len(types), "types": types},
+                )
+            )
+        results[sid] = entries
     return results
 
 
