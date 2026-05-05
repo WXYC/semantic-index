@@ -71,7 +71,26 @@ Re-runs are safe: `generate_narratives.py` supports `--skip-cached`, and the und
 
 ## Labeling
 
-The CSV is sized for Google Sheets. Columns:
+Two ways to run a labeling pass; both round-trip through `merge_labels.py` at the end.
+
+### Web UI (preferred for multi-labeler runs)
+
+```bash
+python -m semantic_index.labeling_app --jsonl output/eval/labeling.jsonl --port 8090
+# open http://127.0.0.1:8090, type your name once, label rows, click "export CSV"
+# repeat for each labeler (separate names keep their work isolated)
+python -m scripts.eval.merge_labels \
+    --labeling-jsonl output/eval/labeling.jsonl \
+    --labels-csv labels-jake.csv \
+    --labeler jake \
+    --out output/eval/labeling_labeled.jake.jsonl
+```
+
+The UI keeps each labeler's progress in a SQLite sidecar (`labeling.jsonl.labels.db` by default), survives reloads, and refuses invalid combinations (severity without failure_mode, unknown rubric values). The exported CSV is identical in shape to the one `merge_labels.py` reads from a Sheets-based pass, so the two workflows are interchangeable. `construction_method` and `expected_label` are stripped before any row reaches the browser, so the labeler can't see the answer key for deliberately-wrong rows.
+
+### Google Sheets
+
+The CSV is sized for Sheets. Columns:
 
 - `row_id` — stable identifier; preserves identity across reshuffles or label-merge passes.
 - `cell_id`, `pair`, `narrative` — the row a labeler reads.
@@ -86,8 +105,6 @@ For multi-labeler runs:
 1. Calibration round — every labeler labels the same first 20 rows. Compare results, refine rubric examples for any rows where labelers disagreed.
 2. Bulk pass — partition the remaining rows. Optionally by genre wheelhouse if labelers have specialized expertise.
 3. Self-IRR — re-label a 10% subset a week later (single-labeler quality check).
-
-After labels merge back into a single CSV, a follow-up script (`merge_labels.py`, not yet built) will join them onto the JSONL backing file by `row_id`, producing the labeled eval set proper.
 
 ## What this enables
 
@@ -107,6 +124,7 @@ Once the eval set has human labels:
 | `scripts/eval/export_labeling.py` | Joins narratives with input data; emits CSV + JSONL. Hides `construction_method` and `expected_label` from the CSV so the labeler doesn't see the answer. |
 | `scripts/eval/merge_labels.py` | Joins a filled-in labeler CSV back onto `labeling.jsonl` by `row_id`. Validates against the rubric vocabulary; supports per-labeler outputs for IRR work. |
 | `scripts/eval/backscore.py` | Two subcommands: `score` runs token-match v1 and claim-ratio v1 against every eval-set row (real metadata, not the model's prompt input — mirrors what a labeler judges); `metrics` reports precision/recall/F1 of each scorer once labels exist. |
+| `semantic_index/labeling_app/` | FastAPI single-page web UI for labeling. SQLite-backed per-labeler progress, CSV export compatible with `merge_labels.py`. Run with `python -m semantic_index.labeling_app --jsonl <labeling.jsonl>`. |
 | `tests/unit/test_eval_sample_pairs.py` | Sampler unit tests (cell classification, edge enumeration, self-loop exclusion). |
 | `tests/unit/test_eval_merge_labels.py` | Label-merge validation (vocabulary, severity-without-mode error, unknown row_id rejection). |
 | `docs/eval-set-rubric.md` | Labeling rubric: severity, failure modes, worked examples. |
