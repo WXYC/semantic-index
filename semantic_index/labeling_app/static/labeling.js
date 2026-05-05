@@ -101,21 +101,26 @@ function renderRowDetail() {
   $("#row-insufficient").hidden = !row.insufficient_signal;
   $("#row-pair").textContent = row.pair;
   $("#row-narrative").textContent = row.narrative || "(no narrative)";
-  $("#row-token-match").textContent = (row.token_match_score ?? 0).toFixed(3);
-  $("#row-source-data").textContent = formatArtist(row.source_data);
-  $("#row-target-data").textContent = formatArtist(row.target_data);
+  fillArtistDl($("#row-source-data"), row.source_data);
+  fillArtistDl($("#row-target-data"), row.target_data);
 
   const ul = $("#row-neighbors");
   ul.innerHTML = "";
   for (const n of row.shared_neighbors || []) {
     const li = document.createElement("li");
-    li.textContent = `${n.name} (aa ${(n.aa_score ?? 0).toFixed(2)})`;
+    const name = document.createElement("span");
+    name.textContent = n.name;
+    const score = document.createElement("span");
+    score.className = "score";
+    score.textContent = (n.aa_score ?? 0).toFixed(2);
+    score.title = "Adamic-Adar score: how strongly this neighbor links the two artists.";
+    li.append(name, score);
     ul.appendChild(li);
   }
   if (!ul.children.length) {
     const li = document.createElement("li");
-    li.textContent = "(none)";
-    li.style.opacity = "0.5";
+    li.className = "empty";
+    li.textContent = "no shared neighbors recorded";
     ul.appendChild(li);
   }
 
@@ -127,20 +132,51 @@ function renderRowDetail() {
   updateFailureModeAvailability();
 }
 
-function formatArtist(meta) {
-  if (!meta) return "(none)";
-  const lines = [];
-  if (meta.name != null) lines.push(`name:    ${meta.name}`);
-  if (meta.total_plays != null) lines.push(`plays:   ${meta.total_plays}`);
-  if (meta.genre != null) lines.push(`genre:   ${meta.genre}`);
-  if (Array.isArray(meta.styles) && meta.styles.length) lines.push(`styles:  ${meta.styles.join(", ")}`);
+// Map raw JSONL keys to plain-English labels. Order in this list is the
+// display order; keys absent from the metadata are simply skipped.
+const TOP_LEVEL_FIELDS = [
+  ["total_plays", "WXYC plays"],
+  ["genre", "WXYC genre"],
+  ["styles", "Discogs styles"],
+];
+const AUDIO_FIELDS = [
+  ["primary_genre", "Sounds like"],
+  ["danceability", "Danceability"],
+  ["top_moods", "Top moods"],
+  ["key", "Musical key"],
+  ["recording_count", "Recordings analyzed"],
+];
+
+function fillArtistDl(dl, meta) {
+  dl.innerHTML = "";
+  if (!meta) {
+    const empty = document.createElement("dd");
+    empty.className = "empty";
+    empty.textContent = "no metadata";
+    dl.appendChild(empty);
+    return;
+  }
+  for (const [key, label] of TOP_LEVEL_FIELDS) {
+    appendDlRow(dl, label, meta[key]);
+  }
   if (meta.audio) {
-    for (const [k, v] of Object.entries(meta.audio)) {
-      const val = Array.isArray(v) ? v.join(", ") : v;
-      lines.push(`audio.${k}: ${val}`);
+    for (const [key, label] of AUDIO_FIELDS) {
+      appendDlRow(dl, label, meta.audio[key]);
     }
   }
-  return lines.join("\n");
+}
+
+function appendDlRow(dl, label, value) {
+  if (value == null) return;
+  if (Array.isArray(value)) {
+    if (!value.length) return;
+    value = value.join(", ");
+  }
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = String(value);
+  dl.append(dt, dd);
 }
 
 function escapeHtml(s) {
