@@ -65,7 +65,7 @@ class TestRowOrder:
         src = RowSource(jsonl_path)
         summaries = src.summaries()
         assert summaries[0]["row_id"] == "R0001"
-        assert summaries[0]["pair"] == "Pavement <-> Stereolab"
+        assert summaries[0]["pair"] == "Pavement ↔ Stereolab"
         assert summaries[0]["cell_id"] == "HIGH-RICH-SAME-DIRECT"
 
 
@@ -83,7 +83,7 @@ class TestRedaction:
         assert row["source_data"]["name"] == "Pavement"
         assert row["target_data"]["name"] == "Stereolab"
         assert row["shared_neighbors"][0]["name"] == "Roxy Music"
-        assert row["pair"] == "Pavement <-> Stereolab"
+        assert row["pair"] == "Pavement ↔ Stereolab"
 
     def test_get_unknown_row_id_raises(self, jsonl_path: Path) -> None:
         src = RowSource(jsonl_path)

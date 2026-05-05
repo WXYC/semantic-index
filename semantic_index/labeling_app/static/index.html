@@ -24,10 +24,10 @@
 
     <article id="row-card" hidden>
       <header class="row-header">
-        <div>
+        <div class="row-meta">
           <span id="row-id" class="row-id"></span>
           <span id="row-cell" class="cell"></span>
-          <span id="row-insufficient" class="badge" hidden>insufficient signal</span>
+          <span id="row-insufficient" class="badge" hidden title="The model declined to write a confident narrative — there wasn't enough musical signal to ground claims. These rows usually don't carry severe errors.">low signal</span>
         </div>
         <div id="progress" class="progress"></div>
       </header>
@@ -37,47 +37,76 @@
       <section class="narrative-block">
         <h3>Narrative</h3>
         <p id="row-narrative"></p>
-        <div class="meta">
-          token-match: <span id="row-token-match"></span>
-        </div>
       </section>
 
       <section class="data-grid">
-        <div>
-          <h3>Source</h3>
-          <pre id="row-source-data"></pre>
+        <div class="data-card">
+          <h3>Source artist</h3>
+          <dl id="row-source-data"></dl>
         </div>
-        <div>
-          <h3>Target</h3>
-          <pre id="row-target-data"></pre>
+        <div class="data-card">
+          <h3>Target artist</h3>
+          <dl id="row-target-data"></dl>
         </div>
       </section>
 
-      <section>
-        <h3>Shared neighbors</h3>
+      <section class="neighbors-block">
+        <h3>Shared neighbors <span class="hint" title="Other artists that DJs played alongside both of these. Higher score = stronger shared context.">?</span></h3>
         <ul id="row-neighbors"></ul>
       </section>
 
       <form id="label-form" autocomplete="off">
         <fieldset>
-          <legend>Severity</legend>
-          <label><input type="radio" name="severity" value="severe" /> severe</label>
-          <label><input type="radio" name="severity" value="minor" /> minor</label>
-          <label><input type="radio" name="severity" value="not_wrong" /> not_wrong</label>
+          <legend>How wrong is the narrative?</legend>
+          <label title="A wrong claim that would mislead a listener — wrong artist identity, fabricated collaboration, made-up genre, etc.">
+            <input type="radio" name="severity" value="severe" />
+            <strong>Severe</strong>
+            <span class="hint-text">would mislead a listener</span>
+          </label>
+          <label title="Slightly off but mostly correct — overstates a connection, vague in a way that's not strictly wrong, etc.">
+            <input type="radio" name="severity" value="minor" />
+            <strong>Minor</strong>
+            <span class="hint-text">a little off, mostly fine</span>
+          </label>
+          <label title="No problem with any claim. An 'insufficient signal' canned response counts as fine.">
+            <input type="radio" name="severity" value="not_wrong" />
+            <strong>Looks fine</strong>
+            <span class="hint-text">no problem</span>
+          </label>
         </fieldset>
 
         <fieldset id="fm-fieldset">
-          <legend>Failure mode</legend>
-          <label><input type="radio" name="failure_mode" value="subject_hallucination" /> subject_hallucination</label>
-          <label><input type="radio" name="failure_mode" value="neighbor_characterization" /> neighbor_characterization</label>
-          <label><input type="radio" name="failure_mode" value="dj_intent" /> dj_intent</label>
-          <label><input type="radio" name="failure_mode" value="data_noise" /> data_noise</label>
-          <label><input type="radio" name="failure_mode" value="other" /> other</label>
+          <legend>What kind of mistake?</legend>
+          <label title="The narrative makes claims about a DIFFERENT artist than the one named — usually because the model confused them with a similarly-named musician.">
+            <input type="radio" name="failure_mode" value="subject_hallucination" />
+            <strong>Wrong artist</strong>
+            <span class="hint-text">confused with someone else</span>
+          </label>
+          <label title="A claim about a third artist mentioned in the narrative is wrong — wrong genre, made-up collaboration, etc.">
+            <input type="radio" name="failure_mode" value="neighbor_characterization" />
+            <strong>Wrong about a third party</strong>
+            <span class="hint-text">misdescribes a mentioned artist</span>
+          </label>
+          <label title="The narrative claims a DJ played them together for a reason that the data doesn't support.">
+            <input type="radio" name="failure_mode" value="dj_intent" />
+            <strong>Misread DJ intent</strong>
+            <span class="hint-text">invents the WHY</span>
+          </label>
+          <label title="The narrative is faithful to its inputs, but the inputs themselves were misleading — e.g. an outlier Discogs style for an indie band.">
+            <input type="radio" name="failure_mode" value="data_noise" />
+            <strong>Misled by bad input</strong>
+            <span class="hint-text">faithful to noisy data</span>
+          </label>
+          <label title="Something else is wrong. Use the notes field to explain.">
+            <input type="radio" name="failure_mode" value="other" />
+            <strong>Other</strong>
+            <span class="hint-text">explain in notes</span>
+          </label>
         </fieldset>
 
         <label class="notes">
-          Notes
-          <textarea name="notes" rows="3" placeholder="Optional. Concrete: which claim is wrong, which neighbor was hallucinated, etc."></textarea>
+          Notes <span class="muted">(optional)</span>
+          <textarea name="notes" rows="3" placeholder="Be concrete: which claim is wrong, which neighbor was hallucinated, etc."></textarea>
         </label>
 
         <div class="actions">
@@ -86,6 +115,10 @@
           <button type="button" id="next-button" title="Tab or j">↓ next</button>
           <span id="save-status" class="muted"></span>
         </div>
+
+        <p class="kbd-hint muted">
+          Hotkeys: <kbd>j</kbd>/<kbd>k</kbd> next/prev row · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> severe/minor/fine · <kbd>⌘↵</kbd> save and advance
+        </p>
       </form>
     </article>
   </section>

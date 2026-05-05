@@ -60,7 +60,7 @@ class RowSource:
                 {
                     "row_id": r["row_id"],
                     "cell_id": r.get("cell_id", ""),
-                    "pair": f"{r.get('source_name', '?')} <-> {r.get('target_name', '?')}",
+                    "pair": f"{r.get('source_name', '?')} ↔ {r.get('target_name', '?')}",
                     "insufficient_signal": bool(r.get("insufficient_signal")),
                 }
             )
@@ -74,5 +74,5 @@ class RowSource:
 
 def _redact(row: dict) -> dict:
     return {k: v for k, v in row.items() if k not in REDACTED_FIELDS} | {
-        "pair": f"{row.get('source_name', '?')} <-> {row.get('target_name', '?')}",
+        "pair": f"{row.get('source_name', '?')} ↔ {row.get('target_name', '?')}",
     }
