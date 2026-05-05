@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Narrative labeling — WXYC eval set</title>
+<link rel="stylesheet" href="/static/labeling.css" />
+</head>
+<body>
+<header>
+  <h1>Narrative labeling <span class="muted">— WXYC eval set</span></h1>
+  <div id="who">
+    <span id="labeler-display"></span>
+    <button id="change-labeler" type="button">change labeler</button>
+    <a id="export-link" href="#" download>export CSV</a>
+  </div>
+</header>
+
+<main>
+  <aside id="row-list" aria-label="Row list"></aside>
+
+  <section id="row-detail">
+    <div id="row-empty">Pick a row from the list to start labeling.</div>
+
+    <article id="row-card" hidden>
+      <header class="row-header">
+        <div>
+          <span id="row-id" class="row-id"></span>
+          <span id="row-cell" class="cell"></span>
+          <span id="row-insufficient" class="badge" hidden>insufficient signal</span>
+        </div>
+        <div id="progress" class="progress"></div>
+      </header>
+
+      <h2 id="row-pair"></h2>
+
+      <section class="narrative-block">
+        <h3>Narrative</h3>
+        <p id="row-narrative"></p>
+        <div class="meta">
+          token-match: <span id="row-token-match"></span>
+        </div>
+      </section>
+
+      <section class="data-grid">
+        <div>
+          <h3>Source</h3>
+          <pre id="row-source-data"></pre>
+        </div>
+        <div>
+          <h3>Target</h3>
+          <pre id="row-target-data"></pre>
+        </div>
+      </section>
+
+      <section>
+        <h3>Shared neighbors</h3>
+        <ul id="row-neighbors"></ul>
+      </section>
+
+      <form id="label-form" autocomplete="off">
+        <fieldset>
+          <legend>Severity</legend>
+          <label><input type="radio" name="severity" value="severe" /> severe</label>
+          <label><input type="radio" name="severity" value="minor" /> minor</label>
+          <label><input type="radio" name="severity" value="not_wrong" /> not_wrong</label>
+        </fieldset>
+
+        <fieldset id="fm-fieldset">
+          <legend>Failure mode</legend>
+          <label><input type="radio" name="failure_mode" value="subject_hallucination" /> subject_hallucination</label>
+          <label><input type="radio" name="failure_mode" value="neighbor_characterization" /> neighbor_characterization</label>
+          <label><input type="radio" name="failure_mode" value="dj_intent" /> dj_intent</label>
+          <label><input type="radio" name="failure_mode" value="data_noise" /> data_noise</label>
+          <label><input type="radio" name="failure_mode" value="other" /> other</label>
+        </fieldset>
+
+        <label class="notes">
+          Notes
+          <textarea name="notes" rows="3" placeholder="Optional. Concrete: which claim is wrong, which neighbor was hallucinated, etc."></textarea>
+        </label>
+
+        <div class="actions">
+          <button type="submit" id="save-button">Save (⌘↵)</button>
+          <button type="button" id="prev-button" title="Shift+Tab or k">↑ prev</button>
+          <button type="button" id="next-button" title="Tab or j">↓ next</button>
+          <span id="save-status" class="muted"></span>
+        </div>
+      </form>
+    </article>
+  </section>
+</main>
+
+<script src="/static/labeling.js"></script>
+</body>
+</html>
