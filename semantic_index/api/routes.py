@@ -86,6 +86,13 @@ class EdgeSchema:
     affinity_type_name: str | None = None
 
 
+# Cosine similarity over per-artist audio feature centroids saturates: stored
+# values cluster in [0.97, 1.0] (production avg 0.977). Production uses an
+# inclusion threshold of 0.98; older data starts at 0.97. Below this floor the
+# acoustic dimension is treated as zero contribution to affinity.
+ACOUSTIC_SATURATION_FLOOR = 0.97
+
+
 EDGE_REGISTRY: dict[EdgeType, EdgeSchema] = {
     EdgeType.SHARED_STYLE: EdgeSchema(
         "shared_style",
@@ -131,7 +138,14 @@ EDGE_REGISTRY: dict[EdgeType, EdgeSchema] = {
         "acoustic_similarity",
         "similarity",
         ["similarity"],
-        affinity_score_expr="similarity",
+        # Without rescaling, per-set max-normalization gives every audio-covered
+        # neighbor a near-uniform contribution and the dimension behaves as a
+        # flat coverage bonus rather than a similarity signal. Map the saturated
+        # band into [0, 1] so contribution reflects distance above the floor.
+        affinity_score_expr=(
+            f"MAX(0, (similarity - {ACOUSTIC_SATURATION_FLOOR})"
+            f" / (1 - {ACOUSTIC_SATURATION_FLOOR}))"
+        ),
         affinity_weight=2.0,
     ),
 }
