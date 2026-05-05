@@ -435,6 +435,69 @@ class TestAffinityNeighbors:
         assert resp.status_code == 404
 
 
+class TestAffinityAcousticRescale:
+    """Acoustic similarity values cluster in 0.97-1.0; without rescaling, every
+    neighbor with audio coverage gets a near-identical contribution and the
+    dimension behaves as a flat coverage bonus rather than a similarity signal.
+
+    These tests pin the rescaled behavior: contributions should reflect distance
+    above the saturation floor (≈0.97), so a marginal neighbor (sim=0.972)
+    contributes much less than a top neighbor (sim=0.99).
+    """
+
+    @pytest_asyncio.fixture
+    async def acoustic_client(self) -> AsyncClient:
+        from tests.conftest import make_artist_stats
+
+        path = tempfile.mktemp(suffix=".db")
+        stats = {
+            "TestSource": make_artist_stats("TestSource", total_plays=10),
+            "TopMatch": make_artist_stats("TopMatch", total_plays=10),
+            "MidMatch": make_artist_stats("MidMatch", total_plays=10),
+            "MarginalMatch": make_artist_stats("MarginalMatch", total_plays=10),
+        }
+        export_sqlite(path, artist_stats=stats, pmi_edges=[], xref_edges=[], min_count=1)
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS acoustic_similarity ("
+            " artist_a_id INTEGER NOT NULL, artist_b_id INTEGER NOT NULL,"
+            " similarity REAL NOT NULL, PRIMARY KEY (artist_a_id, artist_b_id))"
+        )
+        ids = {r[1]: r[0] for r in conn.execute("SELECT id, canonical_name FROM artist")}
+        src = ids["TestSource"]
+        for name, sim in (("TopMatch", 0.99), ("MidMatch", 0.985), ("MarginalMatch", 0.972)):
+            a, b = sorted([src, ids[name]])
+            conn.execute("INSERT INTO acoustic_similarity VALUES (?, ?, ?)", (a, b, sim))
+        conn.commit()
+        conn.close()
+        app = create_app(path)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac, ids
+
+    @pytest.mark.asyncio
+    async def test_marginal_acoustic_neighbor_contributes_much_less_than_top(
+        self, acoustic_client: tuple[AsyncClient, dict[str, int]]
+    ) -> None:
+        client, ids = acoustic_client
+        resp = await client.get(
+            f"/graph/artists/{ids['TestSource']}/neighbors",
+            params={"type": "affinity", "limit": 10},
+        )
+        assert resp.status_code == 200
+        weights = {n["artist"]["canonical_name"]: n["weight"] for n in resp.json()["neighbors"]}
+        assert set(weights) == {"TopMatch", "MidMatch", "MarginalMatch"}
+        # The dimension should discriminate: marginal must lag well behind top.
+        # Pre-rescale: all three weights cluster at ~1.96. Post-rescale: top ≈ 2.0,
+        # marginal should drop to ≤ 50% of top because (0.972-0.97)/(0.99-0.97) ≈ 0.1.
+        assert weights["MarginalMatch"] < weights["TopMatch"] * 0.5, (
+            f"Acoustic similarity is saturated — marginal weight {weights['MarginalMatch']} "
+            f"is too close to top weight {weights['TopMatch']}; expected the rescaled dimension "
+            f"to spread contributions by distance above the 0.97 saturation floor."
+        )
+        # Order is still preserved: top > mid > marginal.
+        assert weights["TopMatch"] > weights["MidMatch"] > weights["MarginalMatch"]
+
+
 class TestBatchNeighbors:
     @pytest.mark.asyncio
     async def test_batch_returns_results_per_artist(
