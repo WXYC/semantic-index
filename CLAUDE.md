@@ -473,6 +473,16 @@ The SQLite database and sidecar caches live in the bind-mounted `/data` director
 - `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN for nightly sync (required when `SYNC_ENABLED=true`; uses the RDS private endpoint since EC2 and RDS share a VPC)
 - `SYNC_MIN_COUNT` — minimum co-occurrence count for DJ transition edges (default: `2`)
 
+**Cross-cache-identity feature flags.** Per-cache toggles for which `wxyc_library` hook table the resolver reads (legacy schema vs. new normalized schema). All default `false`. The **canonical inventory** (with naming-convention rationale and approval gates) lives in `WXYC/Backend-Service/CLAUDE.md` "Cross-cache-identity feature flags (canonical inventory)". When a flag is renamed or its default changes, both the canonical Backend section AND this list must update in the same PR; CI on this repo grep-asserts the names listed here match the §4.2 inventory.
+
+| Flag | Scope | Default | Set true when |
+|---|---|---|---|
+| `SI_USE_NEW_HOOK_DISCOGS` | per-cache (Docker discogs, port 5433) | `false` | LML cuts over for that cache + 7 days clean |
+| `SI_USE_NEW_HOOK_MUSICBRAINZ` | per-cache | `false` | LML cuts over for that cache + 7 days clean |
+| `SI_USE_NEW_HOOK_WIKIDATA` | per-cache | `false` | LML cuts over for that cache + 7 days clean |
+
+Production location: EC2 systemd unit env file (`.env.semantic-index`). Updater is Jake via SSH + edit env file + container restart. Plan reference: `WXYC/wiki/plans/library-hook-canonicalization-plan.md` §4.2.
+
 **GitHub Actions secrets** (shared with Backend-Service, same GitHub org):
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ECR_URI`
 - `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
