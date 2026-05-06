@@ -2,7 +2,8 @@
 
 These tests verify that:
 1. wxyc_etl.text.is_compilation_artist covers all cases that utils.is_various_artists handles
-2. wxyc_etl.text.normalize_artist_name produces equivalent results to artist_resolver._normalize
+2. wxyc_etl.text.to_match_form (WX-2 Normalizer Charter) produces the expected base
+   normalization used by artist_resolver._normalize
 3. wxyc_etl.schema constants cover all hardcoded table names in discogs_client.py
 """
 
@@ -73,7 +74,7 @@ def test_is_compilation_artist_false_for_real_artists(name):
     assert text.is_compilation_artist(name) is False
 
 
-# --- normalize_artist_name parity with artist_resolver._normalize ---
+# --- to_match_form parity with artist_resolver._normalize base layer ---
 
 
 @pytest.mark.parametrize(
@@ -86,8 +87,7 @@ def test_is_compilation_artist_false_for_real_artists(name):
         # Diacritics (NFKD decomposition)
         ("Bjork", "bjork"),
         ("Sigur Ros", "sigur ros"),
-        # wxyc_etl does NFKD + strip diacritics, which is a superset of what
-        # the old _normalize did (the old one only did lowercase + strip)
+        # NFKD + strip diacritics
         ("Cafe Tacvba", "cafe tacvba"),
         # Empty
         ("", ""),
@@ -95,14 +95,9 @@ def test_is_compilation_artist_false_for_real_artists(name):
         ("  Mixed Case  ", "mixed case"),
     ],
 )
-def test_normalize_artist_name_parity(input_name, expected):
-    """wxyc_etl.normalize_artist_name produces equivalent results for common cases."""
-    assert text.normalize_artist_name(input_name) == expected
-
-
-def test_normalize_handles_none():
-    """normalize_artist_name accepts None and returns empty string."""
-    assert text.normalize_artist_name(None) == ""
+def test_to_match_form_parity(input_name, expected):
+    """wxyc_etl.to_match_form produces the expected base normalization for common cases."""
+    assert text.to_match_form(input_name) == expected
 
 
 # --- split_artist_name parity with artist_resolver._normalized_forms ---

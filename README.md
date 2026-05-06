@@ -76,7 +76,7 @@ Railway sets the `PORT` environment variable automatically. Set `DB_PATH` to poi
 
 ## Dependencies
 
-The pipeline depends on `wxyc-etl`, a shared Rust/PyO3 package providing text normalization (`normalize_artist_name`, `is_compilation_artist`, `split_artist_name`) and discogs-cache schema constants. All discogs-cache table names in SQL queries come from `wxyc_etl.schema` constants rather than hardcoded strings. See [CLAUDE.md](CLAUDE.md) for the full list of shared functions used.
+The pipeline depends on `wxyc-etl`, a shared Rust/PyO3 package providing text normalization (`to_match_form`, `is_compilation_artist`, `split_artist_name`) and discogs-cache schema constants. All discogs-cache table names in SQL queries come from `wxyc_etl.schema` constants rather than hardcoded strings. See [CLAUDE.md](CLAUDE.md) for the full list of shared functions used.
 
 ## Development
 

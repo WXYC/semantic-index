@@ -340,7 +340,7 @@ def _stub_wxyc_etl():
         return
     stub = MagicMock()
     # text sub-module used by artist_resolver and graph_metrics
-    stub.text.normalize_artist_name = lambda name: name.lower().strip()
+    stub.text.to_match_form = lambda name: name.lower().strip()
     stub.text.is_compilation_artist = lambda name: name.lower() in ("various artists", "v/a")
     stub.text.split_artist_name = lambda name: [name]
     for name in (

@@ -26,7 +26,7 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 |--------|---------------|
 | `semantic_index/sql_parser.py` | Parse MySQL INSERT statements from SQL dump files. Uses `wxyc_etl.parser` Rust extension for ~1000x faster parsing, with `sql_parser_rs` and pure-Python fallbacks. Set `WXYC_ETL_NO_RUST=1` to force pure-Python. |
 | `semantic_index/models.py` | Pydantic data models for all pipeline entities. |
-| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: compilation track (CTA from SQL dump + Discogs from `compilation_track_artists.json`), FK chain, name match, normalized (via `wxyc_etl.text.normalize_artist_name` + local bracket/the/& transforms), fuzzy (Jaro-Winkler), Discogs search, raw fallback. Uses `wxyc_etl.text.split_artist_name` for alias splitting and `wxyc_etl.text.is_compilation_artist` for VA detection. |
+| `semantic_index/artist_resolver.py` | Multi-tier artist name resolution: compilation track (CTA from SQL dump + Discogs from `compilation_track_artists.json`), FK chain, name match, normalized (via `wxyc_etl.text.to_match_form` + local bracket/the/& transforms), fuzzy (Jaro-Winkler), Discogs search, raw fallback. Uses `wxyc_etl.text.split_artist_name` for alias splitting and `wxyc_etl.text.is_compilation_artist` for VA detection. |
 | `semantic_index/adjacency.py` | Extract consecutive artist pairs within radio shows. |
 | `semantic_index/pmi.py` | Compute Pointwise Mutual Information for artist co-occurrences. |
 | `semantic_index/node_attributes.py` | Extract and compute per-artist temporal, DJ, and request statistics. |
@@ -242,7 +242,7 @@ pytest -m slow                  # slow tests, e.g. the artist-resolver-rust perf
 
 The pipeline uses `wxyc-etl` (a Rust/PyO3 package) for shared text normalization, compilation detection, and schema constants:
 
-- **`wxyc_etl.text.normalize_artist_name(name)`** -- NFKD decomposition + diacritics stripping + lowercase + trim. Used as the base layer in `artist_resolver._normalize()`, which adds semantic-index-specific transforms (bracket removal, "the " strip, `&` -> `and`).
+- **`wxyc_etl.text.to_match_form(name)`** -- WX-2 Normalizer Charter match form: NFKD decomposition + diacritics stripping + Cf-strip (preserving U+200D ZWJ) + Greek sigma fold + lowercase + trim/whitespace collapse. Used as the base layer in `artist_resolver._normalize()`, which adds semantic-index-specific transforms (bracket removal, "the " strip, `&` -> `and`).
 - **`wxyc_etl.text.is_compilation_artist(name)`** -- Compilation/VA detection covering "Various Artists", "V/A", "v.a.", "Soundtrack", "Compilation". Replaces the old narrow `is_various_artists()` in `utils.py`.
 - **`wxyc_etl.text.split_artist_name(name)`** -- Context-free multi-artist splitting on `, `, ` / `, ` + `. Used in `artist_resolver._normalized_forms()`.
 - **`wxyc_etl.schema.*`** -- Table name constants (`RELEASE_TABLE`, `RELEASE_ARTIST_TABLE`, `RELEASE_LABEL_TABLE`, `RELEASE_STYLE_TABLE`, `RELEASE_TRACK_TABLE`, `RELEASE_TRACK_ARTIST_TABLE`) for all discogs-cache SQL queries in `discogs_client.py` and `reconciliation.py`.
