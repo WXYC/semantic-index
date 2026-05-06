@@ -25,8 +25,8 @@ from rapidfuzz import process as rfprocess
 from rapidfuzz.distance import JaroWinkler
 from wxyc_etl.text import (  # type: ignore[import-untyped]
     is_compilation_artist,
-    normalize_artist_name,
     split_artist_name,
+    to_match_form,
 )
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
@@ -66,11 +66,13 @@ _BRACKET_RE = re.compile(r"\s*\[.*?\]\s*$")
 def _normalize(name: str) -> str:
     """Normalize an artist name for matching.
 
-    Uses wxyc_etl.text.normalize_artist_name for NFKD decomposition, diacritics
-    stripping, lowercasing, and trimming. Then applies semantic-index-specific
-    transforms: bracket removal, leading 'the ' strip, '&' -> 'and'.
+    Uses wxyc_etl.text.to_match_form (WX-2 Normalizer Charter) as the base layer:
+    NFKD decomposition, diacritics stripping, Cf-strip (preserving U+200D ZWJ),
+    Greek sigma fold, lowercasing, and whitespace trim/collapse. Then applies
+    semantic-index-specific transforms: bracket removal, leading 'the ' strip,
+    '&' -> 'and'.
     """
-    s = normalize_artist_name(name)
+    s = to_match_form(name)
     s = _BRACKET_RE.sub("", s)
     if s.startswith("the "):
         s = s[4:]

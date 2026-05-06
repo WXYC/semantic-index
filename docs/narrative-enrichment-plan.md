@@ -146,7 +146,7 @@ Crawl times are bounded by polite rate limiting (1-2 second delays). Sources are
 Matching reviews to graph artists requires:
 
 1. **Source-specific title parsing** — review titles follow patterns like "Artist - Album" or "Review: Artist — Album" that vary by publication. Regex per source to extract the artist name from the title.
-2. **Name normalization** — NFKD decomposition, diacritics stripping, lowercase, splitting on `/` and `&` separators. The same logic already exists in `artist_resolver.py` via `wxyc_etl.text.normalize_artist_name`.
+2. **Name normalization** — NFKD decomposition, diacritics stripping, lowercase, splitting on `/` and `&` separators. The same logic already exists in `artist_resolver.py` via `wxyc_etl.text.to_match_form`.
 3. **Fuzzy matching** — Jaro-Winkler against canonical names for cases where the review uses a variant spelling (e.g., "Björk" vs "Bjork," "MF DOOM" vs "MF Doom").
 4. **Body text matching** — for reviews that mention artists as reference points (not the review subject), the comparative_artists field from the extraction step serves as a cross-reference signal.
 
