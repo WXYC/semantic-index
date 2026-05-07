@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -26,7 +25,7 @@ from rapidfuzz.distance import JaroWinkler
 from wxyc_etl.text import (  # type: ignore[import-untyped]
     is_compilation_artist,
     split_artist_name,
-    to_match_form,
+    to_identity_match_form,
 )
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
@@ -60,24 +59,20 @@ FUZZY_RELAXED_MIN_PLAYS = 10
 # If the top two candidates differ by less than this, reject as ambiguous
 FUZZY_AMBIGUITY_THRESHOLD = 0.02
 
-_BRACKET_RE = re.compile(r"\s*\[.*?\]\s*$")
-
 
 def _normalize(name: str) -> str:
-    """Normalize an artist name for matching.
+    """Normalize an artist name for identity matching.
 
-    Uses wxyc_etl.text.to_match_form (WX-2 Normalizer Charter) as the base layer:
-    NFKD decomposition, diacritics stripping, Cf-strip (preserving U+200D ZWJ),
-    Greek sigma fold, lowercasing, and whitespace trim/collapse. Then applies
-    semantic-index-specific transforms: bracket removal, leading 'the ' strip,
-    '&' -> 'and'.
+    Wraps wxyc_etl.text.to_identity_match_form (cross-cache-identity normalizer
+    per library-hook-canonicalization-plan §3.3.2 steps 4+5+7): NFKC + lowercase
+    + enclosing paren/bracket strip + leading-article drop ("the ", "a ") +
+    whitespace collapse. The `&` -> `and` shim is applied first so it survives
+    identity normalization (the canonical step 6 collapses `&` to a space, not
+    "and"; this shim is semantic-index-specific).
     """
-    s = to_match_form(name)
-    s = _BRACKET_RE.sub("", s)
-    if s.startswith("the "):
-        s = s[4:]
-    s = s.replace(" & ", " and ")
-    return s
+    s = name.replace(" & ", " and ")
+    result: str = to_identity_match_form(s)
+    return result
 
 
 def _normalized_forms(name: str) -> list[str]:
