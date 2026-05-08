@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
-from semantic_index.api.bio import _generated_summary, parse_discogs_markup
+from semantic_index.api.bio import _fetch_bandcamp_album, _generated_summary, parse_discogs_markup
 from semantic_index.models import ArtistStats
 from semantic_index.pipeline_db import PipelineDB
 
@@ -271,3 +272,32 @@ class TestBioEndpoint:
     async def test_404_unknown_id(self, bio_client: AsyncClient) -> None:
         resp = await bio_client.get("/graph/artists/99999/bio")
         assert resp.status_code == 404
+
+
+def test_fetch_bandcamp_album_forces_utf8_when_no_charset_in_content_type() -> None:
+    # httpx defaults to ISO-8859-1 when Content-Type omits charset=; force UTF-8
+    # so diacritic-bearing album titles survive the regex pass.
+    title = "Csillagrabl\u00f3k"
+    body = (
+        b'<div data-item-id="album-12345"></div><p class="title">' + title.encode("utf-8") + b"</p>"
+    )
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "text/html"},
+        content=body,
+        default_encoding="iso-8859-1",
+        request=httpx.Request("GET", "https://csillagrablok.bandcamp.com"),
+    )
+
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get = MagicMock(return_value=response)
+
+    with patch("semantic_index.api.bio.httpx.Client", return_value=mock_client):
+        result = _fetch_bandcamp_album("csillagrablok")
+
+    assert result is not None
+    album_id, album_title = result
+    assert album_id == "12345"
+    assert album_title == title

@@ -318,6 +318,9 @@ def _fetch_bandcamp_album(bandcamp_id: str) -> tuple[str, str] | None:
         ) as client:
             resp = client.get(f"https://{bandcamp_id}.bandcamp.com")
             resp.raise_for_status()
+            # Bandcamp omits charset= on most pages; force UTF-8 so diacritic
+            # album titles don't mojibake.
+            resp.encoding = "utf-8"
             html = resp.text
 
             # Extract album IDs from data-item-id attributes

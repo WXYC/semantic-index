@@ -12,6 +12,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
+from semantic_index.api.preview import _try_bandcamp
 from semantic_index.models import ArtistStats
 from semantic_index.pipeline_db import PipelineDB
 
@@ -393,3 +394,33 @@ class TestPreviewEndpoint:
         data = resp.json()
         assert data["preview_url"] == "https://audio-ssl.itunes.apple.com/stereolab_jenny.m4a"
         assert data["source"] == "itunes_search"
+
+
+def _http_response(body: bytes, default_encoding: str = "iso-8859-1") -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/html"},
+        content=body,
+        default_encoding=default_encoding,
+        request=httpx.Request("GET", "https://x.bandcamp.com"),
+    )
+
+
+def test_try_bandcamp_forces_utf8_when_no_charset_in_content_type() -> None:
+    # httpx defaults to ISO-8859-1 when Content-Type omits charset=; force UTF-8
+    # so diacritic-bearing artist names in data-tralbum survive the regex+JSON pass.
+    artist = "Csillagrabl\u00f3k"
+    artist_page = b'<a href="/album/the-album">x</a>'
+    tralbum_json = (
+        b'{"trackinfo":[{"title":"t","file":{"mp3-128":"https://x/y.mp3"}}],'
+        b'"current":{"artist":"' + artist.encode("utf-8") + b'"}}'
+    )
+    album_page = b"<script data-tralbum='" + tralbum_json + b"'></script>"
+
+    responses = iter([_http_response(artist_page), _http_response(album_page)])
+
+    with patch("semantic_index.api.preview._http_get", side_effect=lambda *a, **k: next(responses)):
+        result = _try_bandcamp("csillagrablok")
+
+    assert result is not None
+    assert result["artist_name"] == artist
