@@ -166,6 +166,10 @@ def _try_bandcamp(bandcamp_id: str) -> dict | None:
         if resp.status_code != 200:
             return None
 
+        # Bandcamp omits charset= on most pages; force UTF-8 before reading
+        # resp.text so diacritics don't mojibake.
+        resp.encoding = "utf-8"
+
         # Find album links on the artist page
         album_match = re.search(r'<a href="(/album/[^"]+)"', resp.text)
         album_url = None
@@ -180,6 +184,7 @@ def _try_bandcamp(bandcamp_id: str) -> dict | None:
             resp = _http_get(album_url)
             if resp.status_code != 200:
                 return None
+            resp.encoding = "utf-8"
 
         # Extract data-tralbum JSON
         tralbum_match = re.search(r"data-tralbum='([^']*)'", resp.text)
