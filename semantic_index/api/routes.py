@@ -1019,9 +1019,19 @@ def _neighbors_affinity_batch(
         except sqlite3.OperationalError:
             continue
 
-    dim_weights: dict[str, float] = {"djTransition": 3.0}
+    # Heat slider modulates DJ-vs-enrichment weight balance:
+    #   heat=0.0 → pure mirror: DJ full, enrichment damped to zero
+    #   heat=0.5 → balanced: DJ full, enrichment at base weights (existing behavior)
+    #   heat=1.0 → discovery: DJ damped to zero, enrichment doubled
+    # DJ stays at full weight across the cool half then ramps to zero at the hot end;
+    # enrichment ramps linearly from 0 (cool) through 1× (center) to 2× (hot).
+    dj_factor = min(1.0, 2.0 * (1.0 - heat))
+    enrichment_factor = 2.0 * heat
+    dim_weights: dict[str, float] = {"djTransition": 3.0 * dj_factor}
     for etype_default, source in affinity_sources:
-        dim_weights[source.affinity_type_name or etype_default] = source.affinity_weight
+        dim_weights[source.affinity_type_name or etype_default] = (
+            source.affinity_weight * enrichment_factor
+        )
 
     per_source_top: dict[int, list[tuple[int, float, list[str]]]] = {}
     all_top_nids: set[int] = set()

@@ -498,6 +498,75 @@ class TestAffinityAcousticRescale:
         assert weights["TopMatch"] > weights["MidMatch"] > weights["MarginalMatch"]
 
 
+class TestAffinityHeatBalance:
+    """Heat slider should shift the DJ-vs-enrichment weight balance.
+
+    Cool end (heat=0): DJ-only neighbors dominate, enrichment-only damped to zero
+    (pure WXYC mirror). Center (heat=0.5): existing balanced behavior preserved.
+    Hot end (heat=1): DJ damped to zero, enrichment up-weighted (discovery —
+    enrichment-only neighbors can outrank DJ-only ones).
+    """
+
+    @pytest_asyncio.fixture
+    async def heat_client(self) -> AsyncClient:
+        from tests.conftest import make_artist_stats
+
+        path = tempfile.mktemp(suffix=".db")
+        stats = {
+            "Source": make_artist_stats("Source", total_plays=10),
+            "DjOnly": make_artist_stats("DjOnly", total_plays=10),
+            "EnrichOnly": make_artist_stats("EnrichOnly", total_plays=10),
+        }
+        # DjOnly is reachable via dj_transition only; EnrichOnly via acoustic only.
+        pmi_edges = [PmiEdge(source="Source", target="DjOnly", raw_count=5, pmi=2.0)]
+        export_sqlite(path, artist_stats=stats, pmi_edges=pmi_edges, xref_edges=[], min_count=1)
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS acoustic_similarity ("
+            " artist_a_id INTEGER NOT NULL, artist_b_id INTEGER NOT NULL,"
+            " similarity REAL NOT NULL, PRIMARY KEY (artist_a_id, artist_b_id))"
+        )
+        ids = {r[1]: r[0] for r in conn.execute("SELECT id, canonical_name FROM artist")}
+        a, b = sorted([ids["Source"], ids["EnrichOnly"]])
+        # Use 0.99 so the rescaled score is at the saturation-floor cap (≈1.0).
+        conn.execute("INSERT INTO acoustic_similarity VALUES (?, ?, ?)", (a, b, 0.99))
+        conn.commit()
+        conn.close()
+        app = create_app(path)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac, ids
+
+    @pytest.mark.asyncio
+    async def test_cool_slider_dj_only_outranks_enrichment_only(
+        self, heat_client: tuple[AsyncClient, dict[str, int]]
+    ) -> None:
+        client, ids = heat_client
+        resp = await client.get(
+            f"/graph/artists/{ids['Source']}/neighbors",
+            params={"type": "affinity", "limit": 10, "heat": 0.0},
+        )
+        assert resp.status_code == 200
+        weights = {n["artist"]["canonical_name"]: n["weight"] for n in resp.json()["neighbors"]}
+        assert weights["DjOnly"] > 0
+        # At cool, enrichment is damped to zero — EnrichOnly should drop out entirely.
+        assert weights.get("EnrichOnly", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_hot_slider_enrichment_only_outranks_dj_only(
+        self, heat_client: tuple[AsyncClient, dict[str, int]]
+    ) -> None:
+        client, ids = heat_client
+        resp = await client.get(
+            f"/graph/artists/{ids['Source']}/neighbors",
+            params={"type": "affinity", "limit": 10, "heat": 1.0},
+        )
+        assert resp.status_code == 200
+        weights = {n["artist"]["canonical_name"]: n["weight"] for n in resp.json()["neighbors"]}
+        # At hot, DJ contribution is zero — DjOnly should drop out, EnrichOnly should remain.
+        assert weights.get("EnrichOnly", 0) > 0
+        assert weights.get("DjOnly", 0) == 0
+
+
 class TestBatchNeighbors:
     @pytest.mark.asyncio
     async def test_batch_returns_results_per_artist(
