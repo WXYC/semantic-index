@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     port: int = 8000
     anthropic_api_key: str | None = None
 
+    sentry_dsn: str | None = None
+    sentry_environment: str = "local"
+    sentry_release: str | None = None
+
     # Nightly sync scheduler
     sync_enabled: bool = False
     sync_hour_utc: int = 9  # 9:00 UTC = 5:00 AM ET
