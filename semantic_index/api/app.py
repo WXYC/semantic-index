@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from wxyc_fastapi.observability import init_sentry
 
 from semantic_index.api.bio import bio_router
 from semantic_index.api.narrative import narrative_router
@@ -103,6 +104,12 @@ def _create_app_from_settings() -> FastAPI:
     from semantic_index.api.config import Settings
 
     settings = Settings()
+    init_sentry(
+        dsn=settings.sentry_dsn,
+        service_name="semantic-index",
+        environment=settings.sentry_environment,
+        release=settings.sentry_release,
+    )
     return create_app(
         settings.db_path,
         anthropic_api_key=settings.anthropic_api_key,

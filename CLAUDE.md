@@ -261,6 +261,8 @@ Both pipeline entrypoints (`run_pipeline.py` and `scripts/nightly_sync.py`) init
 
 Sentry activates automatically when `SENTRY_DSN` is set in the environment; without it, JSON logging still initializes and Sentry stays inactive. TODO: provision `SENTRY_DSN` in the EC2 `.env.semantic-index` and the GitHub Actions deploy workflow (separate child task — see Phase A epic).
 
+The Graph API service (`semantic_index/api/app.py`) initializes Sentry separately via `wxyc_fastapi.observability.init_sentry` in `_create_app_from_settings()`. It reads `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, and `SENTRY_RELEASE` from the environment via `Settings`. `service.name` is set to `"semantic-index"`. The default `HttpxIntegration` is on, so outbound calls (Anthropic, iTunes, Spotify, Bandcamp, Deezer) are traced. Pass `integrations=[FastApiIntegration()]` to opt out if quota becomes a concern.
+
 ### Code Style
 
 - Python 3.12+
