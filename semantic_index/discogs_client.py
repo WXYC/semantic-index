@@ -20,6 +20,7 @@ from wxyc_etl.schema import (  # type: ignore[import-untyped]
     RELEASE_TRACK_ARTIST_TABLE,
     RELEASE_TRACK_TABLE,
 )
+from wxyc_fastapi.db import LazyPgConnection
 
 from semantic_index.models import (
     CompilationEdge,
@@ -32,7 +33,6 @@ from semantic_index.models import (
     SharedPersonnelEdge,
     SharedStyleEdge,
 )
-from semantic_index.utils import LazyPgConnection
 
 logger = logging.getLogger(__name__)
 

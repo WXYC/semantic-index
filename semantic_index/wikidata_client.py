@@ -14,13 +14,13 @@ import re
 import time
 
 import httpx
+from wxyc_fastapi.db import LazyPgConnection
 
 from semantic_index.models import (
     WikidataEntity,
     WikidataInfluence,
     WikidataLabelHierarchy,
 )
-from semantic_index.utils import LazyPgConnection
 
 logger = logging.getLogger(__name__)
 

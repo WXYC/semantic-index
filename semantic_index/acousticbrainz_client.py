@@ -9,6 +9,8 @@ JOIN query.
 import json
 import logging
 
+from wxyc_fastapi.db import LazyPgConnection
+
 from semantic_index.acousticbrainz import (
     GENRE_ELECTRONIC_LABELS,
     GENRE_LABELS,
@@ -18,7 +20,7 @@ from semantic_index.acousticbrainz import (
     RHYTHM_LABELS,
     RecordingFeatures,
 )
-from semantic_index.utils import LazyPgConnection, batched_with_log
+from semantic_index.utils import batched_with_log
 
 logger = logging.getLogger(__name__)
 

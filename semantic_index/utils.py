@@ -6,40 +6,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 
-import psycopg
-
 logger = logging.getLogger(__name__)
-
-
-class LazyPgConnection:
-    """Lazy, reconnecting PostgreSQL connection wrapper.
-
-    Defers connection creation until first use and transparently reconnects
-    when the connection is closed. Returns ``None`` when no DSN is configured
-    or on connection failure, matching the graceful-degradation pattern used
-    by the pipeline's PostgreSQL clients.
-
-    Args:
-        dsn: PostgreSQL connection string, or ``None`` to disable.
-        label: Human-readable name for log messages (e.g. ``"discogs-cache"``).
-    """
-
-    def __init__(self, dsn: str | None, label: str) -> None:
-        self._dsn = dsn
-        self._label = label
-        self._conn: psycopg.Connection | None = None
-
-    def get(self) -> psycopg.Connection | None:
-        """Return an open connection, or ``None`` if unavailable."""
-        if self._dsn is None:
-            return None
-        if self._conn is None or self._conn.closed:
-            try:
-                self._conn = psycopg.connect(self._dsn, autocommit=True)
-            except Exception:
-                logger.warning("Failed to connect to %s", self._label, exc_info=True)
-                return None
-        return self._conn
 
 
 def batched_with_log(
