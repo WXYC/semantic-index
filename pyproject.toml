@@ -16,7 +16,7 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "httpx>=0.25",
     "wxyc-etl>=0.3.0",
-    "wxyc-fastapi>=0.1.0,<0.2.0",
+    "wxyc-fastapi>=0.2.0,<0.3.0",
 ]
 
 [project.optional-dependencies]

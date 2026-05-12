@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from wxyc_fastapi.healthcheck import Check, readiness_router
 from wxyc_fastapi.observability import init_sentry
 
 from semantic_index.api.bio import bio_router
@@ -61,6 +62,13 @@ def create_app(
     app.include_router(preview_router)
     app.include_router(narrative_audit_router)
 
+    # Liveness/health: kept inline because semantic-index returns a custom
+    # `artist_count` field in addition to `status`, which the shared
+    # `wxyc_fastapi.healthcheck.liveness_router` does not surface. Adopting
+    # `liveness_router` would drop the `artist_count` field that the WXYC
+    # synthetic-DJ canary parses (see WXYC/wxyc-canary). Readiness, which
+    # is shape-compatible with the shared router, *is* delegated below.
+    # Tracked: WXYC/wxyc-fastapi#19 (extra-fields hook for liveness).
     @app.get("/health", include_in_schema=False)
     def health() -> JSONResponse:
         """Health check — verifies the SQLite database is readable."""
@@ -74,6 +82,31 @@ def create_app(
                 {"status": "unhealthy", "detail": str(exc)},
                 status_code=503,
             )
+
+    async def _probe_artist_count_query() -> str:
+        """Readiness probe: confirms the SQLite graph DB is readable.
+
+        Returns ``"ok"`` if a `SELECT COUNT(*) FROM artist` succeeds against
+        the read-only sqlite URI; raises otherwise (the shared readiness
+        router treats any exception as ``"unavailable"``).
+        """
+        # sqlite3.connect is sync but cheap; the readiness router runs probes
+        # concurrently with a 3s default timeout, so we don't need to thread
+        # it. If this becomes a hot path, switch to aiosqlite.
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            conn.execute("SELECT COUNT(*) FROM artist").fetchone()
+        finally:
+            conn.close()
+        return "ok"
+
+    app.include_router(
+        readiness_router(
+            checks=[
+                Check(name="database", probe=_probe_artist_count_query, required=True),
+            ],
+        ),
+    )
 
     @app.get("/", include_in_schema=False)
     def root() -> FileResponse:
