@@ -93,6 +93,26 @@ class TestHealthEndpoint:
         assert data["status"] == "unhealthy"
 
 
+class TestReadinessEndpoint:
+    """`/health/ready` is mounted via `wxyc_fastapi.healthcheck.readiness_router`.
+
+    Snapshot tests for the new route. `/health/ready` is the only route allowed
+    to fail with 503; aggregate semantics come from the shared router.
+    """
+
+    def test_health_ready_returns_200_when_db_reachable(self, client: TestClient):
+        response = client.get("/health/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"status": "healthy", "services": {"database": "ok"}}
+
+    def test_health_ready_returns_503_when_db_missing(self, client_missing_db: TestClient):
+        response = client_missing_db.get("/health/ready")
+        assert response.status_code == 503
+        data = response.json()
+        assert data == {"status": "unhealthy", "services": {"database": "unavailable"}}
+
+
 class TestRootRoute:
     def test_root_returns_explorer_html(self, client: TestClient):
         response = client.get("/")
