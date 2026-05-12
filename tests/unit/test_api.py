@@ -112,6 +112,55 @@ class TestReadinessEndpoint:
         data = response.json()
         assert data == {"status": "unhealthy", "services": {"database": "unavailable"}}
 
+    @pytest.mark.asyncio
+    async def test_health_ready_probe_does_not_block_event_loop(
+        self, test_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Concurrent readiness probes must run in parallel via asyncio.to_thread.
+
+        If `_probe_artist_count_query` were to call `sqlite3.connect` inline
+        (sync) on the event loop, two concurrent requests would serialize and
+        take ~2x the per-call latency. Offloading to a thread pool lets them
+        overlap, so wall-clock time should stay close to the per-call latency.
+        """
+        import asyncio
+        import sqlite3
+        import time
+
+        from httpx import ASGITransport, AsyncClient
+
+        from semantic_index.api.app import create_app
+
+        per_call_delay = 0.2  # seconds
+        real_connect = sqlite3.connect
+
+        def slow_connect(*args, **kwargs):
+            time.sleep(per_call_delay)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr("semantic_index.api.app.sqlite3.connect", slow_connect)
+
+        app = create_app(str(test_db))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            start = time.monotonic()
+            r1, r2 = await asyncio.gather(
+                ac.get("/health/ready"),
+                ac.get("/health/ready"),
+            )
+            elapsed = time.monotonic() - start
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        # Two serialized 0.2s probes would take ~0.4s; parallel should be ~0.2s.
+        # Generous ceiling at 1.5x per-call latency leaves room for CI jitter
+        # while still failing if the probe blocks the event loop.
+        assert elapsed < per_call_delay * 1.5, (
+            f"Concurrent readiness probes took {elapsed:.3f}s, "
+            f"expected < {per_call_delay * 1.5:.3f}s. The probe is likely "
+            "blocking the event loop instead of using asyncio.to_thread."
+        )
+
 
 class TestRootRoute:
     def test_root_returns_explorer_html(self, client: TestClient):
