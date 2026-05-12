@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from pathlib import Path
@@ -83,21 +84,25 @@ def create_app(
                 status_code=503,
             )
 
+    def _probe_artist_count_sync() -> None:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            conn.execute("SELECT COUNT(*) FROM artist").fetchone()
+        finally:
+            conn.close()
+
     async def _probe_artist_count_query() -> str:
         """Readiness probe: confirms the SQLite graph DB is readable.
 
         Returns ``"ok"`` if a `SELECT COUNT(*) FROM artist` succeeds against
         the read-only sqlite URI; raises otherwise (the shared readiness
         router treats any exception as ``"unavailable"``).
+
+        The sync `sqlite3` work is offloaded via `asyncio.to_thread` so the
+        probe never blocks the event loop, even if the SQLite file is on slow
+        storage or the OS file cache is cold.
         """
-        # sqlite3.connect is sync but cheap; the readiness router runs probes
-        # concurrently with a 3s default timeout, so we don't need to thread
-        # it. If this becomes a hot path, switch to aiosqlite.
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            conn.execute("SELECT COUNT(*) FROM artist").fetchone()
-        finally:
-            conn.close()
+        await asyncio.to_thread(_probe_artist_count_sync)
         return "ok"
 
     app.include_router(
