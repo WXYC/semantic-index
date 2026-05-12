@@ -8,7 +8,9 @@ moved to LML.
 
 import logging
 
-from semantic_index.utils import LazyPgConnection, batched_with_log
+from wxyc_fastapi.db import LazyPgConnection
+
+from semantic_index.utils import batched_with_log
 
 logger = logging.getLogger(__name__)
 
