@@ -490,6 +490,18 @@ Production location: EC2 systemd unit env file (`.env.semantic-index`). Updater 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ECR_URI`
 - `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
 
+### CI pin maintenance
+
+Two classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (mirrors WXYC/request-o-matic#124's free-tier hardening; see WXYC/wiki#67 for the org-wide rollout). They will bit-rot and need occasional bumps:
+
+- **Workflow-level `permissions:`** scoped to the minimum each workflow needs:
+  - `ci.yml`, `cross-cache-identity-flags.yml`, `deploy.yml`: `contents: read` (no GITHUB_TOKEN writes — `deploy.yml` ECR push uses `AWS_*` static keys, not OIDC, so no `id-token: write` is needed).
+  - `charset-corpus-drift.yml`: `contents: read` plus `packages: read` (the reusable workflow pulls `@wxyc/shared` from `npm.pkg.github.com`).
+  Failure mode is silent — a job that needs a missing scope (e.g. `pull-requests: write`) fails its API call but the workflow stays green. When adding a step that needs to comment on PRs, push tags, mint releases, etc., explicitly grant the scope at the job level (or widen the workflow-level floor only if every job in the file needs it). If `deploy.yml` is ever migrated to AWS OIDC, add `id-token: write` at the job level — not at the workflow level — so other jobs can't mint OIDC tokens by accident.
+- **Reusable-workflow refs pinned to `@gha/v1`**, not `@main` — `WXYC/wxyc-etl/.github/workflows/check-ci-marker-sync.yml@gha/v1` (in `ci.yml`) and `WXYC/wxyc-shared/.github/workflows/check-charset-corpus-drift.yml@gha/v1` (in `charset-corpus-drift.yml`). The publishing repos treat `gha/v1` as a moving major tag — re-pointed forward on non-breaking changes, frozen on breaking changes (which get a fresh `gha/v2`). Don't downgrade either to `@main`; if a `gha/v2` migration arrives, follow the procedure at the top of the publishing repo's CLAUDE.md.
+
+Run `actionlint .github/workflows/*.yml` locally before pushing workflow changes; it validates `permissions:` syntax, action-version pins, and shell-script blocks (via shellcheck), and catches the silent-mistake class of errors above before CI does. The current `deploy.yml` has 8 pre-existing SC2086 info-level shellcheck warnings that have been deferred — they're info, not error, and predate the pin work.
+
 ### Nightly sync scheduler (in-process)
 
 The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars in `.env.semantic-index`:
