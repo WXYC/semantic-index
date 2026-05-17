@@ -93,12 +93,19 @@ jobs:
             docker rm semantic-index || true
 
             echo "Starting new container..."
+            # WORKERS=1 + 1 GiB cgroup cap: post-2026-05-17 OOM-wedge hardening (BS#937).
+            # Pre-fix: 4 uvicorn workers x ~370 MB copy of NetworkX + Essentia each = 1.48 GB peak,
+            # unbounded, global-OOM-killing the t3.small host. cgroup cap keeps any future
+            # blowup scoped to this container so the global OOM-killer can't take the host down again.
             docker run -d \
               --name semantic-index \
               -p 8083:8083 \
               -v /home/ec2-user/semantic-index-data:/data \
               --restart unless-stopped \
               --env-file .env.semantic-index \
+              -e WORKERS=1 \
+              --memory 1g \
+              --memory-swap 1g \
               $IMAGE_URI
 
             echo "Waiting for health check..."
