@@ -184,8 +184,12 @@ def cmd_score(args: argparse.Namespace) -> int:
             if i % 20 == 0 or i == len(todo):
                 logger.info(
                     "%d/%d scored (errors=%d, last token=%.3f claim=%.3f, %dms)",
-                    i, len(todo), errors,
-                    scores["token_match_v1"], scores["claim_ratio_v1"], elapsed_ms,
+                    i,
+                    len(todo),
+                    errors,
+                    scores["token_match_v1"],
+                    scores["claim_ratio_v1"],
+                    elapsed_ms,
                 )
 
     logger.info("Done: wrote %d, errors=%d", written, errors)
@@ -203,6 +207,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
       - F1
       - per-failure_mode breakdown of recall (which categories does each
         scorer catch?)
+      - per-construction_method breakdown of recall (load-bearing for #277:
+        confirms grounding-fidelity scorers have lower recall on
+        field_corruption than on data_shuffle — the gap the constraint
+        ontology should fill).
     """
     scored = {r["row_id"]: r for r in _load_labeling(Path(args.scored))}
     labeled = _load_labeling(Path(args.labeled))
@@ -212,6 +220,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         "claim_ratio_v1": {"pos_scores": [], "neg_scores": []},
     }
     by_mode_recall: dict[str, dict[str, list[bool]]] = {
+        "token_match_v1": {},
+        "claim_ratio_v1": {},
+    }
+    by_construction_recall: dict[str, dict[str, list[bool]]] = {
         "token_match_v1": {},
         "claim_ratio_v1": {},
     }
@@ -232,13 +244,17 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         scores = scored[rid]["scores"]
         for method in ("token_match_v1", "claim_ratio_v1"):
             score = scores[method]
-            (by_method[method]["pos_scores"] if is_positive else by_method[method]["neg_scores"]).append(score)
+            (
+                by_method[method]["pos_scores"] if is_positive else by_method[method]["neg_scores"]
+            ).append(score)
 
         if is_positive:
             mode = label.get("failure_mode") or "unspecified"
+            construction = scored[rid].get("construction_method") or "production"
             for method in ("token_match_v1", "claim_ratio_v1"):
                 hit = scores[method] > args.threshold
                 by_mode_recall[method].setdefault(mode, []).append(hit)
+                by_construction_recall[method].setdefault(construction, []).append(hit)
 
     print(f"Labeled rows: {n_labeled} (positive: {n_pos}, negative: {n_labeled - n_pos})")
     print(f"Threshold for binary classification: {args.threshold}")
@@ -265,12 +281,19 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             for mode, hits in sorted(by_mode_recall[method].items()):
                 r = sum(hits) / len(hits) if hits else 0.0
                 print(f"    {mode:30} n={len(hits):3} recall={r:.3f}")
+        if by_construction_recall[method]:
+            print("  recall by construction_method:")
+            for construction, hits in sorted(by_construction_recall[method].items()):
+                r = sum(hits) / len(hits) if hits else 0.0
+                print(f"    {construction:30} n={len(hits):3} recall={r:.3f}")
         print()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     score = sub.add_parser("score", help="Compute scores for the eval-set rows.")
@@ -284,8 +307,12 @@ def main(argv: list[str] | None = None) -> int:
     metrics = sub.add_parser("metrics", help="Compute precision/recall/F1 against labels.")
     metrics.add_argument("--scored", required=True)
     metrics.add_argument("--labeled", required=True)
-    metrics.add_argument("--threshold", type=float, default=0.5,
-                         help="Score above which a row is predicted positive (default 0.5)")
+    metrics.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Score above which a row is predicted positive (default 0.5)",
+    )
     metrics.set_defaults(func=cmd_metrics)
 
     args = ap.parse_args(argv)

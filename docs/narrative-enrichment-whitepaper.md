@@ -284,7 +284,7 @@ Manual review of all 19 pairs and their verification results revealed that hallu
 
 **4. Garbage-in data (style noise).** Alex G.'s top 3 Discogs styles came back as "Dance-pop, Euro House, Makina" — from minor releases, not representative. The model dutifully described Alex G. as "channeling dance-pop and Euro House into experimental rock territory." The narrative was technically grounded in the provided data but substantively wrong. The automated verifier cannot catch this because it checks against provided data, not reality.
 
-A grounding-fidelity scorer (token-match, claim-ratio) is structurally blind to this failure mode by construction — the constraint ontology proposed in §8 is the mechanism designed to catch it. Measuring that gap requires gold positives where the narrative is faithful to a deliberately-corrupted input, so the labeler can flag it against the *real* metadata they see. That construction is tracked in WXYC/semantic-index#277.
+A grounding-fidelity scorer (token-match, claim-ratio) is structurally blind to this failure mode by construction — the constraint ontology proposed in §8 is the mechanism designed to catch it. Measuring that gap requires gold positives where the narrative is faithful to a deliberately-corrupted input, so the labeler can flag it against the *real* metadata they see. Forty such rows ship in `scripts/eval/build_wrong_set.py --mode field_corruption` (`construction_method=field_corruption`, `failure_mode=data_noise`); see WXYC/semantic-index#277.
 
 ### 6.4 Targeted Mitigations
 
@@ -581,7 +581,7 @@ The production endpoint at `/graph/artists/{id}/explain/{target_id}/narrative` n
 - **Generate-score-regenerate loop** with two retries (`1dab529`); the closed loop converges 100% of the 18% that retry.
 - **Periodic claim-ratio audit** with a sidecar audit DB and the `/graph/narrative-audit/recent` endpoint (`e63fadd`).
 - **UI-side heat slider** in `routes.py` that modulates the DJ-vs-enrichment weight balance during neighbor selection (`ed9eac6`).
-- **Narrative eval-set scaffolding**: stratified pair sampler across the 2×2×2 risk matrix, deliberately-wrong narrative constructor (data-shuffle method), bulk generator over the production endpoint, exporter that produces a labeling CSV/JSONL, label merger, and backscorer for measuring per-method recall against gold labels (`scripts/eval/`).
+- **Narrative eval-set scaffolding**: stratified pair sampler across the 2×2×2 risk matrix, deliberately-wrong narrative constructors (data-shuffle for `subject_hallucination`, field-corruption for `data_noise` per #277), bulk generator over the production endpoint, exporter that produces a labeling CSV/JSONL, label merger, and backscorer (`scripts/eval/backscore.py metrics`) that reports per-failure-mode and per-construction-method recall against gold labels (`scripts/eval/`).
 - **Standalone labeling web UI** (`semantic_index/labeling_app/`) — a single-page FastAPI app that reads the eval-set JSONL, persists per-labeler labels to a SQLite sidecar, and exports a merge-ready CSV. Deployed for human labeling.
 
 The accuracy delta from baseline to current production is the headline 45% → 9% hallucination reduction, achieved with no new infrastructure and roughly 280 prompt-token overhead per call.
@@ -591,7 +591,7 @@ The accuracy delta from baseline to current production is the headline 45% → 9
 - **Release-count column for `artist_style`.** The 5-style cap is currently alphabetical; switching to release-count ranking is a pipeline-side schema change.
 - **Audit-driven prompt evolution.** The audit endpoint surfaces flagged narratives but the loop back to "add a few-shot example or a constraint rule" is still manual.
 - **Narrative labeling round.** The eval-set scaffolding and labeling UI are deployed; what remains is recruiting labelers, running the calibration round (~20 rows), then the bulk pass, and merging the resulting labels into the gold set so backscore can run.
-- **Two follow-up wrong-set construction methods.** Field corruption for `data_noise` failure mode (#277) and a curated pretraining-bait set for `subject_hallucination` (#278). Both extend the existing data-shuffle wrong-set; backscore will then report per-construction-method recall.
+- **Curated pretraining-bait wrong-set.** Targets `subject_hallucination` failure modes via confusable names and strong pretraining priors (#278). Extends the existing data-shuffle + field-corruption wrong-sets; `backscore metrics` already reports per-construction-method recall.
 
 ### 10.3 Next
 
@@ -619,7 +619,7 @@ Section 4 plans structured-field extraction from reviews, but a complementary ap
 
 ### 11.3 Wrongness Detection vs. Grounding Detection
 
-Section 7 ends with the recognition that the scoring methods measure grounding fidelity, not truthiness, and Section 7.6 sketches four approaches to wrongness detection (contradiction, adversarial cross-examination, semantic alignment, constraint satisfaction). The first prerequisite — an evaluation set of narratives with human-applied "wrong / not wrong" labels — has been built (`scripts/eval/`, `semantic_index/labeling_app/`): a stratified sample across the 2×2×2 matrix combined with deliberately-wrong narratives constructed by feeding shuffled artist data through the production endpoint. Two further wrong-set construction methods are in flight (field corruption per §6.3 and pretraining bait per §6.1) so the eval set covers the failure modes a grounding scorer cannot see by construction. The remaining work is the labeling round itself, then measuring each candidate scoring method's precision and recall against the gold labels via `scripts/eval/backscore.py`.
+Section 7 ends with the recognition that the scoring methods measure grounding fidelity, not truthiness, and Section 7.6 sketches four approaches to wrongness detection (contradiction, adversarial cross-examination, semantic alignment, constraint satisfaction). The first prerequisite — an evaluation set of narratives with human-applied "wrong / not wrong" labels — has been built (`scripts/eval/`, `semantic_index/labeling_app/`): a stratified sample across the 2×2×2 matrix combined with two deliberately-wrong constructions — data shuffle (real names + mismatched metadata, 30 rows, `subject_hallucination`) and field corruption (real pair + one deliberately corrupted field, 40 rows, `data_noise`; #277). A third construction — curated pretraining bait per §6.1 — is in flight (#278). The remaining work is the labeling round itself, then measuring each candidate scoring method's precision and recall against the gold labels via `scripts/eval/backscore.py`, whose `metrics` subcommand already reports per-construction-method recall — the load-bearing comparison for surfacing the data_noise gap that the constraint ontology should close.
 
 ### 11.4 Constraint Ontology Bootstrap
 
