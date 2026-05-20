@@ -1,6 +1,7 @@
 """Tests for the nightly sync scheduler."""
 
 import fcntl
+import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,7 +10,12 @@ from unittest.mock import patch
 import pytest
 
 import semantic_index.api.sync_scheduler as sched_mod
-from semantic_index.api.sync_scheduler import _seconds_until_next_run, start_scheduler
+from semantic_index.api.sync_scheduler import (
+    _scheduler_loop,
+    _seconds_until_next_run,
+    _sleep_with_heartbeat,
+    start_scheduler,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -115,3 +121,81 @@ class TestSecondsUntilNextRun:
         # Should be 22 hours (to Feb 1 09:00)
         assert result > 0
         assert abs(result - 22 * 3600) < 1
+
+
+class TestSleepWithHeartbeat:
+    """Sleeping the daily window must emit periodic heartbeat logs so
+    ``docker logs`` reflects whether the scheduler thread is alive without
+    inspecting ``/proc/1/task``. See WXYC/semantic-index#322.
+    """
+
+    def test_heartbeat_logs_between_chunks(self, caplog) -> None:
+        """A multi-chunk sleep produces one heartbeat log per completed chunk
+        (except the final chunk, which is followed immediately by the sync run).
+        """
+        with (
+            patch("semantic_index.api.sync_scheduler.time.sleep"),
+            patch.object(sched_mod, "_HEARTBEAT_INTERVAL_SECONDS", 100),
+            caplog.at_level(logging.INFO, logger=sched_mod.__name__),
+        ):
+            _sleep_with_heartbeat(total_seconds=250, hour_utc=9)
+
+        heartbeats = [r for r in caplog.records if "heartbeat" in r.getMessage().lower()]
+        # 250 / 100 = 3 chunks of [100, 100, 50]; heartbeats fire after the
+        # first two chunks (the third lands at the sync boundary).
+        assert len(heartbeats) == 2
+
+    def test_no_heartbeat_for_short_sleep(self, caplog) -> None:
+        """A sleep shorter than the heartbeat interval emits no heartbeat."""
+        with (
+            patch("semantic_index.api.sync_scheduler.time.sleep"),
+            patch.object(sched_mod, "_HEARTBEAT_INTERVAL_SECONDS", 1000),
+            caplog.at_level(logging.INFO, logger=sched_mod.__name__),
+        ):
+            _sleep_with_heartbeat(total_seconds=200, hour_utc=9)
+
+        heartbeats = [r for r in caplog.records if "heartbeat" in r.getMessage().lower()]
+        assert heartbeats == []
+
+    def test_zero_sleep_returns_immediately(self) -> None:
+        """``_sleep_with_heartbeat(0, ...)`` must not call ``time.sleep``."""
+        with patch("semantic_index.api.sync_scheduler.time.sleep") as mock_sleep:
+            _sleep_with_heartbeat(total_seconds=0, hour_utc=9)
+        mock_sleep.assert_not_called()
+
+
+class TestSchedulerLoopCrashHandling:
+    """The scheduler runs as a daemon thread. If the outer loop dies silently,
+    the daily sync never runs and we have no signal. WXYC/semantic-index#322
+    is the canonical incident: 16 days of silent sync failure.
+    """
+
+    def test_outer_exception_logs_and_reraises(self, caplog) -> None:
+        """Any exception escaping the loop must be logged with traceback before
+        the thread exits, so ``docker logs`` shows the cause and Sentry receives
+        the event (via the logging integration).
+        """
+
+        def raise_on_compute(_hour: int) -> float:
+            raise RuntimeError("clock broke")
+
+        with (
+            patch(
+                "semantic_index.api.sync_scheduler._seconds_until_next_run",
+                side_effect=raise_on_compute,
+            ),
+            caplog.at_level(logging.ERROR, logger=sched_mod.__name__),
+            pytest.raises(RuntimeError, match="clock broke"),
+        ):
+            _scheduler_loop(
+                db_path="/tmp/never-used.db",
+                dsn="postgresql://localhost/test",
+                min_count=2,
+                hour_utc=9,
+            )
+
+        crash_records = [
+            r for r in caplog.records if r.levelno == logging.ERROR and r.exc_info is not None
+        ]
+        assert crash_records, "scheduler thread crash must log with exception info"
+        assert "scheduler" in crash_records[-1].getMessage().lower()

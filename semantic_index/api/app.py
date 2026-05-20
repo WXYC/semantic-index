@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from wxyc_etl.logger import init_logger
 from wxyc_fastapi.healthcheck import Check, readiness_router
 from wxyc_fastapi.observability import init_sentry
 
@@ -142,6 +143,16 @@ def _create_app_from_settings() -> FastAPI:
     from semantic_index.api.config import Settings
 
     settings = Settings()
+    # Install the JSON-on-stderr handler before anything else so module loggers
+    # under semantic_index.* (including the sync scheduler) are visible from
+    # the first line of process lifetime. Pass sentry_dsn="" so init_logger
+    # does not double-init Sentry — init_sentry below owns the full SDK config
+    # (FastAPI + Httpx integrations, sample rates, service.name tag).
+    init_logger(
+        repo="semantic-index",
+        tool="semantic-index api",
+        sentry_dsn="",
+    )
     init_sentry(
         dsn=settings.sentry_dsn,
         service_name="semantic-index",
