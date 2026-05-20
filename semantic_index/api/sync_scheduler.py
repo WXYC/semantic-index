@@ -22,6 +22,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Heartbeat cadence inside the daily sleep. Picked at 4h so the daily 24h gap
+# produces 5 heartbeats, enough that a stalled thread is obvious from
+# ``docker logs`` within hours instead of the next missed sync. See
+# WXYC/semantic-index#322.
+_HEARTBEAT_INTERVAL_SECONDS = 4 * 3600
+
 # Held at module level so the lock persists for the lifetime of the process.
 # Closing this file releases the flock; the OS releases it if the process dies.
 _lock_file = None
@@ -57,19 +63,53 @@ def _run_sync(db_path: str, dsn: str, min_count: int) -> None:
         logger.exception("Sync failed with unexpected error")
 
 
-def _scheduler_loop(db_path: str, dsn: str, min_count: int, hour_utc: int) -> None:
-    """Sleep-and-run loop for the background thread."""
-    while True:
-        wait = _seconds_until_next_run(hour_utc)
-        logger.info(
-            "Next sync in %.1f hours (at %02d:00 UTC)",
-            wait / 3600,
-            hour_utc,
-        )
-        time.sleep(wait)
+def _sleep_with_heartbeat(total_seconds: float, hour_utc: int) -> None:
+    """Sleep ``total_seconds`` in ``_HEARTBEAT_INTERVAL_SECONDS`` chunks,
+    logging a heartbeat after each full chunk so the thread's liveness is
+    visible in ``docker logs`` without inspecting ``/proc/1/task``.
 
-        logger.info("Starting scheduled sync...")
-        _run_sync(db_path, dsn, min_count)
+    No heartbeat is emitted after the final chunk — the caller logs
+    "Starting scheduled sync..." immediately, which serves the same purpose.
+    """
+    remaining = total_seconds
+    while remaining > 0:
+        chunk = min(remaining, _HEARTBEAT_INTERVAL_SECONDS)
+        time.sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            logger.info(
+                "Sync scheduler heartbeat — next sync in %.1f hours (at %02d:00 UTC)",
+                remaining / 3600,
+                hour_utc,
+            )
+
+
+def _scheduler_loop(db_path: str, dsn: str, min_count: int, hour_utc: int) -> None:
+    """Sleep-and-run loop for the background thread.
+
+    The outer ``try``/``except`` is load-bearing: this runs as a ``daemon=True``
+    thread, so an unhandled exception kills the thread silently — the exact
+    failure mode that produced 16 days of silent sync failure in
+    WXYC/semantic-index#322. ``logger.exception`` writes the traceback to
+    stderr and (via Sentry's logging integration) raises an event.
+    """
+    try:
+        while True:
+            wait = _seconds_until_next_run(hour_utc)
+            logger.info(
+                "Next sync in %.1f hours (at %02d:00 UTC)",
+                wait / 3600,
+                hour_utc,
+            )
+            _sleep_with_heartbeat(wait, hour_utc)
+
+            logger.info("Starting scheduled sync...")
+            _run_sync(db_path, dsn, min_count)
+    except BaseException:
+        logger.exception(
+            "Sync scheduler thread crashed — daily sync will not run until the process restarts"
+        )
+        raise
 
 
 def start_scheduler(
