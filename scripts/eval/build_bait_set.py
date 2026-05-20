@@ -94,17 +94,31 @@ def classify_regime(source_plays: int, target_plays: int, threshold: int) -> str
 
 
 def load_bait_pairs(path: Path) -> list[dict]:
-    """Read the curated bait pair list."""
+    """Read and validate the curated bait pair list.
+
+    Rejects empty/missing ``pairs``, missing required keys, unknown regime
+    values, and duplicate ``(source_id, target_id)`` entries. The duplicate
+    check matters because the driver appends to its output file and uses
+    ``(source_id, target_id)`` as the cache key for ``--skip-cached``;
+    duplicates in the input would produce duplicate output rows.
+    """
     data = json.loads(path.read_text())
     pairs = data.get("pairs", [])
     if not isinstance(pairs, list) or not pairs:
         raise ValueError(f"Bait pair file {path} has no 'pairs' list")
+    seen: set[tuple[int, int]] = set()
     for i, p in enumerate(pairs):
-        for key in ("source_id", "target_id", "regime", "bait_notes"):
-            if key not in p:
-                raise ValueError(f"Bait pair #{i} missing required key: {key}")
+        for field in ("source_id", "target_id", "regime", "bait_notes"):
+            if field not in p:
+                raise ValueError(f"Bait pair #{i} missing required key: {field}")
         if p["regime"] not in ("above", "below", "mixed"):
             raise ValueError(f"Bait pair #{i} regime={p['regime']!r} not in {{above,below,mixed}}")
+        pair_key = (int(p["source_id"]), int(p["target_id"]))
+        if pair_key in seen:
+            raise ValueError(
+                f"Bait pair #{i} duplicates (source_id, target_id)={pair_key} from an earlier entry"
+            )
+        seen.add(pair_key)
     return pairs
 
 
@@ -212,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(args.db_path, anthropic_api_key=api_key)
     client = TestClient(app)
 
-    written = errors = 0
+    written = errors = insufficient = 0
     with out_path.open("a") as fh:
         for i, pair in enumerate(pairs, 1):
             source = _lookup_artist(db, int(pair["source_id"]))
@@ -257,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             if response.status_code == 200:
                 row = build_row(pair, source, target, 200, response.json(), None, elapsed_ms)
                 if row.get("insufficient_signal"):
+                    insufficient += 1
                     logger.warning(
                         "Pair %s↔%s came back insufficient_signal — bait test not exercised. "
                         "Re-curate or accept the row as-is.",
@@ -286,7 +301,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.sleep > 0 and i < len(pairs):
                 time.sleep(args.sleep)
 
-    logger.info("Wrote %d bait rows (errors=%d) -> %s", written, errors, out_path)
+    logger.info(
+        "Wrote %d bait rows (errors=%d, insufficient_signal=%d) -> %s",
+        written,
+        errors,
+        insufficient,
+        out_path,
+    )
+    # Exit non-zero on transport errors. ``insufficient_signal`` is surfaced in
+    # the count above and visible in each row, but it is a *content* outcome
+    # (the production endpoint chose not to narrate) rather than a script
+    # failure — leave the exit code to the operator's downstream gating.
     return 0 if errors == 0 else 1
 
 

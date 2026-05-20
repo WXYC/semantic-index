@@ -122,6 +122,23 @@ def test_load_bait_pairs_rejects_bad_regime(tmp_path):
         load_bait_pairs(p)
 
 
+def test_load_bait_pairs_rejects_duplicate_pair(tmp_path):
+    """Duplicate ``(source_id, target_id)`` entries would break the
+    ``--skip-cached`` invariant in the driver (cache key is the pair tuple
+    and the output file is opened in append mode)."""
+    p = _write(
+        tmp_path / "pairs.json",
+        {
+            "pairs": [
+                {"source_id": 1, "target_id": 2, "regime": "above", "bait_notes": "a"},
+                {"source_id": 1, "target_id": 2, "regime": "below", "bait_notes": "b"},
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="duplicates"):
+        load_bait_pairs(p)
+
+
 def test_load_bait_pairs_shipped_file_is_well_formed():
     """The curated file that ships with the script must parse and satisfy the
     #278 acceptance criterion of at least 4 pairs in each clean regime."""
