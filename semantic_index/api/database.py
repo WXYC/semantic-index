@@ -7,8 +7,8 @@ from contextlib import contextmanager
 
 from fastapi import Request
 
-_MMAP_BYTES = 1 << 30  # 1 GiB — covers the full graph database
-_CACHE_PAGES = -65536  # negative → KiB; 65536 = 64 MiB per connection
+_MMAP_BYTES = 1 << 28  # 256 MiB — hot-page coverage that fits under the cgroup cap
+_CACHE_PAGES = -16384  # negative → KiB; 16384 = 16 MiB per connection
 
 
 @contextmanager
@@ -20,11 +20,15 @@ def _open_db(db_path: str):
       lock files and lets the OS keep file pages clean.
     - ``mmap_size``: maps the database file. Mapped pages live in the OS page
       cache and survive the connection close, so subsequent requests reuse
-      pages without disk I/O. Critical on memory-constrained hosts where the
-      per-connection page cache is too small to matter.
-    - ``cache_size``: bumps the per-connection page cache from 2 MiB to 64 MiB
-      so a single request that hits multiple edge tables reuses pages instead
-      of evicting them mid-query.
+      pages without disk I/O. Sized at 256 MiB to cover the hot pages
+      (artist/edge indexes, frequent lookups) without crowding the Python
+      heap inside the 1 GiB container cap from deploy.yml — file-backed
+      mmap pages count toward the cgroup memory.max, so an oversized mmap
+      pushes the worker closer to cgroup-OOM under traffic.
+    - ``cache_size``: bumps the per-connection page cache from 2 MiB to
+      16 MiB so a single affinity request that fans across edge tables
+      reuses pages instead of evicting them mid-query, while leaving
+      headroom for several concurrent connections inside the cap.
     - ``query_only``: belt-and-suspenders — even with ``mode=ro``, this
       guarantees no accidental writes from a misbehaving query.
     """
