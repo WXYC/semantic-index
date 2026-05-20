@@ -1,0 +1,85 @@
+{
+  "_comment": "Pretraining-bait pairs for the narrative eval set (whitepaper §6.1). Each pair is selected for one of two regimes: pairs where both artists exceed _DEFAULT_ANON_PLAY_THRESHOLD (800) get anonymized as 'Artist A'/'Artist B' before reaching the LLM (anonymized branch); pairs where both are at or below are sent unanonymized (raw branch). The bait test asks whether the prompt suppresses pretraining-driven hallucinations in either regime. AA-sums were probed against data/wxyc_artist_graph.db at curation time; all clear the 0.8 gate with margin.",
+  "pairs": [
+    {
+      "source_id": 780,
+      "target_id": 183,
+      "source_name": "Muddy Waters",
+      "target_name": "Josephine Foster",
+      "regime": "below",
+      "bait_notes": "Blues + folk pretraining collision. Foster is whitepaper §6.1 (framed as 'experimental jazz'); Waters is a strong blues prior. Risk: a fabricated 'delta-blues to folk lineage' framing."
+    },
+    {
+      "source_id": 183,
+      "target_id": 1150,
+      "source_name": "Josephine Foster",
+      "target_name": "Patti Smith",
+      "regime": "below",
+      "bait_notes": "Folk + punk-poet pretraining collision. Risk: 'experimental approaches to song-tradition' fabrication channelling the whitepaper §6.1 Foster/Holiday error."
+    },
+    {
+      "source_id": 183,
+      "target_id": 1264,
+      "source_name": "Josephine Foster",
+      "target_name": "Pixies",
+      "regime": "below",
+      "bait_notes": "Folk + alt-rock pretraining collision. Risk: fabricated 'quiet/loud dynamics in indie tradition' framing — neither artist's WXYC metadata supports it."
+    },
+    {
+      "source_id": 350,
+      "target_id": 614,
+      "source_name": "Joy Division",
+      "target_name": "Black Sabbath",
+      "regime": "below",
+      "bait_notes": "Post-punk + metal pretraining collision. Risk: 'Manchester gloom meets Birmingham heaviness' lineage fabrication — pretraining knows both well but the WXYC data does not pair them stylistically."
+    },
+    {
+      "source_id": 1264,
+      "target_id": 614,
+      "source_name": "Pixies",
+      "target_name": "Black Sabbath",
+      "regime": "below",
+      "bait_notes": "Alt-rock + metal pretraining collision. Risk: a 'grunge ancestors' or 'proto-Nirvana lineage' fabrication."
+    },
+    {
+      "source_id": 475,
+      "target_id": 51306,
+      "source_name": "The Smiths",
+      "target_name": "Dam-Funk",
+      "regime": "above",
+      "bait_notes": "The whitepaper §6.1 canonical case. The model previously wrote 'The Smiths and Dam-Funk represent different entry points into electronically-inflected funk and soul' — The Smiths are jangle-pop / post-punk. Both >800 plays: anonymization should suppress the leak."
+    },
+    {
+      "source_id": 253,
+      "target_id": 422,
+      "source_name": "David Bowie",
+      "target_name": "Sun Ra",
+      "regime": "above",
+      "bait_notes": "Glam + cosmic jazz pretraining collision. Risk: 'Starman meets Saturn' framing or fabricated influence claims. Both >800 plays: anonymized."
+    },
+    {
+      "source_id": 120,
+      "target_id": 179,
+      "source_name": "Beck",
+      "target_name": "Bjork",
+      "regime": "above",
+      "bait_notes": "Mid-90s alt-pop / electronica pretraining canon. Risk: 'co-pioneering eclecticism' fabrication. Both >800 plays: anonymized."
+    },
+    {
+      "source_id": 85,
+      "target_id": 1560,
+      "source_name": "The Velvet Underground",
+      "target_name": "The Cure",
+      "regime": "above",
+      "bait_notes": "Proto-punk + gothic pretraining canon. Risk: a fabricated 'lineage of melancholic art-rock' framing. Both >800 plays: anonymized."
+    },
+    {
+      "source_id": 64,
+      "target_id": 132,
+      "source_name": "Yo La Tengo",
+      "target_name": "Pavement",
+      "regime": "above",
+      "bait_notes": "90s indie-rock canonical pretraining pair (both Matador/Domino-adjacent). Risk: critic-blurb framing the WXYC data does not justify. Both >800 plays: anonymized."
+    }
+  ]
+}

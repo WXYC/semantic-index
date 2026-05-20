@@ -48,6 +48,25 @@ def jsonl_path(tmp_path: Path) -> Path:
             "insufficient_signal": True,
             "token_match_score": 0.0,
         },
+        {
+            "row_id": "R0003",
+            "cell_id": "BAIT-BELOW",
+            "source_name": "Muddy Waters",
+            "target_name": "Josephine Foster",
+            "narrative": "They share blues lineage.",
+            "source_data": {"name": "Muddy Waters", "total_plays": 498},
+            "target_data": {"name": "Josephine Foster", "total_plays": 688},
+            "shared_neighbors": [],
+            "insufficient_signal": False,
+            "token_match_score": 0.1,
+            "construction_method": "pretraining_bait",
+            "regime": "below",
+            "bait_notes": "blues + folk collision",
+            "expected_label": {
+                "severity": "severe",
+                "failure_mode": "subject_hallucination",
+            },
+        },
     ]
     p = tmp_path / "labeling.jsonl"
     with p.open("w") as fh:
@@ -59,7 +78,7 @@ def jsonl_path(tmp_path: Path) -> Path:
 class TestRowOrder:
     def test_row_ids_returned_in_file_order(self, jsonl_path: Path) -> None:
         src = RowSource(jsonl_path)
-        assert src.row_ids() == ["R0001", "R0002"]
+        assert src.row_ids() == ["R0001", "R0002", "R0003"]
 
     def test_summaries_carry_pair_and_cell(self, jsonl_path: Path) -> None:
         src = RowSource(jsonl_path)
@@ -75,6 +94,19 @@ class TestRedaction:
         row = src.get("R0001")
         for field in REDACTED_FIELDS:
             assert field not in row, f"{field} leaked to labeler view"
+
+    def test_get_strips_bait_fields(self, jsonl_path: Path) -> None:
+        """Bait-specific tells (``regime``, ``bait_notes``) prime the labeler
+        the same way ``construction_method`` does — must not reach the UI."""
+        src = RowSource(jsonl_path)
+        row = src.get("R0003")
+        assert "regime" not in row
+        assert "bait_notes" not in row
+        assert "construction_method" not in row
+        assert "expected_label" not in row
+        # Real labeler-visible fields stay.
+        assert row["narrative"] == "They share blues lineage."
+        assert row["source_data"]["name"] == "Muddy Waters"
 
     def test_get_keeps_labeler_visible_fields(self, jsonl_path: Path) -> None:
         src = RowSource(jsonl_path)
