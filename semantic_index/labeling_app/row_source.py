@@ -19,6 +19,8 @@ REDACTED_FIELDS: frozenset[str] = frozenset(
         "construction_method",
         "expected_label",
         "metadata_source",
+        "bait_notes",
+        "regime",
     }
 )
 

@@ -9,11 +9,12 @@ See `docs/narrative-enrichment-whitepaper.md` Section 11.3 for the motivation: e
 ```
 sample_pairs.py        -> output/eval/eval_pairs.jsonl        (stratified candidates)
 generate_narratives.py -> output/eval/eval_narratives.jsonl   (production narratives)
-build_wrong_set.py     -> output/eval/eval_wrong.jsonl        (data-shuffle gold positives)
+build_wrong_set.py     -> output/eval/eval_wrong.jsonl        (data-shuffle + field-corruption)
+build_bait_set.py      -> output/eval/eval_bait.jsonl         (pretraining-bait gold positives)
 export_labeling.py     -> output/eval/labeling.csv + .jsonl   (labeler-ready sheet)
 ```
 
-The backscoring pass (`backscore.py`, planned) is not in the MVP — it's gated on the labeling round itself, since until we have human labels there is nothing to backscore against. Field-corruption and pretraining-bait wrong-set constructions are also deferred; they're a smaller increment than data-shuffle and can be added once labeling proves the rubric is consistent.
+The backscoring pass (`backscore.py`) reports per-`construction_method` recall, so labels on bait rows separate from the data-shuffle and field-corruption pools automatically.
 
 ## Stratification
 
@@ -58,11 +59,20 @@ ANTHROPIC_API_KEY=sk-... python -m scripts.eval.build_wrong_set \
     --out output/eval/eval_wrong.jsonl \
     --n 30
 
-# 4. Export a labeling sheet (CSV for Sheets + JSONL for downstream analysis).
+# 4. (Optional) Build pretraining-bait rows from the curated pair list. Drives
+#    the production endpoint via TestClient — anonymization above the 800-play
+#    threshold should suppress the bait; below the threshold should leak.
+ANTHROPIC_API_KEY=sk-... python -m scripts.eval.build_bait_set \
+    --db-path data/wxyc_artist_graph.db \
+    --pairs scripts/eval/bait_pairs.json \
+    --out output/eval/eval_bait.jsonl
+
+# 5. Export a labeling sheet (CSV for Sheets + JSONL for downstream analysis).
 python -m scripts.eval.export_labeling \
     --db-path data/wxyc_artist_graph.db \
     --narratives output/eval/eval_narratives.jsonl \
     --wrong output/eval/eval_wrong.jsonl \
+    --bait output/eval/eval_bait.jsonl \
     --csv-out output/eval/labeling.csv \
     --jsonl-out output/eval/labeling.jsonl
 ```
@@ -120,7 +130,9 @@ Once the eval set has human labels:
 |------|---------|
 | `scripts/eval/sample_pairs.py` | Stratified candidate-pair sampler. |
 | `scripts/eval/generate_narratives.py` | Drives the production `/narrative` endpoint via TestClient. |
-| `scripts/eval/build_wrong_set.py` | Generates data-shuffle gold positives (real names + mismatched metadata). |
+| `scripts/eval/build_wrong_set.py` | Generates data-shuffle and field-corruption wrong narratives. |
+| `scripts/eval/build_bait_set.py` | Generates pretraining-bait rows by driving the production endpoint with curated confusable-name / strong-prior pairs. |
+| `scripts/eval/bait_pairs.json` | Curated pretraining-bait pair list, split into above/below the 800-play anonymization threshold. |
 | `scripts/eval/export_labeling.py` | Joins narratives with input data; emits CSV + JSONL. Hides `construction_method` and `expected_label` from the CSV so the labeler doesn't see the answer. |
 | `scripts/eval/merge_labels.py` | Joins a filled-in labeler CSV back onto `labeling.jsonl` by `row_id`. Validates against the rubric vocabulary; supports per-labeler outputs for IRR work. |
 | `scripts/eval/backscore.py` | Two subcommands: `score` runs token-match v1 and claim-ratio v1 against every eval-set row (real metadata, not the model's prompt input — mirrors what a labeler judges); `metrics` reports precision/recall/F1 of each scorer once labels exist. |
@@ -130,7 +142,8 @@ Once the eval set has human labels:
 | `docs/eval-set-rubric.md` | Labeling rubric: severity, failure modes, worked examples. |
 | `output/eval/eval_pairs.jsonl` | Sampled candidate pairs. |
 | `output/eval/eval_narratives.jsonl` | Generated production narratives + endpoint scoring metadata. |
-| `output/eval/eval_wrong.jsonl` | Data-shuffle wrong narratives, each annotated with `construction_method` and `expected_label`. |
+| `output/eval/eval_wrong.jsonl` | Data-shuffle and field-corruption wrong narratives, each annotated with `construction_method` and `expected_label`. |
+| `output/eval/eval_bait.jsonl` | Pretraining-bait rows generated through the production endpoint, annotated with `construction_method=pretraining_bait` and `regime` (`above`/`below` the 800-play threshold). |
 | `output/eval/labeling.csv` | Labeler-ready sheet (production + wrong rows interleaved, answer key hidden). |
 | `output/eval/labeling.jsonl` | Same data, JSON form, with input data + answer-key fields preserved. |
 | `output/eval/eval_scored.jsonl` | Per-row token-match v1 + claim-ratio v1 scores (built by `backscore.py score`). |

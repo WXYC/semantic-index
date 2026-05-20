@@ -65,7 +65,9 @@ def _format_shared_neighbors(neighbors: list[dict]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--db-path", default="data/wxyc_artist_graph.db")
     ap.add_argument("--narratives", required=True, help="Input eval_narratives.jsonl")
     ap.add_argument(
@@ -75,6 +77,13 @@ def main(argv: list[str] | None = None) -> int:
         "are interleaved with the production rows. Construction-method markers "
         "and expected-label fields stay in the JSONL backing but are NOT shown "
         "in the labeler-facing CSV (so the labeler doesn't see the answer).",
+    )
+    ap.add_argument(
+        "--bait",
+        default=None,
+        help="Optional eval_bait.jsonl from build_bait_set.py. Interleaved like "
+        "--wrong; construction_method=pretraining_bait and the regime tag stay "
+        "in the JSONL backing only.",
     )
     ap.add_argument("--csv-out", required=True)
     ap.add_argument("--jsonl-out", required=True)
@@ -106,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
                     rows_in.append(json.loads(line))
         logger.info("Merged %s wrong rows in addition to production rows", args.wrong)
 
+    if args.bait:
+        with Path(args.bait).open() as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    rows_in.append(json.loads(line))
+        logger.info("Merged %s bait rows in addition to production rows", args.bait)
+
     rng = random.Random(args.seed)
     rng.shuffle(rows_in)
 
@@ -126,9 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         "aa_sum",
         "insufficient_signal",
         "token_match_score",
-        "severity",        # blank — labeler fills (severe / minor / not_wrong)
-        "failure_mode",    # blank — labeler fills (subject_hallucination / ...)
-        "notes",           # blank — labeler freeform
+        "severity",  # blank — labeler fills (severe / minor / not_wrong)
+        "failure_mode",  # blank — labeler fills (subject_hallucination / ...)
+        "notes",  # blank — labeler freeform
     ]
 
     written = 0
