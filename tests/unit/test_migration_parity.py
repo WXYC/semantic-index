@@ -20,14 +20,12 @@ from wxyc_etl import schema, text
         "Various",
         "Various Artists",
         "various artists",
-        "  Various Artists  ",
     ],
     ids=[
         "V/A",
         "Various",
         "Various_Artists",
         "various_artists_lowercase",
-        "various_artists_padded",
     ],
 )
 def test_is_compilation_artist_covers_old_is_various_artists(name):
@@ -41,14 +39,12 @@ def test_is_compilation_artist_covers_old_is_various_artists(name):
     [
         "Soundtrack",
         "Compilation",
-        "Original Motion Picture Soundtrack",
         "v.a.",
         "VARIOUS",
     ],
     ids=[
         "Soundtrack",
         "Compilation",
-        "Motion_Picture_Soundtrack",
         "v.a.",
         "VARIOUS_caps",
     ],
@@ -62,15 +58,24 @@ def test_is_compilation_artist_additional_coverage(name):
 @pytest.mark.parametrize(
     "name",
     [
+        # Real artists — never flagged.
         "Autechre",
         "Stereolab",
         "Cat Power",
         "Father John Misty",
         "",
+        # Tightened semantics in wxyc-etl 0.5.0 (anchored leading-prefix + exact-only):
+        # the legacy substring matcher returned True for these; the new matcher
+        # returns False. "soundtrack" / "various" / "compilation" are exact-only;
+        # padded forms no longer satisfy the leading anchor at position 0.
+        "  Various Artists  ",
+        "Original Motion Picture Soundtrack",
+        "A Compilation Album",
+        "Various Production",
     ],
 )
 def test_is_compilation_artist_false_for_real_artists(name):
-    """Real artist names should not be flagged as compilation artists."""
+    """Real artist names and tightened non-matches should not be flagged."""
     assert text.is_compilation_artist(name) is False
 
 
