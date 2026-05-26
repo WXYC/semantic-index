@@ -360,6 +360,8 @@ class TestNightlySyncDeduplication:
             db_path=str(tmp_path / "prod.db"),
             dsn="postgresql://fake",
             min_count=2,
+            shared_personnel_top_k=50,
+            label_family_top_k=50,
             dry_run=True,
         )
 
