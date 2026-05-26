@@ -640,6 +640,86 @@ class TestBatchNeighbors:
                 assert bat_entry["detail"]["dimensions"] == ind_entry["detail"]["dimensions"]
 
 
+class TestAffinityPerSourceCap:
+    """Regression test for the SQL ``ROW_NUMBER`` per-source cap.
+
+    The affinity endpoint must bound how many rows it fetches per (source artist,
+    edge table) pair regardless of the source's in-degree. Without this guard a
+    hub artist who appears in thousands of *other* artists' top-K sets would
+    still return thousands of rows in the ``WHERE artist_b_id IN (hub)`` half of
+    the UNION ALL, regressing the cold-cache latency that motivated the cap.
+
+    The HTTP endpoint clamps ``limit`` at 100 so the assertion can't push the
+    limit above the cap. Instead, this test calls ``_neighbors_affinity_batch``
+    directly with the cap monkeypatched to a small value and checks that the
+    candidate neighbors surfaced to Python ranking are bounded by it.
+    """
+
+    @pytest.fixture
+    def hub_db(self, tmp_path) -> tuple[str, int, int]:
+        from tests.conftest import make_artist_stats
+
+        path = str(tmp_path / "hub.db")
+        n_neighbors = 200
+        stats = {"Hub": make_artist_stats("Hub", total_plays=100)}
+        for i in range(n_neighbors):
+            name = f"Neighbor{i:03d}"
+            stats[name] = make_artist_stats(name, total_plays=10)
+        export_sqlite(path, artist_stats=stats, pmi_edges=[], xref_edges=[], min_count=1)
+
+        conn = sqlite3.connect(path)
+        ids = {r[1]: r[0] for r in conn.execute("SELECT id, canonical_name FROM artist")}
+        hub_id = ids["Hub"]
+        # All leaves edge to the hub with strictly decreasing weight, so the cap's
+        # selection is deterministic (top-K leaves by descending shared_count).
+        for i in range(n_neighbors):
+            leaf_id = ids[f"Neighbor{i:03d}"]
+            a, b = sorted([hub_id, leaf_id])
+            conn.execute(
+                "INSERT INTO shared_personnel VALUES (?, ?, ?, ?)",
+                (a, b, n_neighbors - i, '["x"]'),
+            )
+        conn.commit()
+        conn.close()
+        return path, hub_id, n_neighbors
+
+    def test_cap_bounds_per_source_candidates(self, hub_db, monkeypatch) -> None:
+        from semantic_index.api import routes
+        from semantic_index.api.routes import _init_metrics_flag, _neighbors_affinity_batch
+
+        path, hub_id, n_neighbors = hub_db
+        # Shrink the cap to a value well below the seeded fanout so we can
+        # observe it as the binding constraint (not the request-side ``limit``).
+        cap = 25
+        monkeypatch.setattr(routes, "AFFINITY_PER_SOURCE_CAP", cap)
+
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        try:
+            _init_metrics_flag(db)
+            # ``limit`` deliberately > cap so the cap, not the request limit, is
+            # the bound exposed in the candidate set.
+            results = _neighbors_affinity_batch(db, [hub_id], limit=n_neighbors)
+        finally:
+            db.close()
+
+        neighbors = results.get(hub_id, [])
+        # The shared_personnel query returns ``cap`` rows from the hub-as-source
+        # half plus ``cap`` from the hub-as-target half. On this seed both halves
+        # touch overlapping (a,b) pairs, so per_source_edges dedups by neighbor
+        # id and the surfaced candidate count is bounded by 2*cap.
+        assert len(neighbors) <= 2 * cap, (
+            f"per-source SQL cap regressed: hub returned {len(neighbors)} neighbors, "
+            f"expected at most {2 * cap}"
+        )
+        # And the survivors are the highest-weight leaves: Neighbor000 has the
+        # largest shared_count and must be present.
+        names = {n.artist.canonical_name for n in neighbors}
+        assert "Neighbor000" in names, (
+            f"per-source cap dropped the highest-weight neighbor; survivors={sorted(names)[:10]}"
+        )
+
+
 class TestWikidataInfluenceNeighbors:
     @pytest.mark.asyncio
     async def test_influence_neighbors_outbound(

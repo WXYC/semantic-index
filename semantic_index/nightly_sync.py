@@ -122,8 +122,11 @@ def _prune_enrichment_edges(db_path: str, *, top_k: int) -> None:
     """Apply per-artist top-K caps to the preserved enrichment edge tables.
 
     ``top_k <= 0`` disables pruning. Missing tables are tolerated so first-run
-    fresh databases skip cleanly. Commits before returning so the next pipeline
-    step sees the pruned state.
+    fresh databases skip cleanly — but only the "no such table" flavour of
+    ``OperationalError``. Other operational errors (locked database, disk full,
+    schema mismatch) propagate so the outer scheduler logs them with full
+    traceback instead of silently classifying them as "table absent".
+    Commits before returning so the next pipeline step sees the pruned state.
     """
     from semantic_index.discogs_edges import prune_label_family, prune_shared_personnel
 
@@ -138,7 +141,9 @@ def _prune_enrichment_edges(db_path: str, *, top_k: int) -> None:
         ]:
             try:
                 prune_fn(conn, top_k=top_k)
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
                 logger.info("%s table absent — skipping prune", table_name)
         conn.commit()
     finally:
