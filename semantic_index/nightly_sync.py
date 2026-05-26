@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/wxyc_artist_graph.db"
 DEFAULT_MIN_COUNT = 2
-# Per-artist neighbor cap applied to enrichment edge tables on every sync.
-# shared_personnel and label_family grow into the 10M+ row range without it
-# (~1.3 GB / ~1.2 GB on disk) and stall the affinity composite-edge endpoint
-# on cold cache. Set the corresponding flag to 0 to disable.
+# Per-artist neighbor cap applied to shared_personnel and label_family on every
+# sync. Without it those tables grow into the 10M+ row range (~1.3 GB / ~1.2 GB
+# on disk) and stall the affinity composite-edge endpoint on cold cache. Set
+# the flag to 0 to disable.
 DEFAULT_ENRICHMENT_TOP_K = 50
 
 # Tables that are fully recomputed each run and must be cleared
@@ -118,36 +118,28 @@ def checkpoint_and_close(db_path: str) -> None:
     conn.close()
 
 
-def _prune_enrichment_edges(
-    db_path: str,
-    *,
-    shared_personnel_top_k: int,
-    label_family_top_k: int,
-) -> None:
+def _prune_enrichment_edges(db_path: str, *, top_k: int) -> None:
     """Apply per-artist top-K caps to the preserved enrichment edge tables.
 
-    Each ``top_k <= 0`` value disables the corresponding prune. Missing tables
-    are tolerated (fresh databases on first run will skip the prune cleanly).
-    The function commits its own changes so the next pipeline step sees the
-    pruned state.
+    ``top_k <= 0`` disables pruning. Missing tables are tolerated so first-run
+    fresh databases skip cleanly. Commits before returning so the next pipeline
+    step sees the pruned state.
     """
     from semantic_index.discogs_edges import prune_label_family, prune_shared_personnel
 
-    if shared_personnel_top_k <= 0 and label_family_top_k <= 0:
+    if top_k <= 0:
         return
 
     conn = sqlite3.connect(db_path)
     try:
-        if shared_personnel_top_k > 0:
+        for table_name, prune_fn in [
+            ("shared_personnel", prune_shared_personnel),
+            ("label_family", prune_label_family),
+        ]:
             try:
-                prune_shared_personnel(conn, top_k=shared_personnel_top_k)
+                prune_fn(conn, top_k=top_k)
             except sqlite3.OperationalError:
-                logger.info("shared_personnel table absent — skipping prune")
-        if label_family_top_k > 0:
-            try:
-                prune_label_family(conn, top_k=label_family_top_k)
-            except sqlite3.OperationalError:
-                logger.info("label_family table absent — skipping prune")
+                logger.info("%s table absent — skipping prune", table_name)
         conn.commit()
     finally:
         conn.close()
@@ -354,17 +346,17 @@ def nightly_sync(args: argparse.Namespace) -> None:
             )
 
         # --- Step 7c: Prune preserved enrichment edges ---
-        # Runs after dedup so per-artist neighbor counts reflect post-merge canonical IDs.
-        _prune_enrichment_edges(
-            str(temp_path),
-            shared_personnel_top_k=args.shared_personnel_top_k,
-            label_family_top_k=args.label_family_top_k,
-        )
+        # Snapshot the mapping and close pipeline_db before the prune opens its own
+        # connection — two write-capable handles to the same SQLite file under WAL
+        # are merely slow, but the prune commits inside its transaction and we
+        # don't want it racing pipeline_db's checkpoint.
+        name_to_id = pipeline_db.get_name_to_id_mapping()
+        pipeline_db.close()
+
+        _prune_enrichment_edges(str(temp_path), top_k=args.enrichment_top_k)
 
         # --- Step 8: Facet tables ---
         logger.info("Exporting facet tables...")
-        name_to_id = pipeline_db.get_name_to_id_mapping()
-
         export_facet_tables(
             db_path=str(temp_path),
             resolved_entries=resolved_entries,
@@ -375,7 +367,6 @@ def nightly_sync(args: argparse.Namespace) -> None:
         )
 
         # --- Step 9: Graph metrics ---
-        pipeline_db.close()
 
         logger.info("Computing graph metrics...")
         metrics = compute_and_persist(str(temp_path))
@@ -429,22 +420,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Minimum co-occurrence count for DJ transition edges (default: 2)",
     )
     parser.add_argument(
-        "--shared-personnel-top-k",
+        "--enrichment-top-k",
         type=int,
-        default=int(os.environ.get("SHARED_PERSONNEL_TOP_K", str(DEFAULT_ENRICHMENT_TOP_K))),
+        default=int(os.environ.get("ENRICHMENT_TOP_K", str(DEFAULT_ENRICHMENT_TOP_K))),
         help=(
-            f"Per-artist neighbor cap for shared_personnel (default: "
-            f"{DEFAULT_ENRICHMENT_TOP_K}, 0 disables). The unpruned table grows past "
-            "10M rows and stalls the affinity endpoint on cold cache."
-        ),
-    )
-    parser.add_argument(
-        "--label-family-top-k",
-        type=int,
-        default=int(os.environ.get("LABEL_FAMILY_TOP_K", str(DEFAULT_ENRICHMENT_TOP_K))),
-        help=(
-            f"Per-artist neighbor cap for label_family (default: "
-            f"{DEFAULT_ENRICHMENT_TOP_K}, 0 disables)."
+            f"Per-artist neighbor cap for shared_personnel and label_family "
+            f"(default: {DEFAULT_ENRICHMENT_TOP_K}, 0 disables). The unpruned tables "
+            "grow past 10M rows and stall the affinity endpoint on cold cache."
         ),
     )
     parser.add_argument(

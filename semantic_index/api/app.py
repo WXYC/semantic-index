@@ -36,6 +36,7 @@ def create_app(
     sync_hour_utc: int = 9,
     sync_dsn: str | None = None,
     sync_min_count: int = 2,
+    enrichment_top_k: int = 50,
 ) -> FastAPI:
     """Create a FastAPI application wired to the given SQLite database.
 
@@ -47,6 +48,8 @@ def create_app(
         sync_hour_utc: Hour (UTC) to run the daily sync.
         sync_dsn: PostgreSQL DSN for Backend-Service (required when sync_enabled).
         sync_min_count: Minimum co-occurrence count for DJ transition edges.
+        enrichment_top_k: Per-artist neighbor cap for shared_personnel and
+            label_family applied on every nightly sync. 0 disables.
     """
     app = FastAPI(title="WXYC Semantic Graph API", version="0.1.0")
     app.add_middleware(
@@ -133,6 +136,7 @@ def create_app(
                 dsn=sync_dsn,
                 min_count=sync_min_count,
                 hour_utc=sync_hour_utc,
+                enrichment_top_k=enrichment_top_k,
             )
 
     return app
@@ -166,6 +170,7 @@ def _create_app_from_settings() -> FastAPI:
         sync_hour_utc=settings.sync_hour_utc,
         sync_dsn=settings.database_url_backend,
         sync_min_count=settings.sync_min_count,
+        enrichment_top_k=settings.enrichment_top_k,
     )
 
 
