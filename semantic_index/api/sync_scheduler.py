@@ -44,7 +44,7 @@ def _seconds_until_next_run(hour_utc: int) -> float:
     return delta
 
 
-def _run_sync(db_path: str, dsn: str, min_count: int) -> None:
+def _run_sync(db_path: str, dsn: str, min_count: int, enrichment_top_k: int) -> None:
     """Execute a single sync run, catching all exceptions."""
     try:
         from semantic_index.nightly_sync import nightly_sync
@@ -53,6 +53,7 @@ def _run_sync(db_path: str, dsn: str, min_count: int) -> None:
             db_path=db_path,
             dsn=dsn,
             min_count=min_count,
+            enrichment_top_k=enrichment_top_k,
             dry_run=False,
             verbose=False,
         )
@@ -84,7 +85,9 @@ def _sleep_with_heartbeat(total_seconds: float, hour_utc: int) -> None:
             )
 
 
-def _scheduler_loop(db_path: str, dsn: str, min_count: int, hour_utc: int) -> None:
+def _scheduler_loop(
+    db_path: str, dsn: str, min_count: int, hour_utc: int, enrichment_top_k: int
+) -> None:
     """Sleep-and-run loop for the background thread.
 
     The outer ``try``/``except`` is load-bearing: this runs as a ``daemon=True``
@@ -104,7 +107,7 @@ def _scheduler_loop(db_path: str, dsn: str, min_count: int, hour_utc: int) -> No
             _sleep_with_heartbeat(wait, hour_utc)
 
             logger.info("Starting scheduled sync...")
-            _run_sync(db_path, dsn, min_count)
+            _run_sync(db_path, dsn, min_count, enrichment_top_k)
     except BaseException:
         logger.exception(
             "Sync scheduler thread crashed — daily sync will not run until the process restarts"
@@ -117,6 +120,7 @@ def start_scheduler(
     dsn: str,
     min_count: int = 2,
     hour_utc: int = 9,
+    enrichment_top_k: int = 50,
 ) -> threading.Thread | None:
     """Start the sync scheduler as a daemon thread.
 
@@ -128,6 +132,8 @@ def start_scheduler(
         dsn: PostgreSQL DSN for Backend-Service.
         min_count: Minimum co-occurrence count for DJ transition edges.
         hour_utc: Hour (UTC) to run the daily sync.
+        enrichment_top_k: Per-artist neighbor cap for shared_personnel and
+            label_family. 0 disables.
 
     Returns:
         The daemon thread (already started), or None if the lock is held.
@@ -147,7 +153,7 @@ def start_scheduler(
 
     thread = threading.Thread(
         target=_scheduler_loop,
-        args=(db_path, dsn, min_count, hour_utc),
+        args=(db_path, dsn, min_count, hour_utc, enrichment_top_k),
         name="sync-scheduler",
         daemon=True,
     )

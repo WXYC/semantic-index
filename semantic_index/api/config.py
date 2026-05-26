@@ -28,3 +28,4 @@ class Settings(BaseSettings):
     sync_hour_utc: int = 9  # 9:00 UTC = 5:00 AM ET
     database_url_backend: str | None = None
     sync_min_count: int = 2
+    enrichment_top_k: int = 50

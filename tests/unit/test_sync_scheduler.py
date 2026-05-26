@@ -192,6 +192,7 @@ class TestSchedulerLoopCrashHandling:
                 dsn="postgresql://localhost/test",
                 min_count=2,
                 hour_utc=9,
+                enrichment_top_k=50,
             )
 
         crash_records = [

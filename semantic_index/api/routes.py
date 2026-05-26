@@ -999,8 +999,6 @@ def _neighbors_affinity_batch(
         affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
 
         placeholders = ",".join("?" * len(artist_ids))
-        # Each affinity SQL has two halves (source / target) and a final
-        # ``rn <= ?`` filter, so params are: ids + cap, then ids + cap again.
         cap = AFFINITY_PER_SOURCE_CAP
         params = [*artist_ids, cap, *artist_ids, cap]
 
@@ -1011,12 +1009,8 @@ def _neighbors_affinity_batch(
             aid: {} for aid in artist_ids
         }
 
-        # ``WHERE source_id IN (...)`` would still fetch every edge for a hub
-        # like Stevie Wonder (thousands per direction). Wrap each direction in
-        # ``ROW_NUMBER() OVER (PARTITION BY sid ORDER BY raw_count DESC)`` so
-        # the engine reads index-clustered rows per source and stops after the
-        # top ``cap``. raw_count is the cheapest stable rank key (no PMI math
-        # in SQL — Python still does the cool/hot blend on the survivors).
+        # raw_count is the rank key (not pmi) because Python still applies the
+        # cool/hot blend on the survivors — keeping the SQL stable and cheap.
         dj_query = (
             "SELECT sid, nid, score, raw_count FROM (\n"  # noqa: S608
             "    SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count,\n"
@@ -1048,9 +1042,6 @@ def _neighbors_affinity_batch(
 
         for etype_default, source in affinity_sources:
             etype = source.affinity_type_name or etype_default
-            # ``score_expr`` is the affinity rank key (e.g. ``shared_count``);
-            # use it for both the SELECT value and the ROW_NUMBER ordering so
-            # the SQL cap keeps the highest-scoring per-source rows.
             score_expr = source.affinity_score_expr
             query = (
                 f"SELECT sid, nid, score FROM (\n"  # noqa: S608
