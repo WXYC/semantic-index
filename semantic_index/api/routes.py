@@ -93,6 +93,18 @@ class EdgeSchema:
 # acoustic dimension is treated as zero contribution to affinity.
 ACOUSTIC_SATURATION_FLOOR = 0.97
 
+# Per-source SQL cap for the affinity composite query. The per-artist top-K prune
+# on shared_personnel/label_family/acoustic_similarity bounds OUT-degree but not
+# IN-degree: a hub artist like Stevie Wonder appears in thousands of other
+# artists' top-K sets, so `WHERE col_b IN (hub_id)` still returns thousands of
+# rows pointing AT them. The window-function cap below ensures the affinity
+# query never fetches more than AFFINITY_PER_SOURCE_CAP rows per (source, table)
+# pair, regardless of the source artist's centrality. 100 is well above any
+# realistic ``limit`` value the endpoint exposes and leaves headroom for the
+# weighted composite scorer to find good neighbors across all eight signal
+# types.
+AFFINITY_PER_SOURCE_CAP = 100
+
 
 EDGE_REGISTRY: dict[EdgeType, EdgeSchema] = {
     EdgeType.SHARED_STYLE: EdgeSchema(
@@ -987,7 +999,10 @@ def _neighbors_affinity_batch(
         affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
 
         placeholders = ",".join("?" * len(artist_ids))
-        params = list(artist_ids) + list(artist_ids)
+        # Each affinity SQL has two halves (source / target) and a final
+        # ``rn <= ?`` filter, so params are: ids + cap, then ids + cap again.
+        cap = AFFINITY_PER_SOURCE_CAP
+        params = [*artist_ids, cap, *artist_ids, cap]
 
         per_source_edges: dict[int, dict[int, list[tuple[str, float]]]] = {
             aid: {} for aid in artist_ids
@@ -996,12 +1011,26 @@ def _neighbors_affinity_batch(
             aid: {} for aid in artist_ids
         }
 
+        # ``WHERE source_id IN (...)`` would still fetch every edge for a hub
+        # like Stevie Wonder (thousands per direction). Wrap each direction in
+        # ``ROW_NUMBER() OVER (PARTITION BY sid ORDER BY raw_count DESC)`` so
+        # the engine reads index-clustered rows per source and stops after the
+        # top ``cap``. raw_count is the cheapest stable rank key (no PMI math
+        # in SQL — Python still does the cool/hot blend on the survivors).
         dj_query = (
-            f"SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count "  # noqa: S608
-            f"FROM dj_transition WHERE source_id IN ({placeholders}) "
-            "UNION ALL "
-            "SELECT target_id, source_id, pmi, raw_count "
-            f"FROM dj_transition WHERE target_id IN ({placeholders})"
+            "SELECT sid, nid, score, raw_count FROM (\n"  # noqa: S608
+            "    SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count,\n"
+            "           ROW_NUMBER() OVER (PARTITION BY source_id "
+            "                              ORDER BY raw_count DESC, target_id) AS rn\n"
+            f"    FROM dj_transition WHERE source_id IN ({placeholders})\n"
+            ") WHERE rn <= ?\n"
+            "UNION ALL\n"
+            "SELECT sid, nid, score, raw_count FROM (\n"
+            "    SELECT target_id AS sid, source_id AS nid, pmi AS score, raw_count,\n"
+            "           ROW_NUMBER() OVER (PARTITION BY target_id "
+            "                              ORDER BY raw_count DESC, source_id) AS rn\n"
+            f"    FROM dj_transition WHERE target_id IN ({placeholders})\n"
+            ") WHERE rn <= ?"
         )
         with sentry_sdk.start_span(op="db.sqlite", name="dj_transition") as span:
             row_count = 0
@@ -1019,13 +1048,26 @@ def _neighbors_affinity_batch(
 
         for etype_default, source in affinity_sources:
             etype = source.affinity_type_name or etype_default
+            # ``score_expr`` is the affinity rank key (e.g. ``shared_count``);
+            # use it for both the SELECT value and the ROW_NUMBER ordering so
+            # the SQL cap keeps the highest-scoring per-source rows.
+            score_expr = source.affinity_score_expr
             query = (
-                f"SELECT {source.col_a} AS sid, {source.col_b} AS nid, "  # noqa: S608
-                f"{source.affinity_score_expr} AS score "
-                f"FROM {source.table} WHERE {source.col_a} IN ({placeholders}) "
-                "UNION ALL "
-                f"SELECT {source.col_b}, {source.col_a}, {source.affinity_score_expr} "
-                f"FROM {source.table} WHERE {source.col_b} IN ({placeholders})"
+                f"SELECT sid, nid, score FROM (\n"  # noqa: S608
+                f"    SELECT {source.col_a} AS sid, {source.col_b} AS nid,\n"
+                f"           ({score_expr}) AS score,\n"
+                f"           ROW_NUMBER() OVER (PARTITION BY {source.col_a} "
+                f"                              ORDER BY ({score_expr}) DESC, {source.col_b}) AS rn\n"
+                f"    FROM {source.table} WHERE {source.col_a} IN ({placeholders})\n"
+                f") WHERE rn <= ?\n"
+                f"UNION ALL\n"
+                f"SELECT sid, nid, score FROM (\n"
+                f"    SELECT {source.col_b} AS sid, {source.col_a} AS nid,\n"
+                f"           ({score_expr}) AS score,\n"
+                f"           ROW_NUMBER() OVER (PARTITION BY {source.col_b} "
+                f"                              ORDER BY ({score_expr}) DESC, {source.col_a}) AS rn\n"
+                f"    FROM {source.table} WHERE {source.col_b} IN ({placeholders})\n"
+                f") WHERE rn <= ?"
             )
             with sentry_sdk.start_span(op="db.sqlite", name=source.table) as span:
                 row_count = 0
