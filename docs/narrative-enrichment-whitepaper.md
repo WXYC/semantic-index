@@ -78,7 +78,7 @@ Some pairs are spuriously connected through generic hubs regardless of weighting
 
 Beyond neighbor selection, experiments revealed several data hygiene issues:
 
-- **Overly long style lists.** Outkast has 53 Discogs styles. Destroyer's top 5 include "Breakbeat" and "Techno" from minor releases, leading the model to describe an indie rock artist as "channeling breakbeat and techno elements." Capping to the top 5 styles by release count reduces this surface. (The current production cap is alphabetical-top-5, since the upstream `artist_style` table does not yet persist a release-count column; proper release-count ranking is a pipeline-side follow-up.)
+- **Overly long style lists.** Outkast has 53 Discogs styles. Destroyer's top 5 include "Breakbeat" and "Techno" from minor releases, leading the model to describe an indie rock artist as "channeling breakbeat and techno elements." Capping to the top 5 styles by release count reduces this surface. (The current production cap is alphabetical-top-5, since the upstream `artist_style` table does not yet persist a release-count column; proper release-count ranking is a pipeline-side follow-up tracked at #297.)
 
 - **Raw numeric leakage.** Danceability scores like "(0.68)" surfaced verbatim in narrative text when passed as floats in the prompt data. Converting to qualitative labels at extremes only (with unremarkable middles omitted entirely so the model has no number to quote) prevents this.
 
@@ -124,7 +124,7 @@ Each source type yields its own schema, reflecting the different evidence it pro
 - `style_description` — prose from "Musical style" / "Artistry" sections
 - `genre_context` — regional, historical, or cultural context
 
-Extraction method: structured LLM extraction via Haiku. Each review or bio is passed through with a prompt asking for JSON output in the relevant schema, with explicit instruction to extract only what is stated, not to infer. At approximately 37,000 existing reviews averaging 700 words, extraction costs roughly $2 in Haiku input tokens.
+Extraction method: structured LLM extraction via Haiku (#232; downstream prompt-wiring step at #239; both under the Phase 2 epic #211). Each review or bio is passed through with a prompt asking for JSON output in the relevant schema, with explicit instruction to extract only what is stated, not to infer. At approximately 37,000 existing reviews averaging 700 words, extraction costs roughly $2 in Haiku input tokens.
 
 The extracted fields surface in the narrative prompt as a labeled per-artist subobject, so the model knows how to weight each:
 
@@ -174,18 +174,18 @@ Full-text matching against the artist graph (136,675 total artists) yields 20,06
 | Classical | 42 | The Wire |
 | Reggae | 40 | Wikipedia |
 
-A significant portion of the "unmatched" count is a name matching problem, not a corpus gap. "J Dilla / Jay Dee" doesn't match a review titled "J Dilla"; "Ty Segall & Mikal Cronin" doesn't match "Ty Segall." Normalizing matches by splitting on `/`, `&`, and stripping "Various Artists" entries improved title-only coverage from 53% to 56%. Full-text matching (searching the first 500 characters of review body text) brought it further — Ella Fitzgerald, Duke Ellington, and Herbie Hancock were all found mentioned in review body text as reference points, even without dedicated reviews.
+A significant portion of the "unmatched" count is a name matching problem, not a corpus gap. "J Dilla / Jay Dee" doesn't match a review titled "J Dilla"; "Ty Segall & Mikal Cronin" doesn't match "Ty Segall." Normalizing matches by splitting on `/`, `&`, and stripping "Various Artists" entries improved title-only coverage from 53% to 56%. Full-text matching (searching the first 500 characters of review body text) brought it further — Ella Fitzgerald, Duke Ellington, and Herbie Hancock were all found mentioned in review body text as reference points, even without dedicated reviews. The remaining matching work is tracked at #231.
 
 ### 4.5 New Sources to Crawl
 
-The four sources already in the corpus — TMT (Wayback), The Quietus (WordPress sitemap), Bandcamp Daily (Wayback CDX), Stereogum (Next.js `__NEXT_DATA__`) — each have a discovery function in `scripts/crawl_reviews.py` and write JSONL via the same trafilatura extraction path. Priority order for the next sources, by coverage impact:
+The four sources already in the corpus — TMT (Wayback), The Quietus (WordPress sitemap), Bandcamp Daily (Wayback CDX), Stereogum (Next.js `__NEXT_DATA__`) — each have a discovery function in `scripts/crawl_reviews.py` and write JSONL via the same trafilatura extraction path. Priority order for the next sources, by coverage impact (each tracked as a sub-issue under the Phase 2 epic #211):
 
-1. **Wikipedia** — broadest coverage. Covers blues, Latin, reggae, jazz, Asia gaps via Wikimedia API using Wikidata QIDs already in the pipeline. Estimated: ~3 hours.
-2. **All About Jazz** — 30K+ reviews covering the jazz gap. Estimated: ~12 hours.
-3. **Resident Advisor** — 15K reviews covering electronic/dance. Estimated: ~6 hours.
-4. **Aquarium Drunkard** — 5K articles covering OCS/folk/outsider. Estimated: ~2 hours.
-5. **Songlines** — world music reviews for the Africa/Asia/world gap. Estimated: ~1 hour.
-6. **Bandcamp release pages** — first-party artist/label descriptions for the independent long tail.
+1. **Wikipedia** — broadest coverage. Covers blues, Latin, reggae, jazz, Asia gaps via Wikimedia API using Wikidata QIDs already in the pipeline. Estimated: ~3 hours. (#233)
+2. **All About Jazz** — 30K+ reviews covering the jazz gap. Estimated: ~12 hours. (#234)
+3. **Resident Advisor** — 15K reviews covering electronic/dance. Estimated: ~6 hours. (#235)
+4. **Aquarium Drunkard** — 5K articles covering OCS/folk/outsider. Estimated: ~2 hours. (#236)
+5. **Songlines** — world music reviews for the Africa/Asia/world gap. Estimated: ~1 hour. (#237)
+6. **Bandcamp release pages** — first-party artist/label descriptions for the independent long tail. (#238)
 
 None of these have discovery functions yet; each needs a 30–50-line addition to `crawl_reviews.py` (sitemap or CDX query → URL cache → reuse the shared `fetch_live` + `extract_text` path). All crawl times are bounded by polite rate limiting (1-2 second delays). Sources are independent and can run in parallel.
 
@@ -205,7 +205,7 @@ The current graph requires two artists to appear back-to-back at least twice (wi
 
 ### 5.2 Skip-Gram Embeddings over Show Sequences
 
-Treating each radio show as a sentence of artists and training word2vec-style skip-gram embeddings would produce per-artist vectors encoding sequential co-occurrence patterns across all context window sizes simultaneously. Artists that appear in similar positions within sets — surrounded by similar neighbors — end up close in embedding space, even if they've never appeared back-to-back. The show segmentation already exists in the pipeline's `semantic_index/adjacency.py` module.
+Treating each radio show as a sentence of artists and training word2vec-style skip-gram embeddings would produce per-artist vectors encoding sequential co-occurrence patterns across all context window sizes simultaneously. Artists that appear in similar positions within sets — surrounded by similar neighbors — end up close in embedding space, even if they've never appeared back-to-back. The show segmentation already exists in the pipeline's `semantic_index/adjacency.py` module. Training ticket: #240; full Phase 3 epic at #212.
 
 ### 5.3 Three Narrative Scenarios
 
@@ -225,7 +225,9 @@ Experiments with hand-crafted sequential context data demonstrated three scenari
 
 ### 5.4 Embeddings as Infrastructure
 
-The embeddings would not become a new edge type, a new neighbor list, or anything the user sees. They are query-time infrastructure: when the narrative endpoint receives a pair with no direct relationship, it computes cosine similarity between embedding vectors. If similarity is high, it retrieves the shared sequential context and passes it to the narrative prompt. The word "embedding" never appears in user-facing output.
+The embeddings would not become a new edge type, a new neighbor list, or anything the user sees. They are query-time infrastructure: when the narrative endpoint receives a pair with no direct relationship, it computes cosine similarity between embedding vectors (#242). If similarity is high, it retrieves the shared sequential context and passes it to the narrative prompt (wiring step at #243). The word "embedding" never appears in user-facing output.
+
+Persistence lives in the pipeline SQLite as packed float32 BLOBs in an `artist_embedding` table — a 100-dim vector per artist across 136K artists is roughly 50 MB, against ~250 MB if stored as JSON arrays. Schema and migration at #241.
 
 ### 5.5 Relative Value: Embeddings vs. Reviews
 
@@ -428,6 +430,8 @@ This means these scoring methods are useful as a *floor detector* (catching the 
 - **Claim-ratio v1** as a periodic offline audit on cached narratives, surfacing flagged rows via the `/graph/narrative-audit/recent` endpoint for human review.
 - **Human spot-check** on the audited sample for everything below threshold; the floor detectors don't certify a narrative as good, only as not-egregiously-bad.
 
+The claim-ratio audit framework — sampler, verifier protocol, threshold policy, sidecar store — is being extracted as a standalone `llm-claim-audit` package on PyPI so other LLM-extraction projects can reuse it (see §11.13 and #299).
+
 ### 7.6 Toward Wrongness Detection
 
 The scoring methods we tested ask "is this grounded in the data?" The better question is "is this *wrong*?" — a factual error detector rather than a grounding detector.
@@ -588,18 +592,18 @@ The accuracy delta from baseline to current production is the headline 45% → 9
 
 ### 10.2 In Progress
 
-- **Release-count column for `artist_style`.** The 5-style cap is currently alphabetical; switching to release-count ranking is a pipeline-side schema change.
-- **Audit-driven prompt evolution.** The audit endpoint surfaces flagged narratives but the loop back to "add a few-shot example or a constraint rule" is still manual.
+- **Release-count column for `artist_style`** (#297). The 5-style cap is currently alphabetical; switching to release-count ranking is a pipeline-side schema change.
+- **Audit-driven prompt evolution** (#298). The audit endpoint surfaces flagged narratives but the loop back to "add a few-shot example or a constraint rule" is still manual.
 - **Narrative labeling round.** The eval-set scaffolding and labeling UI are deployed; what remains is recruiting labelers, running the calibration round (~20 rows), then the bulk pass, and merging the resulting labels into the gold set so backscore can run.
 
 ### 10.3 Next
 
 Work remaining, in dependency order:
 
-1. **Review corpus integration.** Fix name matching (`coverage_with_normalization.py` outline), build the structured extraction pipeline, wire the fields into the prompt schema. The corpus already exists locally at `data/reviews/<source>/reviews.jsonl` (37,422 articles, mirrored to the org-level `research-data/reviews/` repo); the extraction itself is one Haiku pass over the corpus.
-2. **New crawl sources.** Wikipedia (broadest coverage), then All About Jazz, Resident Advisor, Aquarium Drunkard, Songlines. The crawler infrastructure (`scripts/crawl_reviews.py`) is built and resumable; each new source needs a 30–50-line discovery function.
-3. **Bandcamp bio extraction.** Separate from reviews, since the schema and source URL discovery are different. Fills the independent/underground long tail.
-4. **Skip-gram embedding training.** Per Section 5. Most valuable after review descriptors exist, so the newly surfaceable pairs have rich data to narrate with.
+1. **Review corpus integration** (Phase 2 epic #211). Fix name matching (#231), build the structured extraction pipeline (#232), wire the fields into the prompt schema (#239). The corpus already exists locally at `data/reviews/<source>/reviews.jsonl` (37,422 articles, mirrored to the org-level `research-data/reviews/` repo); the extraction itself is one Haiku pass over the corpus.
+2. **New crawl sources.** Wikipedia (broadest coverage, #233), then All About Jazz (#234), Resident Advisor (#235), Aquarium Drunkard (#236), Songlines (#237). The crawler infrastructure (`scripts/crawl_reviews.py`) is built and resumable; each new source needs a 30–50-line discovery function.
+3. **Bandcamp bio extraction** (#238). Separate from reviews, since the schema and source URL discovery are different. Fills the independent/underground long tail.
+4. **Skip-gram embedding training** (Phase 3 epic #212; training at #240, persistence at #241, query-time similarity at #242, prompt wiring at #243). Per Section 5. Most valuable after review descriptors exist, so the newly surfaceable pairs have rich data to narrate with.
 5. **Constraint ontology.** Per Section 8. Hand-built core first, embedding-derived expansion second, human-judgment calibration third.
 
 Each step improves narratives independently, and each makes subsequent steps more effective.
@@ -638,7 +642,7 @@ The experiments use Haiku because its price makes the cost analysis in Section 9
 
 ### 11.8 Local Fine-Tuned Model
 
-Inverse of the above: a small open-weights model (Llama 3.1 8B, Qwen 2.5 7B) fine-tuned on a few hundred gold narratives may match Haiku at zero per-call cost and zero data egress. The fine-tuning corpus is the production cache plus the closed-loop regenerated outputs. The interesting unknown is whether a model trained specifically on the (data → narrative) mapping is more reliable than a general instruction-follower, even at smaller scale.
+Inverse of the above: a small open-weights model (Llama 3.1 8B, Qwen 2.5 7B) fine-tuned on a few hundred gold narratives may match Haiku at zero per-call cost and zero data egress. The fine-tuning corpus is the production cache plus the closed-loop regenerated outputs. The interesting unknown is whether a model trained specifically on the (data → narrative) mapping is more reliable than a general instruction-follower, even at smaller scale. Scoped as a Phase 4 spike at #246.
 
 ### 11.9 Per-DJ and Per-Listener Variants
 
@@ -655,6 +659,20 @@ The largest unaddressed data-quality issue in this paper is that WXYC's "genre" 
 ### 11.12 Highlighting Provenance in the UI
 
 The narrative is prose. The graph node card is data. Listeners reading a narrative cannot tell which data fields it drew from. A UI affordance — hover over a phrase to highlight the originating data field, or footnote-style citations — would let listeners verify the model's reasoning at a glance. This complements the wrongness-detection work in Section 11.3 by making provenance visible to humans, who are still the most reliable judges.
+
+### 11.13 Auditing as a Reusable Pattern
+
+The claim-ratio audit infrastructure in §7.5 — sample N narratives, decompose each into grounded vs. ungrounded claims via an LLM verifier, persist results to a sidecar SQLite — is a pattern that generalizes beyond narrative generation to any LLM-extracted claim. The reusable kernel is the framework (sampler + verifier protocol + threshold policy + sidecar store); the verifier prompt and claim shape are consumer-supplied. The Project 1 epic at #299 extracts this as a standalone `llm-claim-audit` package on PyPI, with `semantic_index/narrative_audit.py` migrating to a thin glue layer that supplies the WXYC-specific verifier prompt and sampler (#305, with parity verification at #306). Sub-issues #300–#304 cover the repo scaffold, library API, reference `LLMVerifier`, CLI surface, and Trusted Publishing setup for the first `0.1.0` release. Out of scope at v0: a TypeScript port, built-in verifier prompts for specific claim shapes, hosted dashboards. Future in-org adopters per the WXYC extraction roadmap include flowsheet-digitization Phase 2 reconciliation (deferred until that phase is scheduled).
+
+### 11.14 Structural Mitigations Beyond Prompt Engineering
+
+The Phase 1 mitigations (ANON+FEWSHOT+NAMING) drove aggregate hallucination from 45% to 9%, but the per-cell breakdown in §6.5 leaves a residual 23–29% concentrated in LOW-fame + SAME-genre cells — where the model has neither pretraining knowledge nor strong contrastive signal. Phase 2 (review corpus, §4) and Phase 3 (embeddings, §5) attack this from the input side by giving the model concrete things to say. Phase 4 (epic #213) attacks what remains by changing *how* the model generates, with three bounded research spikes:
+
+- **Structured output with grounding citations** (#244). Ask the model for JSON output where each claim is paired with the input field it draws from, then drop any claim that can't cite a source field at post-process time. Hallucination becomes structurally impossible rather than relying on self-restraint — distinct from the §7.6 wrongness-detection approaches because it operates at generation time, not as a downstream gate.
+- **Two-pass verification with regeneration** (#245). A more aggressive cousin of the §7.2 generate-score-regenerate loop, with an LLM verifier replacing token-match for the gate. 2–3× per-call cost, amortized by the narrative cache.
+- **Local-model fine-tuning** (#246; also §11.8). A small open-weights model fine-tuned on the production cache as the third Phase 4 leg.
+
+All three are scoped to run against the same 2×2×2 matrix as §6, with the same scoring methods, and a binary ship/abandon decision documented based on whether each beats the ANON+FEWSHOT+NAMING 9% baseline.
 
 ## 12. Experimental Artifacts
 
