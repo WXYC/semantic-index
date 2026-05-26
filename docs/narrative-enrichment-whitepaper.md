@@ -2,7 +2,7 @@
 
 ## Abstract
 
-The WXYC Freeform Map (explore.wxyc.org) visualizes 22 years of DJ transition data as a semantic artist graph, with an LLM-powered narrative endpoint that explains artist relationships in plain English. This paper documents research into making those narratives more accurate, more musically specific, and capable of describing relationships the graph cannot currently see. The work decomposes into four fronts: better selection of the data we already pass to the model, richer source material drawn from professional music criticism, new relationships surfaced via skip-gram embeddings over show sequences, and accuracy mitigations within the model itself.
+The WXYC Freeform Map (explore.wxyc.org) visualizes over two decades of DJ transition data as a semantic artist graph, with an LLM-powered narrative endpoint that explains artist relationships in plain English. This paper documents research into making those narratives more accurate, more musically specific, and capable of describing relationships the graph cannot currently see. The work decomposes into four fronts: better selection of the data we already pass to the model, richer source material drawn from professional music criticism, new relationships surfaced via skip-gram embeddings over show sequences, and accuracy mitigations within the model itself.
 
 The accuracy work is the most developed. Controlled experiments across a 2×2×2 risk-factor matrix (artist fame × data richness × genre distance) identified four distinct hallucination failure modes — fame-driven subject hallucination, neighbor characterization, DJ-intent attribution, and upstream style-tag noise. Three targeted mitigations using different mechanisms (structural anonymization, demonstrative few-shot examples, prohibitive naming-only constraint) combine additively to reduce hallucination from 45% to 9%, with a closed generate-score-regenerate loop pushing all sampled narratives below threshold within two iterations. Two complementary scoring methods (mechanical token-match and LLM-driven claim-ratio) act as quality gates, though both measure grounding fidelity rather than truthiness — a gap addressed by the proposed constraint-based validation grammar derived dimensionally from the data itself.
 
@@ -10,7 +10,7 @@ The data-selection and accuracy mitigations described here have shipped to produ
 
 ## 1. Introduction
 
-WXYC 89.3 FM is the student-run freeform radio station at UNC Chapel Hill. Since 2003, every song played on air has been logged in a digital flowsheet, producing a dataset of approximately 1.5 million entries spanning over two decades. The Freeform Map pipeline extracts consecutive artist pairs within radio shows, computes Pointwise Mutual Information (PMI) to identify statistically significant co-occurrences, and exports a graph where nodes are artists and edges encode the strength of DJ-curated transitions.
+WXYC 89.3 FM is the student-run freeform radio station at UNC Chapel Hill. Since 2003, every song played on air has been logged in a digital flowsheet, producing a dataset of approximately 2 million entries spanning over two decades. The Freeform Map pipeline extracts consecutive artist pairs within radio shows, computes Pointwise Mutual Information (PMI) to identify statistically significant co-occurrences, and exports a graph where nodes are artists and edges encode the strength of DJ-curated transitions.
 
 The Graph API at explore.wxyc.org serves this graph through an interactive D3.js visualization. Among its endpoints is a narrative generator (`/graph/artists/{id}/explain/{target_id}/narrative`) that calls Claude Haiku to produce 2–3 sentence natural-language explanations of artist relationships. The narrative endpoint receives structured data about both artists (genre, Discogs styles, audio profile features) and any relationships between them (DJ transition count, PMI score, shared personnel, etc.), then prompts Haiku to synthesize a human-readable explanation.
 
@@ -211,7 +211,7 @@ Treating each radio show as a sentence of artists and training word2vec-style sk
 
 Experiments with hand-crafted sequential context data demonstrated three scenarios where embeddings would enable narratives that the current graph cannot produce.
 
-**Scenario 1: No direct edge, shared context.** Tinariwen (844 plays, Saharan Tuareg desert blues) and Konono No 1 (695 plays, Congolese likembe ensemble) have never appeared back-to-back in 22 years of flowsheets. But DJs place them near the same artists — Ali Farka Toure, Mdou Moctar, William Parker, Duke Ellington. With region data added to the prompt, the narrative correctly distinguished their specific traditions rather than generalizing across the African continent:
+**Scenario 1: No direct edge, shared context.** Tinariwen (844 plays, Saharan Tuareg desert blues) and Konono No 1 (695 plays, Congolese likembe ensemble) have never appeared back-to-back in over two decades of flowsheets. But DJs place them near the same artists — Ali Farka Toure, Mdou Moctar, William Parker, Duke Ellington. With region data added to the prompt, the narrative correctly distinguished their specific traditions rather than generalizing across the African continent:
 
 > "Tinariwen and Konono No. 1 represent distinct but complementary approaches to electric music rooted in African traditions. Tinariwen channels Saharan Tuareg guitar blues with psychedelic and experimental textures, while Konono No. 1 builds hypnotic grooves from amplified likembe (thumb piano) patterns in Kinshasa."
 
@@ -244,7 +244,7 @@ Early narrative experiments revealed systematic hallucination patterns:
 - "Waters pioneered electric Chicago blues and jump blues with raw harmonica and driving grooves." This was about Crystal Waters, a house singer, not Muddy Waters.
 - "Pastor T.L. Barrett represent distinctly different sonic territories — one instrumental and experimental." Pastor T.L. Barrett sings religious soul and gospel.
 
-These four examples were drawn from incidental observations during the matrix experiment. A curated bait set — pairs known to trigger pretraining hallucinations, distributed above and below the 800-play anonymization threshold — would let us measure ANON+FEWSHOT+NAMING's suppression of these failure modes directly rather than by chance. That work is tracked in WXYC/semantic-index#278.
+These four examples were drawn from incidental observations during the matrix experiment. A curated bait set — pairs known to trigger pretraining hallucinations, distributed above and below the 800-play anonymization threshold — lets us measure ANON+FEWSHOT+NAMING's suppression of these failure modes directly rather than by chance. That construction shipped as `scripts/eval/build_bait_set.py` (closed WXYC/semantic-index#278); the curated pairs live in `scripts/eval/bait_pairs.json`, split into above/below the 800-play threshold.
 
 ### 6.2 Risk Factor Matrix
 
@@ -707,8 +707,10 @@ The experiment scripts in `scripts/experiments/narrative/` are frozen artifacts 
 |--------|------|
 | `scripts/eval/sample_pairs.py` | Stratified sample across the 2×2×2 matrix, ensuring per-cell minimums |
 | `scripts/eval/generate_narratives.py` | Bulk narrative generation through the production endpoint via TestClient |
-| `scripts/eval/build_wrong_set.py` | Deliberately-wrong narratives via the data-shuffle method (real names + mismatched metadata) |
-| `scripts/eval/export_labeling.py` | Combines real + wrong rows into a labeling CSV/JSONL with redaction of construction metadata |
+| `scripts/eval/build_wrong_set.py` | Deliberately-wrong narratives, two modes: `data_shuffle` (real names + mismatched metadata, 30 rows, `subject_hallucination`) and `field_corruption` (real pair + one corrupted field, 40 rows, `data_noise`; #277) |
+| `scripts/eval/build_bait_set.py` | Pretraining-bait rows generated through the production endpoint with curated confusable-name / strong-prior pairs (10 rows split above/below the 800-play anonymization threshold, `subject_hallucination`; #278) |
+| `scripts/eval/bait_pairs.json` | Curated pretraining-bait pair list read by `build_bait_set.py`, partitioned by the 800-play threshold |
+| `scripts/eval/export_labeling.py` | Combines real + wrong + bait rows into a labeling CSV/JSONL with redaction of construction metadata |
 | `scripts/eval/merge_labels.py` | Merges per-labeler CSVs into a single gold-label set |
 | `scripts/eval/backscore.py` | Per-method recall on the gold set, broken out by failure mode and construction method |
 | `semantic_index/labeling_app/` | Standalone single-page FastAPI labeling UI; SQLite-backed per-labeler persistence |
