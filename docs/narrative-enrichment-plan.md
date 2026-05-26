@@ -1,5 +1,7 @@
 # Narrative Enrichment Plan
 
+> **Status:** Superseded by [`narrative-enrichment-whitepaper.md`](narrative-enrichment-whitepaper.md). This document is preserved as the original April 2026 proposal. Most of §1 (data selection) and §4 (accuracy mitigations) have since shipped; §2 (review corpus integration) and §3 (skip-gram embeddings) remain forward work. Refer to the whitepaper for current implementation status, production code references, and post-ship findings.
+
 The narrative endpoint at `explore.wxyc.org` generates natural-language explanations of artist relationships using Claude Haiku. Today it works well when two artists share a direct DJ transition edge with rich metadata — Discogs styles, audio profiles, cross-references. But it falls silent when artists lack a direct edge, and even when it speaks, it often describes roles and genres rather than what the music actually sounds like.
 
 The goal: **make the narrative endpoint say true, specific, musical things about artist relationships — including relationships the graph can't currently see.**
@@ -207,7 +209,7 @@ Experiments with three prompt variants across 10 artist pairs revealed specific 
 
 ### Hallucination Risk Matrix
 
-A systematic experiment tested hallucination rates across a 2×2×2 matrix of risk factors — Fame (HIGH >800 plays / LOW <400), Data richness (RICH: 3+ styles and audio profile / THIN: ≤2 styles or no audio), and Genre distance (CROSS: different genres / SAME: same genre) — with 3 pairs per cell (19 pairs total, as the LOW+THIN+SAME cell had no qualifying pairs) and automated verification.
+A systematic experiment tested hallucination rates across a 2×2×2 matrix of risk factors — Fame (HIGH >800 plays / LOW 150–400 plays), Data richness (RICH: 3+ styles and audio profile / THIN: ≤2 styles or no audio), and Genre distance (CROSS: different genres / SAME: same genre) — with 3 pairs per cell (19 pairs total, as the LOW+THIN+SAME cell had no qualifying pairs) and automated verification.
 
 | Cell | Pairs | Grounded | Ungrounded | Ambiguous | Halluc% |
 |------|-------|----------|------------|-----------|---------|
@@ -338,7 +340,7 @@ The ANON+FEWSHOT+NAMING variant adds cost in two dimensions:
 
 ### Generate-Score-Regenerate Loop
 
-A closed-loop experiment tested whether token-match scoring can drive iterative improvement: generate a narrative with ANON+FEWSHOT+NAMING, score it with token-match, and if above threshold (0.5), feed the ungrounded terms back as constraints ("do NOT use these words") and regenerate. Up to 3 retries allowed.
+A closed-loop experiment tested whether token-match scoring can drive iterative improvement: generate a narrative with ANON+FEWSHOT+NAMING, score it with token-match, and if above threshold (0.5), feed the ungrounded terms back as constraints ("do NOT use these words") and regenerate. The experiment allowed up to 3 retries; production deploys with 2 (`_DEFAULT_MAX_REGEN_RETRIES`), since the third retry never fired in the runs below.
 
 Results across 17 pairs:
 
@@ -431,7 +433,7 @@ Each step improves narratives independently, and each makes the subsequent steps
 
 ## Artifacts from This Investigation
 
-The following scripts in `scripts/` were produced during this investigation and can be used for further iteration:
+The following scripts in `scripts/experiments/narrative/` were produced during this investigation and can be used for further iteration:
 
 | Script | Purpose |
 |--------|---------|
