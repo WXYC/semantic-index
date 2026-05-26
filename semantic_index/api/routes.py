@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -964,146 +965,175 @@ def _neighbors_affinity_batch(
     Mirrors :func:`_neighbors_affinity` but issues a single ``WHERE source_id IN (...)``
     query per edge table instead of two-per-table-per-source. Per-source ranking
     semantics (heat blend, type-max normalization, weighted composite) are unchanged.
+
+    Sentry trace shape (no-op when no transaction is active): one ``affinity.batch``
+    parent span around the whole call, one ``db.sqlite`` child per edge table with
+    ``rows`` set, one ``affinity.score`` child for the Python ranking pass, and one
+    ``db.sqlite`` child for the final artist hydration.
     """
     if not artist_ids:
         return {}
 
-    affinity_sources: list[tuple[str, EdgeSchema]] = [
-        (edge_type.value, schema)
-        for edge_type, schema in EDGE_REGISTRY.items()
-        if schema.affinity_score_expr is not None
-    ]
-    affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
+    with sentry_sdk.start_span(op="affinity.batch", name="affinity_batch") as parent:
+        parent.set_data("artist_count", len(artist_ids))
+        parent.set_data("limit", limit)
+        parent.set_data("heat", heat)
 
-    placeholders = ",".join("?" * len(artist_ids))
-    params = list(artist_ids) + list(artist_ids)
+        affinity_sources: list[tuple[str, EdgeSchema]] = [
+            (edge_type.value, schema)
+            for edge_type, schema in EDGE_REGISTRY.items()
+            if schema.affinity_score_expr is not None
+        ]
+        affinity_sources.append((_MEMBER_OF_AFFINITY.affinity_type_name or "", _MEMBER_OF_AFFINITY))
 
-    per_source_edges: dict[int, dict[int, list[tuple[str, float]]]] = {
-        aid: {} for aid in artist_ids
-    }
-    per_source_dj_raw: dict[int, dict[int, tuple[float, float]]] = {aid: {} for aid in artist_ids}
+        placeholders = ",".join("?" * len(artist_ids))
+        params = list(artist_ids) + list(artist_ids)
 
-    dj_query = (
-        f"SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count "  # noqa: S608
-        f"FROM dj_transition WHERE source_id IN ({placeholders}) "
-        "UNION ALL "
-        "SELECT target_id, source_id, pmi, raw_count "
-        f"FROM dj_transition WHERE target_id IN ({placeholders})"
-    )
-    try:
-        for row in db.execute(dj_query, params):
-            sid, nid, score, raw_count = row[0], row[1], float(row[2]), float(row[3])
-            if sid not in per_source_edges:
-                continue
-            per_source_dj_raw[sid][nid] = (score, raw_count)
-            per_source_edges[sid].setdefault(nid, []).append(("djTransition", score))
-    except sqlite3.OperationalError:
-        pass
+        per_source_edges: dict[int, dict[int, list[tuple[str, float]]]] = {
+            aid: {} for aid in artist_ids
+        }
+        per_source_dj_raw: dict[int, dict[int, tuple[float, float]]] = {
+            aid: {} for aid in artist_ids
+        }
 
-    for etype_default, source in affinity_sources:
-        etype = source.affinity_type_name or etype_default
-        query = (
-            f"SELECT {source.col_a} AS sid, {source.col_b} AS nid, "  # noqa: S608
-            f"{source.affinity_score_expr} AS score "
-            f"FROM {source.table} WHERE {source.col_a} IN ({placeholders}) "
+        dj_query = (
+            f"SELECT source_id AS sid, target_id AS nid, pmi AS score, raw_count "  # noqa: S608
+            f"FROM dj_transition WHERE source_id IN ({placeholders}) "
             "UNION ALL "
-            f"SELECT {source.col_b}, {source.col_a}, {source.affinity_score_expr} "
-            f"FROM {source.table} WHERE {source.col_b} IN ({placeholders})"
+            "SELECT target_id, source_id, pmi, raw_count "
+            f"FROM dj_transition WHERE target_id IN ({placeholders})"
         )
-        try:
-            for row in db.execute(query, params):
-                sid, nid, score = row[0], row[1], float(row[2])
-                if sid not in per_source_edges:
-                    continue
-                per_source_edges[sid].setdefault(nid, []).append((etype, score))
-        except sqlite3.OperationalError:
-            continue
+        with sentry_sdk.start_span(op="db.sqlite", name="dj_transition") as span:
+            row_count = 0
+            try:
+                for row in db.execute(dj_query, params):
+                    sid, nid, score, raw_count = row[0], row[1], float(row[2]), float(row[3])
+                    row_count += 1
+                    if sid not in per_source_edges:
+                        continue
+                    per_source_dj_raw[sid][nid] = (score, raw_count)
+                    per_source_edges[sid].setdefault(nid, []).append(("djTransition", score))
+            except sqlite3.OperationalError:
+                pass
+            span.set_data("rows", row_count)
 
-    # Heat slider modulates DJ-vs-enrichment weight balance:
-    #   heat=0.0 → pure mirror: DJ full, enrichment damped to zero
-    #   heat=0.5 → balanced: DJ full, enrichment at base weights (existing behavior)
-    #   heat=1.0 → discovery: DJ damped to zero, enrichment doubled
-    # DJ stays at full weight across the cool half then ramps to zero at the hot end;
-    # enrichment ramps linearly from 0 (cool) through 1× (center) to 2× (hot).
-    dj_factor = min(1.0, 2.0 * (1.0 - heat))
-    enrichment_factor = 2.0 * heat
-    dim_weights: dict[str, float] = {"djTransition": 3.0 * dj_factor}
-    for etype_default, source in affinity_sources:
-        dim_weights[source.affinity_type_name or etype_default] = (
-            source.affinity_weight * enrichment_factor
-        )
-
-    per_source_top: dict[int, list[tuple[int, float, list[str]]]] = {}
-    all_top_nids: set[int] = set()
-
-    for sid in artist_ids:
-        neighbor_edges = per_source_edges[sid]
-        if not neighbor_edges:
-            per_source_top[sid] = []
-            continue
-
-        dj_raw = per_source_dj_raw[sid]
-        if dj_raw:
-            max_pmi = max(p for p, _ in dj_raw.values()) or 1
-            max_rc = max(rc for _, rc in dj_raw.values()) or 1
-            for nid, (pmi, rc) in dj_raw.items():
-                blended = (1 - heat) * (rc / max_rc) + heat * (pmi / max_pmi)
-                neighbor_edges[nid] = [
-                    (etype, blended if etype == "djTransition" else score)
-                    for etype, score in neighbor_edges[nid]
-                ]
-
-        type_maxes: dict[str, float] = {}
-        for edges in neighbor_edges.values():
-            for etype, score in edges:
-                type_maxes[etype] = max(type_maxes.get(etype, 0), score)
-
-        scored: list[tuple[int, float, list[str]]] = []
-        for nid, edges in neighbor_edges.items():
-            composite = 0.0
-            types: list[str] = []
-            seen_types: set[str] = set()
-            for etype, score in edges:
-                if etype in seen_types:
-                    continue
-                seen_types.add(etype)
-                max_score = type_maxes.get(etype, 1) or 1
-                w = dim_weights.get(etype, 1.0)
-                composite += w * (score / max_score)
-                types.append(etype)
-            scored.append((nid, composite, types))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top = scored[:limit]
-        per_source_top[sid] = top
-        all_top_nids.update(nid for nid, _, _ in top)
-
-    if not all_top_nids:
-        return {sid: [] for sid in artist_ids}
-
-    nbr_placeholders = ",".join("?" * len(all_top_nids))
-    artist_rows = db.execute(
-        f"SELECT {_scols()} FROM artist WHERE id IN ({nbr_placeholders})",  # noqa: S608
-        list(all_top_nids),
-    ).fetchall()
-    artist_map = {r["id"]: r for r in artist_rows}
-
-    results: dict[int, list[NeighborEntry]] = {}
-    for sid in artist_ids:
-        entries: list[NeighborEntry] = []
-        for nid, composite, types in per_source_top.get(sid, []):
-            r = artist_map.get(nid)
-            if not r:
-                continue
-            entries.append(
-                NeighborEntry(
-                    artist=_artist_summary(r),
-                    weight=round(composite, 3),
-                    detail={"dimensions": len(types), "types": types},
-                )
+        for etype_default, source in affinity_sources:
+            etype = source.affinity_type_name or etype_default
+            query = (
+                f"SELECT {source.col_a} AS sid, {source.col_b} AS nid, "  # noqa: S608
+                f"{source.affinity_score_expr} AS score "
+                f"FROM {source.table} WHERE {source.col_a} IN ({placeholders}) "
+                "UNION ALL "
+                f"SELECT {source.col_b}, {source.col_a}, {source.affinity_score_expr} "
+                f"FROM {source.table} WHERE {source.col_b} IN ({placeholders})"
             )
-        results[sid] = entries
-    return results
+            with sentry_sdk.start_span(op="db.sqlite", name=source.table) as span:
+                row_count = 0
+                try:
+                    for row in db.execute(query, params):
+                        sid, nid, score = row[0], row[1], float(row[2])
+                        row_count += 1
+                        if sid not in per_source_edges:
+                            continue
+                        per_source_edges[sid].setdefault(nid, []).append((etype, score))
+                except sqlite3.OperationalError:
+                    span.set_data("error", "missing_table")
+                    span.set_data("rows", row_count)
+                    continue
+                span.set_data("rows", row_count)
+
+        # Heat slider modulates DJ-vs-enrichment weight balance:
+        #   heat=0.0 → pure mirror: DJ full, enrichment damped to zero
+        #   heat=0.5 → balanced: DJ full, enrichment at base weights (existing behavior)
+        #   heat=1.0 → discovery: DJ damped to zero, enrichment doubled
+        # DJ stays at full weight across the cool half then ramps to zero at the hot end;
+        # enrichment ramps linearly from 0 (cool) through 1× (center) to 2× (hot).
+        dj_factor = min(1.0, 2.0 * (1.0 - heat))
+        enrichment_factor = 2.0 * heat
+        dim_weights: dict[str, float] = {"djTransition": 3.0 * dj_factor}
+        for etype_default, source in affinity_sources:
+            dim_weights[source.affinity_type_name or etype_default] = (
+                source.affinity_weight * enrichment_factor
+            )
+
+        per_source_top: dict[int, list[tuple[int, float, list[str]]]] = {}
+        all_top_nids: set[int] = set()
+
+        with sentry_sdk.start_span(op="affinity.score", name="score_and_rank") as span:
+            total_candidates = 0
+            for sid in artist_ids:
+                neighbor_edges = per_source_edges[sid]
+                if not neighbor_edges:
+                    per_source_top[sid] = []
+                    continue
+                total_candidates += len(neighbor_edges)
+
+                dj_raw = per_source_dj_raw[sid]
+                if dj_raw:
+                    max_pmi = max(p for p, _ in dj_raw.values()) or 1
+                    max_rc = max(rc for _, rc in dj_raw.values()) or 1
+                    for nid, (pmi, rc) in dj_raw.items():
+                        blended = (1 - heat) * (rc / max_rc) + heat * (pmi / max_pmi)
+                        neighbor_edges[nid] = [
+                            (etype, blended if etype == "djTransition" else score)
+                            for etype, score in neighbor_edges[nid]
+                        ]
+
+                type_maxes: dict[str, float] = {}
+                for edges in neighbor_edges.values():
+                    for etype, score in edges:
+                        type_maxes[etype] = max(type_maxes.get(etype, 0), score)
+
+                scored: list[tuple[int, float, list[str]]] = []
+                for nid, edges in neighbor_edges.items():
+                    composite = 0.0
+                    types: list[str] = []
+                    seen_types: set[str] = set()
+                    for etype, score in edges:
+                        if etype in seen_types:
+                            continue
+                        seen_types.add(etype)
+                        max_score = type_maxes.get(etype, 1) or 1
+                        w = dim_weights.get(etype, 1.0)
+                        composite += w * (score / max_score)
+                        types.append(etype)
+                    scored.append((nid, composite, types))
+
+                scored.sort(key=lambda x: x[1], reverse=True)
+                top = scored[:limit]
+                per_source_top[sid] = top
+                all_top_nids.update(nid for nid, _, _ in top)
+            span.set_data("candidate_neighbors", total_candidates)
+            span.set_data("returned_neighbors", len(all_top_nids))
+
+        if not all_top_nids:
+            return {sid: [] for sid in artist_ids}
+
+        with sentry_sdk.start_span(op="db.sqlite", name="hydrate_artists") as span:
+            nbr_placeholders = ",".join("?" * len(all_top_nids))
+            artist_rows = db.execute(
+                f"SELECT {_scols()} FROM artist WHERE id IN ({nbr_placeholders})",  # noqa: S608
+                list(all_top_nids),
+            ).fetchall()
+            span.set_data("artist_count", len(artist_rows))
+        artist_map = {r["id"]: r for r in artist_rows}
+
+        results: dict[int, list[NeighborEntry]] = {}
+        for sid in artist_ids:
+            entries: list[NeighborEntry] = []
+            for nid, composite, types in per_source_top.get(sid, []):
+                r = artist_map.get(nid)
+                if not r:
+                    continue
+                entries.append(
+                    NeighborEntry(
+                        artist=_artist_summary(r),
+                        weight=round(composite, 3),
+                        detail={"dimensions": len(types), "types": types},
+                    )
+                )
+            results[sid] = entries
+        return results
 
 
 def _neighbors_shared_personnel(
