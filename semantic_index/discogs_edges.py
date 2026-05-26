@@ -3,9 +3,14 @@
 Four pure functions that compute edges between artists based on shared personnel,
 overlapping style tags, shared record labels, and co-appearance on compilations.
 All functions use inverted indexes for efficient pair generation.
+
+Also provides per-artist top-K prune for shared_personnel and label_family —
+without it both tables grow into the 10M+ row, 1 GB+ range on the WXYC graph
+and stall the affinity composite-edge endpoint on cold cache.
 """
 
 import logging
+import sqlite3
 from collections import defaultdict
 from itertools import combinations
 
@@ -248,3 +253,162 @@ def extract_compilation_coappearance(
 
     logger.info("Extracted %d compilation-coappearance edges", len(edges))
     return edges
+
+
+def _prune_symmetric_edge_table(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    weight_expr: str,
+    top_k: int,
+) -> tuple[int, int]:
+    """Prune a symmetric ``(artist_a_id, artist_b_id)`` edge table to top-K per artist.
+
+    For each artist X, the K edges with the highest ``weight_expr`` value at X
+    are kept (either-side semantics: an edge survives if it appears in either
+    endpoint's top-K). The function does not commit; the caller owns the
+    transaction so it composes with dry-run wrappers.
+
+    Args:
+        conn: SQLite connection to the graph database.
+        table: Edge table name. Must have ``artist_a_id`` and ``artist_b_id``
+            columns with the canonical ``artist_a_id < artist_b_id`` invariant.
+        weight_expr: SQL expression evaluated against rows of ``table`` that
+            returns a sortable ranking key (higher = stronger edge). For
+            example ``"shared_count"`` for shared_personnel or
+            ``"json_array_length(shared_labels)"`` for label_family.
+        top_k: Per-artist neighbor cap (must be > 0).
+
+    Returns:
+        ``(rows_before, rows_after)`` count tuple for reporting.
+    """
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}")
+
+    before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+    if before == 0:
+        return 0, 0
+
+    # _keep_<table> is a TEMP table holding (a,b) pairs to keep. For each artist
+    # X, rank ALL neighbors (regardless of canonical direction) by weight DESC
+    # with a tiebreaker on the other endpoint id. Then re-canonicalize via
+    # MIN/MAX so the kept pair set matches the ``a < b`` invariant.
+    #
+    # Use plain execute() rather than executescript(): the latter issues an
+    # implicit COMMIT which would break the "caller manages the transaction"
+    # contract documented above.
+    conn.execute(f"DROP TABLE IF EXISTS _keep_{table}")
+    conn.execute(
+        f"""
+        CREATE TEMP TABLE _keep_{table} (
+            artist_a_id INTEGER NOT NULL,
+            artist_b_id INTEGER NOT NULL,
+            PRIMARY KEY (artist_a_id, artist_b_id)
+        )
+        """  # noqa: S608
+    )
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO _keep_{table} (artist_a_id, artist_b_id)
+        SELECT MIN(x_id, y_id), MAX(x_id, y_id) FROM (
+            SELECT x_id, y_id, ROW_NUMBER() OVER (
+                PARTITION BY x_id ORDER BY w DESC, y_id
+            ) AS rn
+            FROM (
+                SELECT artist_a_id AS x_id, artist_b_id AS y_id, ({weight_expr}) AS w
+                FROM {table}
+                UNION ALL
+                SELECT artist_b_id, artist_a_id, ({weight_expr})
+                FROM {table}
+            )
+        )
+        WHERE rn <= ?
+        """,  # noqa: S608
+        (top_k,),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM {table}
+        WHERE NOT EXISTS (
+            SELECT 1 FROM _keep_{table} k
+            WHERE k.artist_a_id = {table}.artist_a_id
+              AND k.artist_b_id = {table}.artist_b_id
+        )
+        """  # noqa: S608
+    )
+    conn.execute(f"DROP TABLE _keep_{table}")
+
+    after = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+    logger.info(
+        "%s prune: %d → %d edges (top_k=%d, kept %.1f%%)",
+        table,
+        before,
+        after,
+        top_k,
+        (after / before * 100) if before else 0,
+    )
+    return before, after
+
+
+def prune_shared_personnel(
+    conn: sqlite3.Connection,
+    top_k: int,
+) -> tuple[int, int]:
+    """Prune ``shared_personnel`` to top-K most-shared-personnel edges per artist.
+
+    Ranks per-artist edges by ``shared_count DESC`` with a deterministic
+    tiebreaker on the other endpoint id. An edge survives if it appears in
+    either endpoint's top-K — see :func:`_prune_symmetric_edge_table` for the
+    either-side semantics and transaction contract.
+
+    Why: on the WXYC graph the table grows to ~12M rows (1.3 GB on disk
+    including indexes) because popular artists accumulate 8K–10K personnel
+    neighbors each. After per-source max-normalization in the affinity
+    composite scorer, only the high-``shared_count`` tail of each artist
+    contributes meaningful signal; the rest is noise that has to be paged
+    in from disk on cold cache, stalling the
+    ``/graph/artists/{id}/neighbors?type=affinity`` endpoint.
+
+    Args:
+        conn: SQLite connection. Caller commits / rolls back.
+        top_k: Per-artist neighbor cap (must be > 0).
+
+    Returns:
+        ``(rows_before, rows_after)`` count tuple for reporting.
+    """
+    return _prune_symmetric_edge_table(
+        conn,
+        table="shared_personnel",
+        weight_expr="shared_count",
+        top_k=top_k,
+    )
+
+
+def prune_label_family(
+    conn: sqlite3.Connection,
+    top_k: int,
+) -> tuple[int, int]:
+    """Prune ``label_family`` to top-K most-shared-labels edges per artist.
+
+    label_family has no scalar weight column — ranks by
+    ``json_array_length(shared_labels) DESC`` so two artists who share many
+    labels rank above pairs that share just one. Same either-side semantics
+    and transaction contract as :func:`prune_shared_personnel`.
+
+    Why: the table grows to ~13M rows (1.2 GB on disk including indexes) on
+    the WXYC graph for the same dense-cross-product reason as
+    shared_personnel.
+
+    Args:
+        conn: SQLite connection. Caller commits / rolls back.
+        top_k: Per-artist neighbor cap (must be > 0).
+
+    Returns:
+        ``(rows_before, rows_after)`` count tuple for reporting.
+    """
+    return _prune_symmetric_edge_table(
+        conn,
+        table="label_family",
+        weight_expr="json_array_length(shared_labels)",
+        top_k=top_k,
+    )
