@@ -39,7 +39,8 @@ SQLite ──→ api (FastAPI + aiosqlite) ──→ JSON responses
 | `semantic_index/wikidata_influence.py` | Extract directed Wikidata P737 influence edges between reconciled artists. Resolves QIDs to canonical names via the pipeline database. |
 | `semantic_index/label_hierarchy.py` | Populate label and label_hierarchy tables from Wikidata P749/P355 relationships via Discogs label ID (P1902) lookups. |
 | `semantic_index/discogs_enrichment.py` | Aggregate Discogs metadata (styles, personnel, labels, compilations) per artist. |
-| `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. |
+| `semantic_index/discogs_edges.py` | Compute Discogs-derived edges: shared personnel, shared style (Jaccard), label family, compilation co-appearance. Per-artist top-K prune for shared_personnel and label_family delegates to `edge_prune`. |
+| `semantic_index/edge_prune.py` | Shared top-K-per-artist prune for symmetric `(artist_a_id, artist_b_id)` edge tables. Backs `prune_acoustic_similarity` (in `acousticbrainz.py`), `prune_shared_personnel`, and `prune_label_family` (in `discogs_edges.py`). |
 | `semantic_index/acousticbrainz.py` | Load AcousticBrainz high-level features, aggregate per-artist audio profiles (59-dim feature vector across 18 classifiers), compute cosine similarity edges. Supports both PG and tar-based loading. |
 | `semantic_index/acousticbrainz_client.py` | PostgreSQL client for AcousticBrainz features. Queries `ab_recording` in musicbrainz-cache, joining with `mb_artist_recording` for per-artist feature retrieval. Preferred over tar-based loading. |
 | `semantic_index/musicbrainz_client.py` | MusicBrainz cache client: recording MBID resolution via `mb_artist_recording` materialized view. Identity resolution methods (lookup_by_name, batch_lookup) have been moved to LML. |
@@ -477,6 +478,7 @@ The SQLite database and sidecar caches live in the bind-mounted `/data` director
 - `SYNC_HOUR_UTC` — hour (UTC) to run the daily sync (default: `9`, i.e. 5:00 AM ET)
 - `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN for nightly sync (required when `SYNC_ENABLED=true`; uses the RDS private endpoint since EC2 and RDS share a VPC)
 - `SYNC_MIN_COUNT` — minimum co-occurrence count for DJ transition edges (default: `2`)
+- `ENRICHMENT_TOP_K` — per-artist neighbor cap applied to `shared_personnel` and `label_family` on every nightly sync (default: `50`, `0` disables). Without it both tables grow into the 10M+ row range and stall the affinity composite-edge endpoint on cold cache.
 
 **Cross-cache-identity feature flags.** Per-cache toggles for which `wxyc_library` hook table the resolver reads (legacy schema vs. new normalized schema). All default `false`. The **canonical inventory** (with naming-convention rationale and approval gates) lives in `WXYC/Backend-Service/CLAUDE.md` "Cross-cache-identity feature flags (canonical inventory)". When a flag is renamed or its default changes, both the canonical Backend section AND this list must update in the same PR; CI on this repo grep-asserts the names listed here match the §4.2 inventory.
 
@@ -512,8 +514,9 @@ The API service includes a built-in sync scheduler that runs `nightly_sync()` as
 - `SYNC_HOUR_UTC=9` — hour to run daily sync (default: 9 = 5:00 AM ET)
 - `DATABASE_URL_BACKEND=postgresql://...` — Backend-Service PG DSN (required when sync enabled)
 - `SYNC_MIN_COUNT=2` — minimum co-occurrence count for DJ transition edges
+- `ENRICHMENT_TOP_K=50` — per-artist neighbor cap for `shared_personnel` and `label_family` applied as Step 7c of every sync; 0 disables.
 
-The scheduler sleeps until the configured hour, runs the full pipeline (PG → resolve → PMI → export → entity dedup → facets → graph metrics), atomically swaps the database, then sleeps until the next day. The API continues serving requests during the rebuild. Runtime is ~5 minutes.
+The scheduler sleeps until the configured hour, runs the full pipeline (PG → resolve → PMI → export → entity dedup → enrichment-edge prune → facets → graph metrics), atomically swaps the database, then sleeps until the next day. The API continues serving requests during the rebuild. Runtime is ~5 minutes.
 
 The sync can also be run manually via CLI: `python scripts/nightly_sync.py --dsn postgresql://... --verbose`
 

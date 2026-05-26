@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -474,3 +476,106 @@ class TestNightlySyncDeduplication:
         assert export_idx < dedup_idx < facet_idx, (
             f"Expected export < dedup < facets, got: {call_order}"
         )
+
+
+# ===========================================================================
+# _prune_enrichment_edges
+# ===========================================================================
+
+
+def _create_enrichment_test_db(path: Path) -> None:
+    """Create a DB with the two enrichment edge tables, seeded with the complete
+    graph on artists 1..5 (10 edges per table) so top-K=2 produces a
+    deterministic non-trivial survivor set."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE shared_personnel (
+            artist_a_id INTEGER NOT NULL,
+            artist_b_id INTEGER NOT NULL,
+            shared_count INTEGER NOT NULL,
+            shared_names TEXT NOT NULL,
+            PRIMARY KEY (artist_a_id, artist_b_id)
+        );
+        CREATE TABLE label_family (
+            artist_a_id INTEGER NOT NULL,
+            artist_b_id INTEGER NOT NULL,
+            shared_labels TEXT NOT NULL,
+            PRIMARY KEY (artist_a_id, artist_b_id)
+        );
+    """)
+    # Complete graph on 1..5 with strictly decreasing weights so the survivor
+    # set is the same shape as TestPruneSharedPersonnel.test_top_k_keeps_top_*:
+    # 10 edges -> 7 after top-K=2 (either-side prune).
+    count = 10
+    for a in range(1, 6):
+        for b in range(a + 1, 6):
+            conn.execute(
+                "INSERT INTO shared_personnel VALUES (?, ?, ?, ?)",
+                (a, b, count, '["x"]'),
+            )
+            conn.execute(
+                "INSERT INTO label_family VALUES (?, ?, ?)",
+                (a, b, '["' + '","'.join([f"l{i}" for i in range(count)]) + '"]'),
+            )
+            count -= 1
+    conn.commit()
+    conn.close()
+
+
+class TestPruneEnrichmentEdges:
+    def test_top_k_zero_is_no_op(self, tmp_path):
+        """``top_k <= 0`` returns before opening any connection."""
+        from semantic_index.nightly_sync import _prune_enrichment_edges
+
+        db = tmp_path / "nonexistent.db"
+        # File doesn't exist; if the function opened it, sqlite3.connect would
+        # create an empty file. With the early return there should be no file.
+        _prune_enrichment_edges(str(db), top_k=0)
+        assert not db.exists()
+
+    def test_tolerates_missing_tables(self, tmp_path):
+        """A fresh DB with no enrichment tables logs and continues."""
+        from semantic_index.nightly_sync import _prune_enrichment_edges
+
+        db = tmp_path / "empty.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE artist (id INTEGER PRIMARY KEY)")
+        conn.close()
+        # Should not raise — both prune calls hit "no such table" and skip.
+        _prune_enrichment_edges(str(db), top_k=50)
+
+    def test_actually_prunes_both_tables(self, tmp_path):
+        """Top-K=2 against the complete graph on 5 artists leaves 7 edges in each
+        table (same survivor set as TestPruneSharedPersonnel.test_top_k_*)."""
+        from semantic_index.nightly_sync import _prune_enrichment_edges
+
+        db = tmp_path / "seeded.db"
+        _create_enrichment_test_db(db)
+
+        _prune_enrichment_edges(str(db), top_k=2)
+
+        conn = sqlite3.connect(str(db))
+        try:
+            n_personnel = conn.execute("SELECT COUNT(*) FROM shared_personnel").fetchone()[0]
+            n_label = conn.execute("SELECT COUNT(*) FROM label_family").fetchone()[0]
+        finally:
+            conn.close()
+        assert n_personnel == 7, f"shared_personnel: expected 7, got {n_personnel}"
+        assert n_label == 7, f"label_family: expected 7, got {n_label}"
+
+    def test_non_missing_operational_error_propagates(self, tmp_path, monkeypatch):
+        """OperationalError that isn't 'no such table' propagates so the outer
+        scheduler logs it with full traceback instead of silently classifying it
+        as 'table absent'."""
+        from semantic_index.nightly_sync import _prune_enrichment_edges
+
+        db = tmp_path / "seeded.db"
+        _create_enrichment_test_db(db)
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("semantic_index.discogs_edges.prune_shared_personnel", boom)
+
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            _prune_enrichment_edges(str(db), top_k=50)
