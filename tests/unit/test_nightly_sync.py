@@ -657,3 +657,105 @@ class TestLogMemory:
         assert all("current=" not in m for m in peak_only), (
             f"unexpected current= when /proc unavailable: {peak_only!r}"
         )
+
+    @pytest.mark.parametrize(
+        ("platform", "raw_value", "expected_mib"),
+        [
+            # Linux: ru_maxrss is KiB. 1 GiB ru_maxrss = 1024 MiB.
+            ("linux", 1024 * 1024, 1024.0),
+            ("linux2", 512 * 1024, 512.0),
+            # macOS / BSD: ru_maxrss is bytes. 1 GiB ru_maxrss = 1024 MiB.
+            ("darwin", 1024 * 1024 * 1024, 1024.0),
+            ("freebsd14", 512 * 1024 * 1024, 512.0),
+        ],
+    )
+    def test_unit_conversion_branches_on_platform(
+        self, caplog, monkeypatch, platform, raw_value, expected_mib
+    ):
+        """Regression test for the KiB-vs-bytes split. ``ru_maxrss`` is in KiB on
+        Linux and bytes on BSD-family (Darwin included); a refactor that
+        collapses the branch would render incorrect peak values in production."""
+        import builtins
+        import logging
+        from io import StringIO
+
+        import semantic_index.nightly_sync as ns
+
+        monkeypatch.setattr(ns.sys, "platform", platform)
+        monkeypatch.setattr(
+            ns.resource,
+            "getrusage",
+            lambda _who: type("Rusage", (), {"ru_maxrss": raw_value})(),
+        )
+
+        # Stub /proc so the test focuses on peak conversion regardless of host.
+        original_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path) == "/proc/self/status":
+                return StringIO("VmRSS:\t  0 kB\n")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            ns._log_memory("unit-test")
+
+        messages = [r.getMessage() for r in caplog.records if "[mem] unit-test" in r.getMessage()]
+        assert messages, f"no [mem] line emitted: {[r.getMessage() for r in caplog.records]!r}"
+        assert f"peak={expected_mib:6.0f} MiB" in messages[0], (
+            f"expected peak={expected_mib} MiB on {platform!r}, got: {messages[0]!r}"
+        )
+
+    def test_falls_back_to_peak_only_when_proc_unreadable(self, caplog, monkeypatch):
+        """Hardened containers / AppArmor can make ``/proc/self/status``
+        unreadable (PermissionError). The helper must degrade silently — a
+        diagnostic helper crashing the sync would mask the OOM signal we're
+        trying to capture."""
+        import builtins
+        import logging
+
+        from semantic_index.nightly_sync import _log_memory
+
+        original_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path) == "/proc/self/status":
+                raise PermissionError(path)
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            _log_memory("perm-denied")
+
+        peak_only = [
+            r.getMessage() for r in caplog.records if "[mem] perm-denied" in r.getMessage()
+        ]
+        assert peak_only, "PermissionError should not crash the helper"
+        assert all("current=" not in m for m in peak_only)
+
+    def test_falls_back_to_peak_only_when_proc_malformed(self, caplog, monkeypatch):
+        """A truncated or otherwise non-integer VmRSS value must not crash the
+        sync — degrade to peak-only instead."""
+        import builtins
+        import logging
+        from io import StringIO
+
+        from semantic_index.nightly_sync import _log_memory
+
+        original_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path) == "/proc/self/status":
+                return StringIO("VmRSS:\tnot-a-number kB\n")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            _log_memory("malformed")
+
+        peak_only = [r.getMessage() for r in caplog.records if "[mem] malformed" in r.getMessage()]
+        assert peak_only, "malformed VmRSS should not crash the helper"
+        assert all("current=" not in m for m in peak_only)
