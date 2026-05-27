@@ -22,11 +22,16 @@ def _mock_conn_with_rows(rows: list[dict]) -> MagicMock:
     supports both shapes because some loaders use ``.fetchall()`` (small
     tables) and ``load_flowsheet_entries`` iterates the cursor directly to
     avoid materialising all rows at peak (see #329).
+
+    ``__iter__`` uses ``side_effect`` (not ``return_value``) so each call
+    returns a fresh iterator -- a test that iterates the cursor twice (or
+    calls ``.fetchall()`` and iterates) won't see a silently-exhausted
+    sequence on the second pass.
     """
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = rows
-    mock_cursor.__iter__.return_value = iter(rows)
+    mock_cursor.__iter__.side_effect = lambda: iter(rows)
     mock_conn.execute.return_value = mock_cursor
     return mock_conn
 
@@ -397,7 +402,7 @@ class TestLoadFlowsheetEntries:
         mock_cursor.fetchall.side_effect = AssertionError(
             "load_flowsheet_entries must iterate the cursor, not fetchall (#329)"
         )
-        mock_cursor.__iter__.return_value = iter([row])
+        mock_cursor.__iter__.side_effect = lambda: iter([row])
         mock_conn.execute.return_value = mock_cursor
 
         entries = load_flowsheet_entries(mock_conn)
