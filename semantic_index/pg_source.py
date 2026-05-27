@@ -156,12 +156,16 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
     - ``entry_type`` enum 'track' → ``entry_type_code = 1``
 
-    Iterates the cursor directly instead of calling ``.fetchall()``: for the
-    ~1M-row production flowsheet, ``.fetchall()`` materialises every
-    ``dict_row`` in Python before the loop even starts, doubling peak heap
-    with the ``FlowsheetEntry`` list that comes after. Iterating builds each
-    ``FlowsheetEntry`` from a single transient dict, dropping peak by
-    hundreds of MiB. See WXYC/semantic-index#329 -- the 2026-05-27 cgroup
+    Iterates the cursor directly instead of calling ``.fetchall()``. With
+    psycopg3's default client-side cursor, ``.execute()`` still buffers the
+    full result inside libpq's C memory either way -- the savings here are
+    Python-heap only: we avoid building the intermediate ``list[dict_row]``
+    that would otherwise coexist with the ``FlowsheetEntry`` list at peak.
+    For the ~1M-row production flowsheet that's tens of MiB of list
+    overhead plus the avoided dict-vs-FlowsheetEntry overlap during the
+    loop. Freeing libpq's buffer requires a true server-side cursor
+    (``conn.cursor(name=...)`` inside an explicit transaction) -- tracked
+    as a follow-up to WXYC/semantic-index#329, where the 2026-05-27 cgroup
     OOM kill at total-vm=1.98 GiB landed inside this function.
 
     Args:
