@@ -54,14 +54,16 @@ def _log_memory(phase: str) -> None:
     """Log current and peak resident memory at a pipeline checkpoint.
 
     Peak (``ru_maxrss``) is the high-water mark since process start, so it is
-    monotonically non-decreasing across calls — the phase whose line bumps the
+    monotonically non-decreasing across calls -- the phase whose line bumps the
     peak is the phase that allocated. Current RSS comes from
     ``/proc/self/status`` (Linux only); when absent we log peak alone.
 
-    Linux reports ``ru_maxrss`` in KiB, macOS in bytes.
+    Linux reports ``ru_maxrss`` in KiB; macOS/BSD report bytes. We branch on
+    "Linux = KiB" rather than "Darwin = bytes" so BSD-family dev hosts get
+    the right divisor (production is Linux either way).
     """
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    peak_mib = raw / (1024 * 1024) if sys.platform == "darwin" else raw / 1024
+    peak_mib = raw / 1024 if sys.platform.startswith("linux") else raw / (1024 * 1024)
 
     current_mib: float | None = None
     try:
