@@ -15,13 +15,18 @@ from semantic_index.models import LibraryRelease
 
 
 def _mock_conn_with_rows(rows: list[dict]) -> MagicMock:
-    """Create a mock psycopg connection whose execute().fetchall() returns *rows*.
+    """Create a mock psycopg connection whose execute() returns a cursor
+    that *both* ``.fetchall()``s and iterates to *rows*.
 
-    Each row is a dict (simulating psycopg's dict_row factory).
+    Each row is a dict (simulating psycopg's dict_row factory). Cursor
+    supports both shapes because some loaders use ``.fetchall()`` (small
+    tables) and ``load_flowsheet_entries`` iterates the cursor directly to
+    avoid materialising all rows at peak (see #329).
     """
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = rows
+    mock_cursor.__iter__.return_value = iter(rows)
     mock_conn.execute.return_value = mock_cursor
     return mock_conn
 
@@ -363,6 +368,43 @@ class TestLoadFlowsheetEntries:
         conn = _mock_conn_with_rows([])
 
         assert load_flowsheet_entries(conn) == []
+
+    def test_iterates_cursor_does_not_call_fetchall(self):
+        """The cursor must be iterated, never ``.fetchall()``-ed. Holding all
+        dict_row rows in memory before constructing FlowsheetEntry instances
+        roughly doubles peak heap; for the production ~1M-row flowsheet that
+        was the difference between a clean sync and the 2026-05-27 cgroup
+        OOM kill. Pinned for WXYC/semantic-index#329 -- this property must
+        not regress even when someone "simplifies" the function later."""
+        from semantic_index.pg_source import load_flowsheet_entries
+
+        row = {
+            "id": 1,
+            "artist_name": "Juana Molina",
+            "track_title": "la paradoja",
+            "album_title": "DOGA",
+            "record_label": "Sonamos",
+            "show_id": 100,
+            "play_order": 1,
+            "album_id": None,
+            "request_flag": False,
+            "add_time_epoch": 1577836800,
+            "legacy_entry_id": None,
+        }
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.side_effect = AssertionError(
+            "load_flowsheet_entries must iterate the cursor, not fetchall (#329)"
+        )
+        mock_cursor.__iter__.return_value = iter([row])
+        mock_conn.execute.return_value = mock_cursor
+
+        entries = load_flowsheet_entries(mock_conn)
+
+        assert len(entries) == 1
+        assert entries[0].artist_name == "Juana Molina"
+        mock_cursor.fetchall.assert_not_called()
 
 
 # ===========================================================================

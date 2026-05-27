@@ -156,16 +156,24 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
     - ``entry_type`` enum 'track' → ``entry_type_code = 1``
 
+    Iterates the cursor directly instead of calling ``.fetchall()``: for the
+    ~1M-row production flowsheet, ``.fetchall()`` materialises every
+    ``dict_row`` in Python before the loop even starts, doubling peak heap
+    with the ``FlowsheetEntry`` list that comes after. Iterating builds each
+    ``FlowsheetEntry`` from a single transient dict, dropping peak by
+    hundreds of MiB. See WXYC/semantic-index#329 -- the 2026-05-27 cgroup
+    OOM kill at total-vm=1.98 GiB landed inside this function.
+
     Args:
         conn: psycopg connection (dict_row factory).
 
     Returns:
         List of FlowsheetEntry, ordered by (show_id, play_order).
     """
-    rows = conn.execute(_FLOWSHEET_SQL).fetchall()
+    cursor = conn.execute(_FLOWSHEET_SQL)
     entries: list[FlowsheetEntry] = []
 
-    for row in rows:
+    for row in cursor:
         album_id = row["album_id"]
         add_time_epoch = row["add_time_epoch"]
 
