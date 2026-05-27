@@ -61,6 +61,10 @@ def _log_memory(phase: str) -> None:
     Linux reports ``ru_maxrss`` in KiB; macOS/BSD report bytes. We branch on
     "Linux = KiB" rather than "Darwin = bytes" so BSD-family dev hosts get
     the right divisor (production is Linux either way).
+
+    This helper is diagnostic — it must never crash the sync it is diagnosing.
+    Any failure reading ``/proc/self/status`` (missing file, permission denied,
+    malformed content) degrades silently to peak-only.
     """
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_mib = raw / 1024 if sys.platform.startswith("linux") else raw / (1024 * 1024)
@@ -72,7 +76,9 @@ def _log_memory(phase: str) -> None:
                 if line.startswith("VmRSS:"):
                     current_mib = int(line.split()[1]) / 1024
                     break
-    except FileNotFoundError:
+    except (OSError, ValueError, IndexError):
+        # OSError: /proc absent (macOS) or unreadable (hardened containers,
+        # AppArmor). ValueError/IndexError: VmRSS line truncated or malformed.
         pass
 
     if current_mib is not None:
