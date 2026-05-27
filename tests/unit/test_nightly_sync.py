@@ -579,3 +579,81 @@ class TestPruneEnrichmentEdges:
 
         with pytest.raises(sqlite3.OperationalError, match="database is locked"):
             _prune_enrichment_edges(str(db), top_k=50)
+
+
+# ===========================================================================
+# _log_memory (per-phase RSS instrumentation for WXYC/semantic-index#329)
+# ===========================================================================
+
+
+class TestLogMemory:
+    """``_log_memory`` is the diagnostic hook used to attribute the daily OOM
+    kill to a phase. The output is grep-able — production log analysis searches
+    for ``[mem]`` — so the format is a stable contract."""
+
+    def test_emits_grep_marker_and_peak_value(self, caplog):
+        import logging
+
+        from semantic_index.nightly_sync import _log_memory
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            _log_memory("phase-under-test")
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[mem] phase-under-test" in m and "peak=" in m and "MiB" in m for m in messages
+        ), f"missing structured mem line: {messages!r}"
+
+    def test_includes_current_when_proc_status_available(self, caplog, monkeypatch):
+        """When ``/proc/self/status`` is readable (real Linux or a stub on
+        macOS), the log line also reports ``current=`` so per-phase reclamation
+        is visible, not just the high-water mark."""
+        import builtins
+        import logging
+        from io import StringIO
+
+        from semantic_index.nightly_sync import _log_memory
+
+        original_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path) == "/proc/self/status":
+                return StringIO("VmPeak:\t  500000 kB\nVmRSS:\t  102400 kB\n")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            _log_memory("with-vmrss")
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[mem] with-vmrss" in m and "current=" in m and "peak=" in m for m in messages
+        ), f"expected current+peak line: {messages!r}"
+
+    def test_falls_back_to_peak_only_when_proc_missing(self, caplog, monkeypatch):
+        """On macOS / FreeBSD / containers without /proc, the helper degrades to
+        peak-only rather than crashing the sync."""
+        import builtins
+        import logging
+
+        from semantic_index.nightly_sync import _log_memory
+
+        original_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if str(path) == "/proc/self/status":
+                raise FileNotFoundError(path)
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with caplog.at_level(logging.INFO, logger="semantic_index.nightly_sync"):
+            _log_memory("no-proc")
+
+        messages = [r.getMessage() for r in caplog.records]
+        peak_only = [m for m in messages if "[mem] no-proc" in m]
+        assert peak_only, f"no [mem] line at all: {messages!r}"
+        assert all("current=" not in m for m in peak_only), (
+            f"unexpected current= when /proc unavailable: {peak_only!r}"
+        )
