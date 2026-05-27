@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import resource
 import shutil
 import sqlite3
 import sys
@@ -47,6 +48,35 @@ _TABLES_TO_CLEAR = ("dj_transition", "cross_reference")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _log_memory(phase: str) -> None:
+    """Log current and peak resident memory at a pipeline checkpoint.
+
+    Peak (``ru_maxrss``) is the high-water mark since process start, so it is
+    monotonically non-decreasing across calls — the phase whose line bumps the
+    peak is the phase that allocated. Current RSS comes from
+    ``/proc/self/status`` (Linux only); when absent we log peak alone.
+
+    Linux reports ``ru_maxrss`` in KiB, macOS in bytes.
+    """
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_mib = raw / (1024 * 1024) if sys.platform == "darwin" else raw / 1024
+
+    current_mib: float | None = None
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    current_mib = int(line.split()[1]) / 1024
+                    break
+    except FileNotFoundError:
+        pass
+
+    if current_mib is not None:
+        logger.info("[mem] %-30s current=%6.0f MiB  peak=%6.0f MiB", phase, current_mib, peak_mib)
+    else:
+        logger.info("[mem] %-30s peak=%6.0f MiB", phase, peak_mib)
 
 
 def _validate_sqlite(path: Path) -> bool:
@@ -228,8 +258,11 @@ def nightly_sync(args: argparse.Namespace) -> None:
     production_path = Path(args.db_path)
     min_count = args.min_count
 
+    _log_memory("baseline")
+
     # --- Step 1: Prepare working copy ---
     temp_path = prepare_working_db(production_path)
+    _log_memory("after prepare_working_db")
     swap_ok = False
 
     try:
@@ -244,6 +277,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             artist_xrefs,
             release_xrefs,
         ) = _load_from_pg(args.dsn)
+        _log_memory("after _load_from_pg")
 
         if not entries:
             logger.error("No flowsheet entries loaded from PG — aborting")
@@ -279,6 +313,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             post_counts.get("raw", 0),
             raw_pct,
         )
+        _log_memory("after artist_resolve")
 
         # --- Step 4: Adjacency + PMI ---
         logger.info("Extracting adjacency pairs...")
@@ -288,6 +323,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
         logger.info("Computing PMI...")
         pmi_edges = compute_pmi(pairs, resolved_entries)
         logger.info("  %d PMI edges", len(pmi_edges))
+        _log_memory("after PMI")
 
         # --- Step 5: Artist stats ---
         code_to_genre = {c.id: c.genre_id for c in codes}
@@ -305,6 +341,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             genre_for_release=genre_for_release,
         )
         logger.info("  %d unique artists", len(artist_stats))
+        _log_memory("after artist_stats")
 
         # --- Step 6: Cross-references ---
         code_names = {c.id: c.presentation_name for c in codes}
@@ -315,6 +352,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
         rel_xrefs = xref_extractor.extract_release_xrefs(release_xrefs)
         xref_edges = lc_xrefs + rel_xrefs
         logger.info("  %d cross-reference edges", len(xref_edges))
+        _log_memory("after cross_references")
 
         # --- Step 7: Pipeline DB + export ---
         logger.info("Opening pipeline DB: %s", temp_path)
@@ -337,6 +375,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             min_count=min_count,
             pipeline_db=pipeline_db,
         )
+        _log_memory("after export_sqlite")
 
         # --- Step 7b: Entity deduplication ---
         logger.info("Running entity deduplication...")
@@ -349,6 +388,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
                 dedup_report.artists_reassigned,
                 dedup_report.edges_rekeyed,
             )
+        _log_memory("after dedup")
 
         # --- Step 7c: Prune preserved enrichment edges ---
         # Snapshot the mapping and close pipeline_db before the prune opens its own
@@ -359,6 +399,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
         pipeline_db.close()
 
         _prune_enrichment_edges(str(temp_path), top_k=args.enrichment_top_k)
+        _log_memory("after enrichment_prune")
 
         # --- Step 8: Facet tables ---
         logger.info("Exporting facet tables...")
@@ -370,6 +411,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             show_dj_names=show_dj_names,
             adjacency_pairs=pairs,
         )
+        _log_memory("after facet_export")
 
         # --- Step 9: Graph metrics ---
 
@@ -380,9 +422,11 @@ def nightly_sync(args: argparse.Namespace) -> None:
             metrics.community_count,
             metrics.artists_scored,
         )
+        _log_memory("after graph_metrics")
 
         # --- Step 10: Checkpoint + swap ---
         checkpoint_and_close(str(temp_path))
+        _log_memory("after checkpoint")
 
         size_mb = temp_path.stat().st_size / (1024 * 1024)
         elapsed = time.time() - t0
