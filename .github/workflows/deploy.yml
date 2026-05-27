@@ -93,10 +93,15 @@ jobs:
             docker rm semantic-index || true
 
             echo "Starting new container..."
-            # WORKERS=1 + 1 GiB cgroup cap: post-2026-05-17 OOM-wedge hardening (BS#937).
-            # Pre-fix: 4 uvicorn workers x ~370 MB copy of NetworkX + Essentia each = 1.48 GB peak,
-            # unbounded, global-OOM-killing the t3.small host. cgroup cap keeps any future
-            # blowup scoped to this container so the global OOM-killer can't take the host down again.
+            # WORKERS=1 + 1 GiB RAM + 1 GiB swap cgroup cap: post-2026-05-17 OOM-wedge
+            # hardening (BS#937) plus #329 nightly-sync mitigation. Pre-2026-05-17:
+            # 4 uvicorn workers x ~370 MB NetworkX + Essentia each = 1.48 GB peak,
+            # unbounded, global-OOM-killing the t3.small host. The RAM cap keeps any
+            # blowup scoped to this container; the 1 GiB swap headroom (separate from
+            # the RAM cap because --memory-swap is total, not extra) lets the daily
+            # nightly_sync (#329) burst past the RAM cap during _load_from_pg / dedup /
+            # graph_metrics without the kernel killing the process. Host (t3.small,
+            # 2 GiB RAM + 2 GiB swap) has room: 5 containers, sync runs ~5 min/day.
             docker run -d \
               --name semantic-index \
               -p 8083:8083 \
@@ -105,7 +110,7 @@ jobs:
               --env-file .env.semantic-index \
               -e WORKERS=1 \
               --memory 1g \
-              --memory-swap 1g \
+              --memory-swap 2g \
               $IMAGE_URI
 
             echo "Waiting for health check..."
