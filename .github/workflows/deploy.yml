@@ -93,15 +93,18 @@ jobs:
             docker rm semantic-index || true
 
             echo "Starting new container..."
-            # WORKERS=1 + 1 GiB RAM + 1 GiB swap cgroup cap: post-2026-05-17 OOM-wedge
+            # WORKERS=1 + 1 GiB RAM + 2 GiB swap cgroup cap: post-2026-05-17 OOM-wedge
             # hardening (BS#937) plus #329 nightly-sync mitigation. Pre-2026-05-17:
             # 4 uvicorn workers x ~370 MB NetworkX + Essentia each = 1.48 GB peak,
-            # unbounded, global-OOM-killing the t3.small host. The RAM cap keeps any
-            # blowup scoped to this container; the 1 GiB swap headroom (separate from
-            # the RAM cap because --memory-swap is total, not extra) lets the daily
-            # nightly_sync (#329) burst past the RAM cap during _load_from_pg / dedup /
-            # graph_metrics without the kernel killing the process. Host (t3.small,
-            # 2 GiB RAM + 2 GiB swap) has room: 5 containers, sync runs ~5 min/day.
+            # unbounded, global-OOM-killing the t3.small host. The RAM cap keeps API
+            # steady-state scoped; the 2 GiB swap headroom (separate from RAM because
+            # --memory-swap is total, not extra) lets the daily nightly_sync (#329)
+            # burst past the RAM cap during _load_from_pg without SIGKILL.
+            # 2026-05-27: bumped from 2g -> 3g total after the 2g cap still OOMed at
+            # total-vm=1.98 GiB during the flowsheet load. The pg_source.py chunked-
+            # load PR is the real fix; this is bridge headroom until that lands and
+            # we can tighten back down. Host (t3.small, 2 GiB RAM + 2 GiB swap) has
+            # 1.5 GiB free swap, so granting another 1 GiB to semantic-index is fine.
             docker run -d \
               --name semantic-index \
               -p 8083:8083 \
@@ -110,7 +113,7 @@ jobs:
               --env-file .env.semantic-index \
               -e WORKERS=1 \
               --memory 1g \
-              --memory-swap 2g \
+              --memory-swap 3g \
               $IMAGE_URI
 
             echo "Waiting for health check..."
