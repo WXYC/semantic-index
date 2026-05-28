@@ -100,7 +100,9 @@ jobs:
             # t3.small host. The RAM cap keeps API steady-state scoped and forces
             # the cgroup OOM killer to fire CONTAINED if nightly_sync (#329) blows
             # past 1 GiB -- which kills just the sync process, API survives, graph
-            # stays stale until #338's server-side cursor lands.
+            # stays stale until the next attempt succeeds. #338 (server-side
+            # cursor + FlowsheetEntry slotting) is intended to bring sync's
+            # steady-state peak well under 1 GiB so this safety net rarely fires.
             #
             # IMPORTANT: do NOT raise --memory-swap above --memory on this host.
             # Granting the container access to host swap converts a contained
@@ -111,9 +113,10 @@ jobs:
             # 3g (PR #335): host reboot at 16:28 UTC; sssd watchdog kills at
             # 16:18 UTC; journald silent from 16:19 UTC; no cgroup OOM record
             # (sync grew into host swap rather than hitting the cgroup cap).
-            # Reverted in this commit. The real fix is reducing sync's peak memory
-            # via #338 (server-side cursor + FlowsheetEntry slotting), not giving
-            # it more rope.
+            # Reverted in PR #340. The real fix -- reducing sync's peak memory
+            # via server-side cursor + FlowsheetEntry slotting in pg_source --
+            # landed in PR #338. Do not re-introduce host swap as a substitute
+            # for keeping sync under the cgroup cap.
             docker run -d \
               --name semantic-index \
               -p 8083:8083 \
