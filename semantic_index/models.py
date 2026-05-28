@@ -10,8 +10,7 @@ class FlowsheetEntry:
     """A music entry from FLOWSHEET_ENTRY_PROD (type code < 7).
 
     Slotted + frozen because ~1M instances coexist with ResolvedEntry at
-    sync peak; the per-instance pydantic dict was ~500 MiB of resident heap.
-    See WXYC/semantic-index#338.
+    sync peak; per-instance dict allocation would dominate resident heap.
     """
 
     id: int
@@ -46,8 +45,7 @@ class LibraryCode(BaseModel):
 class ResolvedEntry:
     """A FlowsheetEntry after artist name resolution.
 
-    Slotted + frozen for the same reason as :class:`FlowsheetEntry`: ~1M
-    instances at peak. See WXYC/semantic-index#338.
+    Slotted + frozen for the same reason as :class:`FlowsheetEntry`.
     """
 
     entry: FlowsheetEntry
