@@ -156,18 +156,13 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
     - ``entry_type`` enum 'track' → ``entry_type_code = 1``
 
-    Uses a psycopg3 server-side (named) cursor inside an explicit
-    transaction so libpq fetches rows in ``itersize`` chunks rather than
-    buffering the entire ~1M-row result set in C memory at execute time.
-    For the production flowsheet that bounds libpq from ~500 MiB to ~5 MiB,
-    bringing the sync's peak inside the 1 GiB cgroup cap. The transaction
-    is required because the connection is opened with ``autocommit=True``
-    (see ``nightly_sync.py``); named cursors error outside a transaction
-    on autocommit connections. ``WITHOUT HOLD`` is the psycopg3 default,
-    so the cursor cannot escape the transaction -- consumption must
-    complete inside the ``with`` block, which is why we materialise into
-    a list rather than returning a generator. See
-    WXYC/semantic-index#338.
+    Uses a named (server-side) cursor inside an explicit transaction so
+    libpq fetches rows in ``itersize`` chunks rather than buffering the
+    full result set in C memory. The transaction is required because
+    the connection is autocommit=True (named cursors error outside a
+    transaction on autocommit connections), and ``WITHOUT HOLD`` is the
+    psycopg3 default, so iteration MUST complete inside the ``with``
+    block -- hence materialising into a list rather than yielding.
 
     Args:
         conn: psycopg connection (dict_row factory, autocommit=True).

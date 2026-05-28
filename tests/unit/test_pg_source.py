@@ -21,7 +21,7 @@ def _mock_conn_with_rows(rows: list[dict]) -> MagicMock:
        used by small-table loaders (genres, catalog, shows, xrefs).
     2. **Server-side** (``with conn.transaction(): with conn.cursor(name=...)
        as cur: cur.execute(SQL); for row in cur``): used by
-       ``load_flowsheet_entries`` to bound libpq's row buffer (see #338).
+       ``load_flowsheet_entries`` to bound libpq's row buffer.
 
     Each row is a dict (simulating psycopg's dict_row factory). ``__iter__``
     uses ``side_effect`` (not ``return_value``) so each call returns a fresh
@@ -401,9 +401,7 @@ class TestLoadFlowsheetEntries:
 class TestLoadFlowsheetEntriesServerSideCursor:
     """The flowsheet loader MUST use a psycopg3 server-side cursor inside an
     explicit transaction so libpq fetches rows in ``itersize`` chunks rather
-    than buffering the entire ~1M-row result set in C memory. Pinned for
-    WXYC/semantic-index#329 / #338 -- the daily cgroup OOM kill landed
-    inside ``load_flowsheet_entries`` at total-vm=1.98 GiB on 2026-05-27.
+    than buffering the entire ~1M-row result set in C memory.
     """
 
     _SAMPLE_ROW = {
