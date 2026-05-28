@@ -11,6 +11,12 @@ class FlowsheetEntry:
 
     Slotted + frozen because ~1M instances coexist with ResolvedEntry at
     sync peak; per-instance dict allocation would dominate resident heap.
+
+    Plain dataclass with no runtime type validation -- callers must
+    construct with correctly-typed values. ``pg_source.py`` types every
+    field via the SQL projection; ``run_pipeline.py`` types via isinstance
+    guards in its construction site. Malformed rows from either source
+    flow into the caller's try/except, which logs and skips them.
     """
 
     id: int
