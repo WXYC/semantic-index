@@ -93,18 +93,27 @@ jobs:
             docker rm semantic-index || true
 
             echo "Starting new container..."
-            # WORKERS=1 + 1 GiB RAM + 2 GiB swap cgroup cap: post-2026-05-17 OOM-wedge
-            # hardening (BS#937) plus #329 nightly-sync mitigation. Pre-2026-05-17:
-            # 4 uvicorn workers x ~370 MB NetworkX + Essentia each = 1.48 GB peak,
-            # unbounded, global-OOM-killing the t3.small host. The RAM cap keeps API
-            # steady-state scoped; the 2 GiB swap headroom (separate from RAM because
-            # --memory-swap is total, not extra) lets the daily nightly_sync (#329)
-            # burst past the RAM cap during _load_from_pg without SIGKILL.
-            # 2026-05-27: bumped from 2g -> 3g total after the 2g cap still OOMed at
-            # total-vm=1.98 GiB during the flowsheet load. The pg_source.py chunked-
-            # load PR is the real fix; this is bridge headroom until that lands and
-            # we can tighten back down. Host (t3.small, 2 GiB RAM + 2 GiB swap) has
-            # 1.5 GiB free swap, so granting another 1 GiB to semantic-index is fine.
+            # WORKERS=1 + 1 GiB RAM, NO swap (--memory-swap == --memory) per-cgroup cap:
+            # post-2026-05-17 OOM-wedge hardening (BS#937) plus #329 nightly-sync
+            # containment. Pre-2026-05-17: 4 uvicorn workers x ~370 MB NetworkX +
+            # Essentia each = 1.48 GB peak, unbounded, global-OOM-killing the
+            # t3.small host. The RAM cap keeps API steady-state scoped and forces
+            # the cgroup OOM killer to fire CONTAINED if nightly_sync (#329) blows
+            # past 1 GiB -- which kills just the sync process, API survives, graph
+            # stays stale until #338's server-side cursor lands.
+            #
+            # IMPORTANT: do NOT raise --memory-swap above --memory on this host.
+            # Granting the container access to host swap converts a contained
+            # cgroup OOM into a host-wide swap-thrash death spiral: the sync
+            # exhausts the host's 2 GiB swap pool without hitting its cgroup cap,
+            # starves the OS + other 4 containers, and forces an EC2 status-check
+            # reboot of the whole instance. Observed 2026-05-27 with --memory-swap
+            # 3g (PR #335): host reboot at 16:28 UTC; sssd watchdog kills at
+            # 16:18 UTC; journald silent from 16:19 UTC; no cgroup OOM record
+            # (sync grew into host swap rather than hitting the cgroup cap).
+            # Reverted in this commit. The real fix is reducing sync's peak memory
+            # via #338 (server-side cursor + FlowsheetEntry slotting), not giving
+            # it more rope.
             docker run -d \
               --name semantic-index \
               -p 8083:8083 \
@@ -113,7 +122,7 @@ jobs:
               --env-file .env.semantic-index \
               -e WORKERS=1 \
               --memory 1g \
-              --memory-swap 3g \
+              --memory-swap 1g \
               $IMAGE_URI
 
             echo "Waiting for health check..."
