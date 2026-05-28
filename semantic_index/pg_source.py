@@ -156,46 +156,48 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
     - ``entry_type`` enum 'track' → ``entry_type_code = 1``
 
-    Iterates the cursor directly instead of calling ``.fetchall()``. With
-    psycopg3's default client-side cursor, ``.execute()`` still buffers the
-    full result inside libpq's C memory either way -- the savings here are
-    Python-heap only: we avoid building the intermediate ``list[dict_row]``
-    that would otherwise coexist with the ``FlowsheetEntry`` list at peak.
-    For the ~1M-row production flowsheet that's tens of MiB of list
-    overhead plus the avoided dict-vs-FlowsheetEntry overlap during the
-    loop. Freeing libpq's buffer requires a true server-side cursor
-    (``conn.cursor(name=...)`` inside an explicit transaction) -- tracked
-    as a follow-up to WXYC/semantic-index#329, where the 2026-05-27 cgroup
-    OOM kill at total-vm=1.98 GiB landed inside this function.
+    Uses a psycopg3 server-side (named) cursor inside an explicit
+    transaction so libpq fetches rows in ``itersize`` chunks rather than
+    buffering the entire ~1M-row result set in C memory at execute time.
+    For the production flowsheet that bounds libpq from ~500 MiB to ~5 MiB,
+    bringing the sync's peak inside the 1 GiB cgroup cap. The transaction
+    is required because the connection is opened with ``autocommit=True``
+    (see ``nightly_sync.py``); named cursors error outside a transaction
+    on autocommit connections. ``WITHOUT HOLD`` is the psycopg3 default,
+    so the cursor cannot escape the transaction -- consumption must
+    complete inside the ``with`` block, which is why we materialise into
+    a list rather than returning a generator. See
+    WXYC/semantic-index#338.
 
     Args:
-        conn: psycopg connection (dict_row factory).
+        conn: psycopg connection (dict_row factory, autocommit=True).
 
     Returns:
         List of FlowsheetEntry, ordered by (show_id, play_order).
     """
-    cursor = conn.execute(_FLOWSHEET_SQL)
     entries: list[FlowsheetEntry] = []
+    with conn.transaction(), conn.cursor(name="flowsheet_load") as cursor:
+        cursor.itersize = 10_000
+        cursor.execute(_FLOWSHEET_SQL)
+        for row in cursor:
+            album_id = row["album_id"]
+            add_time_epoch = row["add_time_epoch"]
 
-    for row in cursor:
-        album_id = row["album_id"]
-        add_time_epoch = row["add_time_epoch"]
-
-        entries.append(
-            FlowsheetEntry(
-                id=row["id"],
-                artist_name=row["artist_name"] or "",
-                song_title=row["track_title"] or "",
-                release_title=row["album_title"] or "",
-                label_name=row["record_label"] or "",
-                show_id=row["show_id"] if row["show_id"] is not None else 0,
-                sequence=row["play_order"],
-                library_release_id=album_id if isinstance(album_id, int) else 0,
-                entry_type_code=1,  # all rows are 'track' (filtered in SQL)
-                request_flag=1 if row["request_flag"] else 0,
-                start_time=int(add_time_epoch) if add_time_epoch is not None else None,
+            entries.append(
+                FlowsheetEntry(
+                    id=row["id"],
+                    artist_name=row["artist_name"] or "",
+                    song_title=row["track_title"] or "",
+                    release_title=row["album_title"] or "",
+                    label_name=row["record_label"] or "",
+                    show_id=row["show_id"] if row["show_id"] is not None else 0,
+                    sequence=row["play_order"],
+                    library_release_id=album_id if isinstance(album_id, int) else 0,
+                    entry_type_code=1,  # all rows are 'track' (filtered in SQL)
+                    request_flag=1 if row["request_flag"] else 0,
+                    start_time=int(add_time_epoch) if add_time_epoch is not None else None,
+                )
             )
-        )
 
     logger.info("Loaded %d flowsheet track entries", len(entries))
     return entries
