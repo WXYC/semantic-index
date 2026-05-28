@@ -1,10 +1,18 @@
 """Data models for the semantic index pipeline."""
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel
 
 
-class FlowsheetEntry(BaseModel):
-    """A music entry from FLOWSHEET_ENTRY_PROD (type code < 7)."""
+@dataclass(slots=True, frozen=True)
+class FlowsheetEntry:
+    """A music entry from FLOWSHEET_ENTRY_PROD (type code < 7).
+
+    Slotted + frozen because ~1M instances coexist with ResolvedEntry at
+    sync peak; the per-instance pydantic dict was ~500 MiB of resident heap.
+    See WXYC/semantic-index#338.
+    """
 
     id: int
     artist_name: str
@@ -34,8 +42,13 @@ class LibraryCode(BaseModel):
     presentation_name: str
 
 
-class ResolvedEntry(BaseModel):
-    """A FlowsheetEntry after artist name resolution."""
+@dataclass(slots=True, frozen=True)
+class ResolvedEntry:
+    """A FlowsheetEntry after artist name resolution.
+
+    Slotted + frozen for the same reason as :class:`FlowsheetEntry`: ~1M
+    instances at peak. See WXYC/semantic-index#338.
+    """
 
     entry: FlowsheetEntry
     canonical_name: str
