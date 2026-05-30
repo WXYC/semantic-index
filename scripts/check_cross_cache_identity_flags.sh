@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Asserts that the semantic-index-owned cross-cache-identity feature flags
-# listed in CLAUDE.md match the §4.2 locked inventory.
+# listed in docs/deployment.md match the §4.2 locked inventory.
 #
 # Tier 1 (this PR, BS#667): doc-vs-expected-list.
 # Tier 2 (E1 hook-loader PR for SI consumers): adds a check that flag names
@@ -12,10 +12,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
+DOC_PATH="$REPO_ROOT/docs/deployment.md"
 
-if [[ ! -f "$CLAUDE_MD" ]]; then
-  echo "FAIL: $CLAUDE_MD not found." >&2
+if [[ ! -f "$DOC_PATH" ]]; then
+  echo "FAIL: $DOC_PATH not found." >&2
   exit 1
 fi
 
@@ -26,14 +26,14 @@ expected=(
   "SI_USE_NEW_HOOK_WIKIDATA"
 )
 
-# Extract SI_USE_NEW_HOOK_* names from CLAUDE.md (any occurrence; the doc has
-# only one canonical mention of each). Backtick-quoted in the table.
+# Extract SI_USE_NEW_HOOK_* names from docs/deployment.md (any occurrence; the
+# doc has only one canonical mention of each). Backtick-quoted in the table.
 documented=$(
-  grep -oE '`(SI_USE_NEW_HOOK_[A-Z_]+)`' "$CLAUDE_MD" | tr -d '`' | sort -u
+  grep -oE '`(SI_USE_NEW_HOOK_[A-Z_]+)`' "$DOC_PATH" | tr -d '`' | sort -u
 )
 
 if [[ -z "$documented" ]]; then
-  echo "FAIL: no SI_USE_NEW_HOOK_* flags found in CLAUDE.md." >&2
+  echo "FAIL: no SI_USE_NEW_HOOK_* flags found in docs/deployment.md." >&2
   exit 1
 fi
 
@@ -44,12 +44,12 @@ extra=$(comm -13 <(printf '%s\n' "$expected_sorted") <(printf '%s\n' "$documente
 
 failed=0
 if [[ -n "$missing" ]]; then
-  echo "FAIL: §4.2 SI-owned flags missing from CLAUDE.md:" >&2
+  echo "FAIL: §4.2 SI-owned flags missing from docs/deployment.md:" >&2
   echo "$missing" | sed 's/^/  - /' >&2
   failed=1
 fi
 if [[ -n "$extra" ]]; then
-  echo "FAIL: CLAUDE.md lists SI_USE_NEW_HOOK_* flags not in §4.2:" >&2
+  echo "FAIL: docs/deployment.md lists SI_USE_NEW_HOOK_* flags not in §4.2:" >&2
   echo "$extra" | sed 's/^/  - /' >&2
   echo "  If a new SI cross-cache-identity flag is being introduced, update §4.2 first." >&2
   failed=1

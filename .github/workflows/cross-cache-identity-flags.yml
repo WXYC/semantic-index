@@ -1,23 +1,23 @@
 name: Cross-cache-identity flag-doc consistency
 
 # Asserts that the semantic-index-owned cross-cache-identity feature flags
-# listed in CLAUDE.md match the §4.2 locked inventory. Runs on every PR
-# touching CLAUDE.md, the script, or this workflow — the existing ci.yml
-# ignores `**/*.md` paths, so a dedicated workflow is needed to guard
-# CLAUDE.md drift specifically.
+# listed in docs/deployment.md match the §4.2 locked inventory. Runs on every
+# PR touching the deployment doc, the script, or this workflow — the existing
+# ci.yml ignores `**/*.md` paths, so a dedicated workflow is needed to guard
+# doc drift specifically.
 #
 # Plan reference: WXYC/wiki plans/library-hook-canonicalization-plan.md §4.2.
 
 on:
   pull_request:
     paths:
-      - 'CLAUDE.md'
+      - 'docs/deployment.md'
       - 'scripts/check_cross_cache_identity_flags.sh'
       - '.github/workflows/cross-cache-identity-flags.yml'
   push:
     branches: [main]
     paths:
-      - 'CLAUDE.md'
+      - 'docs/deployment.md'
       - 'scripts/check_cross_cache_identity_flags.sh'
       - '.github/workflows/cross-cache-identity-flags.yml'
 

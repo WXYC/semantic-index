@@ -76,7 +76,7 @@ Railway sets the `PORT` environment variable automatically. Set `DB_PATH` to poi
 
 ## Dependencies
 
-The pipeline depends on `wxyc-etl`, a shared Rust/PyO3 package providing text normalization (`to_match_form`, `is_compilation_artist`, `split_artist_name`) and discogs-cache schema constants. All discogs-cache table names in SQL queries come from `wxyc_etl.schema` constants rather than hardcoded strings. See [CLAUDE.md](CLAUDE.md) for the full list of shared functions used.
+The pipeline depends on `wxyc-etl`, a shared Rust/PyO3 package providing text normalization (`to_match_form`, `is_compilation_artist`, `split_artist_name`) and discogs-cache schema constants. All discogs-cache table names in SQL queries come from `wxyc_etl.schema` constants rather than hardcoded strings. See [docs/development.md](docs/development.md) for the full list of shared functions used.
 
 ## Development
 
@@ -88,4 +88,4 @@ ruff format --check .     # format check
 mypy .                    # type check
 ```
 
-See [CLAUDE.md](CLAUDE.md) for detailed development patterns, column mappings, and SQLite schema.
+See [CLAUDE.md](CLAUDE.md) — the router lists topic guides for architecture (column mappings, SQLite schema), development patterns, pipeline usage, audio ingest, the Graph API, and deployment.
