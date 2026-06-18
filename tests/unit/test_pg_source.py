@@ -18,10 +18,15 @@ def _mock_conn_with_rows(rows: list[dict]) -> MagicMock:
     """Create a mock psycopg connection supporting both cursor patterns.
 
     1. **Client-side** (``conn.execute(SQL).fetchall()`` or iteration):
-       used by small-table loaders (genres, catalog, shows, xrefs).
+       used by the small-table loaders ``load_genres`` and ``load_shows``.
     2. **Server-side** (``with conn.transaction(): with conn.cursor(name=...)
        as cur: cur.execute(SQL); for row in cur``): used by
        ``load_flowsheet_entries`` to bound libpq's row buffer.
+
+    The high-cardinality loaders (``load_catalog``, ``load_cross_references``)
+    are also server-side but run multiple distinct queries, so their tests use
+    ``_mock_conn_with_queries`` (which routes rows by query substring) rather
+    than this single-row-set helper.
 
     Each row is a dict (simulating psycopg's dict_row factory). ``__iter__``
     uses ``side_effect`` (not ``return_value``) so each call returns a fresh
@@ -301,9 +306,15 @@ class TestLoadCatalogServerSideCursor:
 
         load_catalog(conn)
 
-        assert conn.transaction.called, "catalog cursors must run inside a transaction"
-        # Three queries (genre xref, artists, library) -> three named cursors.
+        # Three queries (genre xref, artists, library) -> three named cursors,
+        # each in its OWN transaction. Assert the transaction COUNT, not just
+        # .called: a truthy-only check is satisfied by the helper-routed
+        # cursors and would mask the inlined genre-xref cursor being opened
+        # outside a transaction (which raises on a real autocommit connection).
         assert conn.cursor.call_count == 3
+        assert conn.transaction.call_count == 3, (
+            "every catalog cursor must run in its own transaction"
+        )
         for call in conn.cursor.call_args_list:
             assert call.kwargs.get("name"), (
                 "every catalog cursor must be named -- a name is what makes it "
@@ -790,9 +801,10 @@ class TestLoadCrossReferencesServerSideCursor:
 
         load_cross_references(conn)
 
-        assert conn.transaction.called
-        # Two queries (artist xref, release xref) -> two named cursors.
+        # Two queries (artist xref, release xref) -> two named cursors, each in
+        # its own transaction. Assert the transaction count, not just .called.
         assert conn.cursor.call_count == 2
+        assert conn.transaction.call_count == 2, "every xref cursor must run in its own transaction"
         for call in conn.cursor.call_args_list:
             assert call.kwargs.get("name"), "every xref cursor must be named (server-side)"
 

@@ -90,7 +90,9 @@ class TestLibraryCodeSlots:
         assert code.presentation_name == "Autechre"
 
     def test_equality_and_hashable(self):
-        # frozen dataclass: value equality + hashable, relied on by tests/sets.
+        # frozen dataclass gives value equality + hashability (the old pydantic
+        # BaseModel was unhashable). No production code dedups these yet; this
+        # pins the property so a future set()/dict-key use is intentional.
         a = LibraryCode(id=1, genre_id=2, presentation_name="Autechre")
         b = LibraryCode(id=1, genre_id=2, presentation_name="Autechre")
         assert a == b
