@@ -1,7 +1,9 @@
 """Structural regression tests for pipeline data models.
 
 `FlowsheetEntry` and `ResolvedEntry` are instantiated ~1M times each during a
-nightly sync. They MUST be slotted dataclasses (no per-instance `__dict__`)
+nightly sync. `LibraryCode` (~462K) and `LibraryRelease` (~196K) are the next
+highest-cardinality types and stay resident through resolver construction and
+graph_metrics. All MUST be slotted dataclasses (no per-instance `__dict__`)
 to fit the production cgroup memory cap.
 """
 
@@ -11,8 +13,13 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from semantic_index.models import FlowsheetEntry, ResolvedEntry
-from tests.conftest import make_flowsheet_entry, make_resolved_entry
+from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease, ResolvedEntry
+from tests.conftest import (
+    make_flowsheet_entry,
+    make_library_code,
+    make_library_release,
+    make_resolved_entry,
+)
 
 
 class TestFlowsheetEntrySlots:
@@ -58,6 +65,58 @@ class TestFlowsheetEntrySlots:
         assert entry.show_id == 1
         assert entry.sequence == 1
         assert entry.entry_type_code == 1
+
+
+class TestLibraryCodeSlots:
+    def test_instance_has_no_dict(self):
+        code = make_library_code()
+        assert not hasattr(code, "__dict__"), (
+            "LibraryCode instances must NOT have __dict__ -- ~462K coexist at "
+            "sync peak and stay resident through resolver + graph_metrics"
+        )
+
+    def test_slots_excludes_dict(self):
+        assert "__dict__" not in LibraryCode.__slots__
+
+    def test_is_frozen(self):
+        code = make_library_code()
+        with pytest.raises(FrozenInstanceError):
+            code.presentation_name = "Stereolab"
+
+    def test_attribute_access_preserved(self):
+        code = make_library_code()
+        assert code.id == 200
+        assert code.genre_id == 15
+        assert code.presentation_name == "Autechre"
+
+    def test_equality_and_hashable(self):
+        # frozen dataclass: value equality + hashable, relied on by tests/sets.
+        a = LibraryCode(id=1, genre_id=2, presentation_name="Autechre")
+        b = LibraryCode(id=1, genre_id=2, presentation_name="Autechre")
+        assert a == b
+        assert {a, b} == {a}
+
+
+class TestLibraryReleaseSlots:
+    def test_instance_has_no_dict(self):
+        release = make_library_release()
+        assert not hasattr(release, "__dict__"), (
+            "LibraryRelease instances must NOT have __dict__ -- ~196K coexist at sync peak"
+        )
+
+    def test_slots_excludes_dict(self):
+        assert "__dict__" not in LibraryRelease.__slots__
+
+    def test_is_frozen(self):
+        release = make_library_release()
+        with pytest.raises(FrozenInstanceError):
+            release.library_code_id = 999
+
+    def test_attribute_access_and_equality(self):
+        release = make_library_release()
+        assert release.id == 100
+        assert release.library_code_id == 200
+        assert release == LibraryRelease(id=100, library_code_id=200)
 
 
 class TestResolvedEntrySlots:

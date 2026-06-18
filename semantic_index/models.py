@@ -32,15 +32,29 @@ class FlowsheetEntry:
     start_time: int | None = None
 
 
-class LibraryRelease(BaseModel):
-    """A row from LIBRARY_RELEASE — only the fields needed for Tier 1 resolution."""
+@dataclass(slots=True, frozen=True)
+class LibraryRelease:
+    """A row from LIBRARY_RELEASE — only the fields needed for Tier 1 resolution.
+
+    Slotted + frozen for the same reason as :class:`FlowsheetEntry`: ~196K
+    instances coexist at sync peak and stay resident through resolver
+    construction, so per-instance dict allocation would dominate resident heap.
+    Plain dataclass with no runtime type validation -- ``pg_source.load_catalog``
+    types every field via the SQL projection.
+    """
 
     id: int
     library_code_id: int
 
 
-class LibraryCode(BaseModel):
-    """A row from LIBRARY_CODE — canonical artist name and genre."""
+@dataclass(slots=True, frozen=True)
+class LibraryCode:
+    """A row from LIBRARY_CODE — canonical artist name and genre.
+
+    Slotted + frozen for the same reason as :class:`LibraryRelease`; ~462K
+    instances coexist at sync peak and are held by ``ArtistResolver`` through
+    graph_metrics.
+    """
 
     id: int
     genre_id: int

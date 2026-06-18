@@ -26,6 +26,11 @@ from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease
 
 logger = logging.getLogger(__name__)
 
+# Rows fetched per libpq round-trip for the high-cardinality server-side
+# cursors (catalog, flowsheet, cross-references). ~10K bounds the libpq buffer
+# to a few MiB while amortising network round-trips over the ~462K-row catalog.
+_ITERSIZE = 10_000
+
 # ---------------------------------------------------------------------------
 # SQL queries
 # ---------------------------------------------------------------------------
@@ -110,36 +115,51 @@ def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:
     ``artist_genre_code``) is used. Artists without a genre entry get
     ``genre_id=0``.
 
+    Each of the three queries (genre xref, artists, releases) streams through
+    its own named (server-side) cursor inside an explicit transaction so libpq
+    fetches rows in ``_ITERSIZE`` chunks rather than buffering the full result
+    set, and the target objects are built during iteration so the dict rows are
+    freed incrementally. This is the loader the nightly sync OOM-died in
+    (WXYC/semantic-index#345). See ``load_flowsheet_entries`` for the full
+    transaction / WITHOUT HOLD rationale.
+
     Args:
-        conn: psycopg connection (dict_row factory).
+        conn: psycopg connection (dict_row factory, autocommit=True).
 
     Returns:
         Tuple of (codes, releases).
     """
-    # Build artist_id → genre_id mapping (first genre wins)
-    genre_xref_rows = conn.execute(_GENRE_ARTIST_XREF_SQL).fetchall()
+    # Build artist_id → genre_id mapping (first genre wins).
     artist_genre: dict[int, int] = {}
-    for row in genre_xref_rows:
-        artist_id = row["artist_id"]
-        if artist_id not in artist_genre:
-            artist_genre[artist_id] = row["genre_id"]
+    with conn.transaction(), conn.cursor(name="catalog_genre_xref") as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(_GENRE_ARTIST_XREF_SQL)
+        for row in cursor:
+            artist_id = row["artist_id"]
+            if artist_id not in artist_genre:
+                artist_genre[artist_id] = row["genre_id"]
 
-    # Build LibraryCode list from artists
-    artist_rows = conn.execute(_ARTISTS_SQL).fetchall()
-    codes = [
-        LibraryCode(
-            id=row["id"],
-            genre_id=artist_genre.get(row["id"], 0),
-            presentation_name=row["artist_name"],
-        )
-        for row in artist_rows
-    ]
+    # Build LibraryCode list from artists.
+    codes: list[LibraryCode] = []
+    with conn.transaction(), conn.cursor(name="catalog_artists") as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(_ARTISTS_SQL)
+        for row in cursor:
+            codes.append(
+                LibraryCode(
+                    id=row["id"],
+                    genre_id=artist_genre.get(row["id"], 0),
+                    presentation_name=row["artist_name"],
+                )
+            )
 
-    # Build LibraryRelease list from library
-    library_rows = conn.execute(_LIBRARY_SQL).fetchall()
-    releases = [
-        LibraryRelease(id=row["id"], library_code_id=row["artist_id"]) for row in library_rows
-    ]
+    # Build LibraryRelease list from library.
+    releases: list[LibraryRelease] = []
+    with conn.transaction(), conn.cursor(name="catalog_library") as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(_LIBRARY_SQL)
+        for row in cursor:
+            releases.append(LibraryRelease(id=row["id"], library_code_id=row["artist_id"]))
 
     logger.info("Loaded catalog: %d artists, %d releases", len(codes), len(releases))
     return codes, releases
@@ -172,7 +192,7 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     """
     entries: list[FlowsheetEntry] = []
     with conn.transaction(), conn.cursor(name="flowsheet_load") as cursor:
-        cursor.itersize = 10_000
+        cursor.itersize = _ITERSIZE
         cursor.execute(_FLOWSHEET_SQL)
         for row in cursor:
             album_id = row["album_id"]
@@ -243,22 +263,31 @@ def load_cross_references(
 
     The PG tables don't have a row ID, so a synthetic ``0`` is used.
 
+    Both queries stream through named (server-side) cursors inside an explicit
+    transaction (see ``load_catalog`` / ``load_flowsheet_entries``) rather than
+    ``.fetchall()``-ing each table under ``dict_row`` (WXYC/semantic-index#345).
+
     Args:
-        conn: psycopg connection (dict_row factory).
+        conn: psycopg connection (dict_row factory, autocommit=True).
 
     Returns:
         Tuple of (artist_xrefs, release_xrefs).
     """
-    artist_rows = conn.execute(_ARTIST_XREF_SQL).fetchall()
-    artist_xrefs = [
-        (0, row["source_artist_id"], row["target_artist_id"], row.get("comment"))
-        for row in artist_rows
-    ]
+    artist_xrefs: list[tuple] = []
+    with conn.transaction(), conn.cursor(name="artist_xref") as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(_ARTIST_XREF_SQL)
+        for row in cursor:
+            artist_xrefs.append(
+                (0, row["source_artist_id"], row["target_artist_id"], row.get("comment"))
+            )
 
-    release_rows = conn.execute(_RELEASE_XREF_SQL).fetchall()
-    release_xrefs = [
-        (0, row["artist_id"], row["library_id"], row.get("comment")) for row in release_rows
-    ]
+    release_xrefs: list[tuple] = []
+    with conn.transaction(), conn.cursor(name="release_xref") as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(_RELEASE_XREF_SQL)
+        for row in cursor:
+            release_xrefs.append((0, row["artist_id"], row["library_id"], row.get("comment")))
 
     logger.info(
         "Loaded cross-references: %d artist, %d release",
