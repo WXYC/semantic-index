@@ -20,6 +20,7 @@ Requires a psycopg connection with ``dict_row`` row factory.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from semantic_index.models import FlowsheetEntry, LibraryCode, LibraryRelease
@@ -87,6 +88,37 @@ FROM wxyc_schema.artist_library_crossreference
 
 
 # ---------------------------------------------------------------------------
+# Streaming helper
+# ---------------------------------------------------------------------------
+
+
+def _stream_into_list[T](conn: Any, name: str, sql: str, build: Callable[[Any], T]) -> list[T]:
+    """Run ``sql`` through a named (server-side) cursor and build a list of rows.
+
+    libpq fetches rows in ``_ITERSIZE`` chunks rather than buffering the full
+    result set in C memory, and *build* is applied per row so only the built
+    objects are retained -- the dict rows are freed incrementally. This is the
+    memory-bounding pattern the high-cardinality loaders need to fit the sync
+    under the 1 GiB cgroup cap (WXYC/semantic-index#345).
+
+    A named cursor is used inside an explicit transaction because the
+    connection is autocommit=True (named cursors error outside a transaction on
+    autocommit connections), and ``WITHOUT HOLD`` is the psycopg3 default, so
+    iteration MUST complete inside the ``with`` block -- hence materialising
+    into a list here rather than yielding rows to the caller.
+
+    Centralising this means every high-cardinality loader gets the
+    ``itersize`` + transaction guarantee structurally; a caller can't forget
+    to set ``itersize`` (whose psycopg3 default of 100 would reintroduce
+    thousands of round-trips).
+    """
+    with conn.transaction(), conn.cursor(name=name) as cursor:
+        cursor.itersize = _ITERSIZE
+        cursor.execute(sql)
+        return [build(row) for row in cursor]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -115,13 +147,10 @@ def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:
     ``artist_genre_code``) is used. Artists without a genre entry get
     ``genre_id=0``.
 
-    Each of the three queries (genre xref, artists, releases) streams through
-    its own named (server-side) cursor inside an explicit transaction so libpq
-    fetches rows in ``_ITERSIZE`` chunks rather than buffering the full result
-    set, and the target objects are built during iteration so the dict rows are
-    freed incrementally. This is the loader the nightly sync OOM-died in
-    (WXYC/semantic-index#345). See ``load_flowsheet_entries`` for the full
-    transaction / WITHOUT HOLD rationale.
+    All three queries (genre xref, artists, releases) stream through named
+    (server-side) cursors via :func:`_stream_into_list` so libpq fetches in
+    ``_ITERSIZE`` chunks rather than buffering each full result set. This is
+    the loader the nightly sync OOM-died in (WXYC/semantic-index#345).
 
     Args:
         conn: psycopg connection (dict_row factory, autocommit=True).
@@ -129,7 +158,9 @@ def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:
     Returns:
         Tuple of (codes, releases).
     """
-    # Build artist_id → genre_id mapping (first genre wins).
+    # Build artist_id → genre_id mapping (first genre wins). Inlined rather
+    # than via _stream_into_list because it accumulates a dedup dict, not a
+    # list, but uses the same named-cursor / itersize streaming discipline.
     artist_genre: dict[int, int] = {}
     with conn.transaction(), conn.cursor(name="catalog_genre_xref") as cursor:
         cursor.itersize = _ITERSIZE
@@ -139,27 +170,23 @@ def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:
             if artist_id not in artist_genre:
                 artist_genre[artist_id] = row["genre_id"]
 
-    # Build LibraryCode list from artists.
-    codes: list[LibraryCode] = []
-    with conn.transaction(), conn.cursor(name="catalog_artists") as cursor:
-        cursor.itersize = _ITERSIZE
-        cursor.execute(_ARTISTS_SQL)
-        for row in cursor:
-            codes.append(
-                LibraryCode(
-                    id=row["id"],
-                    genre_id=artist_genre.get(row["id"], 0),
-                    presentation_name=row["artist_name"],
-                )
-            )
+    codes = _stream_into_list(
+        conn,
+        "catalog_artists",
+        _ARTISTS_SQL,
+        lambda row: LibraryCode(
+            id=row["id"],
+            genre_id=artist_genre.get(row["id"], 0),
+            presentation_name=row["artist_name"],
+        ),
+    )
 
-    # Build LibraryRelease list from library.
-    releases: list[LibraryRelease] = []
-    with conn.transaction(), conn.cursor(name="catalog_library") as cursor:
-        cursor.itersize = _ITERSIZE
-        cursor.execute(_LIBRARY_SQL)
-        for row in cursor:
-            releases.append(LibraryRelease(id=row["id"], library_code_id=row["artist_id"]))
+    releases = _stream_into_list(
+        conn,
+        "catalog_library",
+        _LIBRARY_SQL,
+        lambda row: LibraryRelease(id=row["id"], library_code_id=row["artist_id"]),
+    )
 
     logger.info("Loaded catalog: %d artists, %d releases", len(codes), len(releases))
     return codes, releases
@@ -176,13 +203,9 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
     - ``entry_type`` enum 'track' → ``entry_type_code = 1``
 
-    Uses a named (server-side) cursor inside an explicit transaction so
-    libpq fetches rows in ``itersize`` chunks rather than buffering the
-    full result set in C memory. The transaction is required because
-    the connection is autocommit=True (named cursors error outside a
-    transaction on autocommit connections), and ``WITHOUT HOLD`` is the
-    psycopg3 default, so iteration MUST complete inside the ``with``
-    block -- hence materialising into a list rather than yielding.
+    Streams through a named (server-side) cursor via :func:`_stream_into_list`
+    so libpq fetches in ``_ITERSIZE`` chunks rather than buffering the full
+    ~1M-row result set in C memory.
 
     Args:
         conn: psycopg connection (dict_row factory, autocommit=True).
@@ -190,32 +213,34 @@ def load_flowsheet_entries(conn: Any) -> list[FlowsheetEntry]:
     Returns:
         List of FlowsheetEntry, ordered by (show_id, play_order).
     """
-    entries: list[FlowsheetEntry] = []
-    with conn.transaction(), conn.cursor(name="flowsheet_load") as cursor:
-        cursor.itersize = _ITERSIZE
-        cursor.execute(_FLOWSHEET_SQL)
-        for row in cursor:
-            album_id = row["album_id"]
-            add_time_epoch = row["add_time_epoch"]
-
-            entries.append(
-                FlowsheetEntry(
-                    id=row["id"],
-                    artist_name=row["artist_name"] or "",
-                    song_title=row["track_title"] or "",
-                    release_title=row["album_title"] or "",
-                    label_name=row["record_label"] or "",
-                    show_id=row["show_id"] if row["show_id"] is not None else 0,
-                    sequence=row["play_order"],
-                    library_release_id=album_id if isinstance(album_id, int) else 0,
-                    entry_type_code=1,  # all rows are 'track' (filtered in SQL)
-                    request_flag=1 if row["request_flag"] else 0,
-                    start_time=int(add_time_epoch) if add_time_epoch is not None else None,
-                )
-            )
-
+    entries = _stream_into_list(conn, "flowsheet_load", _FLOWSHEET_SQL, _build_flowsheet_entry)
     logger.info("Loaded %d flowsheet track entries", len(entries))
     return entries
+
+
+def _build_flowsheet_entry(row: Any) -> FlowsheetEntry:
+    """Map one ``wxyc_schema.flowsheet`` dict row to a FlowsheetEntry.
+
+    - ``album_id`` → ``library_release_id`` (NULL → 0)
+    - ``request_flag`` boolean → int (0 or 1)
+    - ``add_time`` timestamptz → epoch seconds int (via EXTRACT(EPOCH ...))
+    - ``entry_type`` enum 'track' → ``entry_type_code = 1``
+    """
+    album_id = row["album_id"]
+    add_time_epoch = row["add_time_epoch"]
+    return FlowsheetEntry(
+        id=row["id"],
+        artist_name=row["artist_name"] or "",
+        song_title=row["track_title"] or "",
+        release_title=row["album_title"] or "",
+        label_name=row["record_label"] or "",
+        show_id=row["show_id"] if row["show_id"] is not None else 0,
+        sequence=row["play_order"],
+        library_release_id=album_id if isinstance(album_id, int) else 0,
+        entry_type_code=1,  # all rows are 'track' (filtered in SQL)
+        request_flag=1 if row["request_flag"] else 0,
+        start_time=int(add_time_epoch) if add_time_epoch is not None else None,
+    )
 
 
 def load_shows(conn: Any) -> tuple[dict[int, int | str], dict[int, str]]:
@@ -263,9 +288,9 @@ def load_cross_references(
 
     The PG tables don't have a row ID, so a synthetic ``0`` is used.
 
-    Both queries stream through named (server-side) cursors inside an explicit
-    transaction (see ``load_catalog`` / ``load_flowsheet_entries``) rather than
-    ``.fetchall()``-ing each table under ``dict_row`` (WXYC/semantic-index#345).
+    Both queries stream through named (server-side) cursors via
+    :func:`_stream_into_list` rather than ``.fetchall()``-ing each table under
+    ``dict_row`` (WXYC/semantic-index#345).
 
     Args:
         conn: psycopg connection (dict_row factory, autocommit=True).
@@ -273,21 +298,19 @@ def load_cross_references(
     Returns:
         Tuple of (artist_xrefs, release_xrefs).
     """
-    artist_xrefs: list[tuple] = []
-    with conn.transaction(), conn.cursor(name="artist_xref") as cursor:
-        cursor.itersize = _ITERSIZE
-        cursor.execute(_ARTIST_XREF_SQL)
-        for row in cursor:
-            artist_xrefs.append(
-                (0, row["source_artist_id"], row["target_artist_id"], row.get("comment"))
-            )
+    artist_xrefs = _stream_into_list(
+        conn,
+        "artist_xref",
+        _ARTIST_XREF_SQL,
+        lambda row: (0, row["source_artist_id"], row["target_artist_id"], row.get("comment")),
+    )
 
-    release_xrefs: list[tuple] = []
-    with conn.transaction(), conn.cursor(name="release_xref") as cursor:
-        cursor.itersize = _ITERSIZE
-        cursor.execute(_RELEASE_XREF_SQL)
-        for row in cursor:
-            release_xrefs.append((0, row["artist_id"], row["library_id"], row.get("comment")))
+    release_xrefs = _stream_into_list(
+        conn,
+        "release_xref",
+        _RELEASE_XREF_SQL,
+        lambda row: (0, row["artist_id"], row["library_id"], row.get("comment")),
+    )
 
     logger.info(
         "Loaded cross-references: %d artist, %d release",
