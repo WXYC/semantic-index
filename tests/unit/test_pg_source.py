@@ -55,22 +55,64 @@ def _mock_conn_with_rows(rows: list[dict]) -> MagicMock:
 
 
 def _mock_conn_with_queries(query_results: dict[str, list[dict]]) -> MagicMock:
-    """Create a mock connection that returns different results based on query substring.
+    """Create a mock connection that routes results by query substring.
 
-    *query_results* maps a substring of the SQL query to the rows it should return.
+    *query_results* maps a substring of the SQL query to the rows it should
+    return. Supports BOTH cursor patterns (like ``_mock_conn_with_rows``):
+
+    1. **Client-side** -- ``conn.execute(SQL).fetchall()`` (small-table
+       loaders: genres, shows).
+    2. **Server-side** -- ``with conn.transaction(): with conn.cursor(name=...)
+       as cur: cur.execute(SQL); for row in cur`` (the high-cardinality
+       loaders: catalog, cross-references).
+
+    Each server-side cursor created during the call is recorded on
+    ``conn.created_cursors`` so discipline tests can assert no ``.fetchall()``
+    was called and ``itersize`` was set.
     """
     mock_conn = MagicMock()
+    created_cursors: list[MagicMock] = []
 
-    def _execute(query, params=None):
-        cursor = MagicMock()
+    def _rows_for(query: str) -> list[dict]:
         for key, rows in query_results.items():
             if key in query:
-                cursor.fetchall.return_value = rows
-                return cursor
-        cursor.fetchall.return_value = []
+                return rows
+        return []
+
+    # Client-side cursor pattern
+    def _conn_execute(query, params=None):
+        cursor = MagicMock()
+        rows = _rows_for(query)
+        cursor.fetchall.return_value = rows
+        cursor.__iter__.side_effect = lambda: iter(rows)
         return cursor
 
-    mock_conn.execute.side_effect = _execute
+    mock_conn.execute.side_effect = _conn_execute
+
+    # Server-side cursor pattern: a fresh named cursor per conn.cursor() call,
+    # whose iterated rows are determined by the query passed to cursor.execute().
+    def _make_named_cursor(*args, **kwargs):
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.__exit__.return_value = None
+        holder: dict[str, list[dict]] = {"rows": []}
+
+        def _cursor_execute(query, params=None):
+            holder["rows"] = _rows_for(query)
+
+        cur.execute.side_effect = _cursor_execute
+        cur.__iter__.side_effect = lambda: iter(holder["rows"])
+        created_cursors.append(cur)
+        return cur
+
+    mock_conn.cursor.side_effect = _make_named_cursor
+
+    tx = MagicMock()
+    tx.__enter__.return_value = tx
+    tx.__exit__.return_value = None
+    mock_conn.transaction.return_value = tx
+
+    mock_conn.created_cursors = created_cursors
     return mock_conn
 
 
@@ -221,6 +263,66 @@ class TestLoadCatalog:
 
         assert codes == []
         assert releases == []
+
+
+# ===========================================================================
+# load_catalog -- server-side cursor lifecycle
+# ===========================================================================
+
+
+class TestLoadCatalogServerSideCursor:
+    """``load_catalog`` loads ~462K artists + ~196K releases and is the phase
+    the nightly sync OOM-dies in (WXYC/semantic-index#345). It MUST stream via
+    server-side cursors -- one per query -- rather than buffering each full
+    result set with ``.fetchall()`` under ``dict_row``.
+    """
+
+    _QUERIES = {
+        "genre_artist_crossreference": [{"artist_id": 1, "genre_id": 15}],
+        "artists": [{"id": 1, "artist_name": "Autechre"}],
+        "library": [{"id": 10, "artist_id": 1}],
+    }
+
+    def test_does_not_buffer_with_fetchall_or_conn_execute(self):
+        from semantic_index.pg_source import load_catalog
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_catalog(conn)
+
+        conn.execute.assert_not_called()
+        for cur in conn.created_cursors:
+            cur.fetchall.assert_not_called()
+
+    def test_opens_named_cursors_inside_transaction(self):
+        from semantic_index.pg_source import load_catalog
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_catalog(conn)
+
+        assert conn.transaction.called, "catalog cursors must run inside a transaction"
+        # Three queries (genre xref, artists, library) -> three named cursors.
+        assert conn.cursor.call_count == 3
+        for call in conn.cursor.call_args_list:
+            assert call.kwargs.get("name"), (
+                "every catalog cursor must be named -- a name is what makes it "
+                "server-side in psycopg3"
+            )
+
+    def test_sets_itersize_to_bound_libpq_buffer(self):
+        from semantic_index.pg_source import load_catalog
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_catalog(conn)
+
+        assert conn.created_cursors, "expected server-side cursors to be created"
+        for cur in conn.created_cursors:
+            assert cur.itersize >= 1000, (
+                f"itersize must be >=1000 to amortize round-trips over the "
+                f"~462K-row catalog; got {cur.itersize}"
+            )
 
 
 # ===========================================================================
@@ -648,3 +750,70 @@ class TestLoadCrossReferences:
 
         assert artist_xrefs == []
         assert release_xrefs == []
+
+
+# ===========================================================================
+# load_cross_references -- server-side cursor lifecycle
+# ===========================================================================
+
+
+class TestLoadCrossReferencesServerSideCursor:
+    """``load_cross_references`` fetchall'd both xref tables under ``dict_row``;
+    it must stream them via named server-side cursors like ``load_catalog``
+    (WXYC/semantic-index#345).
+    """
+
+    _QUERIES = {
+        "artist_crossreference": [
+            {"source_artist_id": 1, "target_artist_id": 2, "comment": "see also"}
+        ],
+        "artist_library_crossreference": [
+            {"artist_id": 10, "library_id": 20, "comment": "compilation"}
+        ],
+    }
+
+    def test_does_not_buffer_with_fetchall_or_conn_execute(self):
+        from semantic_index.pg_source import load_cross_references
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_cross_references(conn)
+
+        conn.execute.assert_not_called()
+        for cur in conn.created_cursors:
+            cur.fetchall.assert_not_called()
+
+    def test_opens_named_cursors_inside_transaction(self):
+        from semantic_index.pg_source import load_cross_references
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_cross_references(conn)
+
+        assert conn.transaction.called
+        # Two queries (artist xref, release xref) -> two named cursors.
+        assert conn.cursor.call_count == 2
+        for call in conn.cursor.call_args_list:
+            assert call.kwargs.get("name"), "every xref cursor must be named (server-side)"
+
+    def test_sets_itersize_to_bound_libpq_buffer(self):
+        from semantic_index.pg_source import load_cross_references
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_cross_references(conn)
+
+        assert conn.created_cursors, "expected server-side cursors to be created"
+        for cur in conn.created_cursors:
+            assert cur.itersize >= 1000, f"itersize must be >=1000; got {cur.itersize}"
+
+    def test_still_maps_columns_correctly_when_streamed(self):
+        """Behavioural guard: streaming must not change the returned tuple shape."""
+        from semantic_index.pg_source import load_cross_references
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        artist_xrefs, release_xrefs = load_cross_references(conn)
+
+        assert artist_xrefs == [(0, 1, 2, "see also")]
+        assert release_xrefs == [(0, 10, 20, "compilation")]
