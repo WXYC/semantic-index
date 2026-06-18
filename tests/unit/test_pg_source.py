@@ -121,6 +121,47 @@ def _mock_conn_with_queries(query_results: dict[str, list[dict]]) -> MagicMock:
     return mock_conn
 
 
+def _instrument_cursor_transaction_depth(conn: MagicMock) -> list[int]:
+    """Record, per ``conn.cursor(name=...)`` call, how many ``conn.transaction()``
+    contexts are active at that moment.
+
+    Returns a list (one entry per cursor opened) the caller inspects AFTER
+    running the loader. Every entry must be ``>= 1``: a named (server-side)
+    cursor opened with no active transaction raises on a real autocommit
+    connection.
+
+    This expresses the actual invariant -- "each cursor is opened inside a
+    transaction" -- without baking in HOW MANY transactions there are, so it
+    passes whether the loader opens one transaction per cursor or wraps several
+    cursors in a single transaction, while still catching a cursor opened
+    outside any transaction (e.g. the inlined genre-xref cursor losing its
+    ``conn.transaction()``).
+    """
+    depth = {"n": 0}
+    depths: list[int] = []
+    tx = conn.transaction.return_value
+
+    def _enter(*args, **kwargs):
+        depth["n"] += 1
+        return tx
+
+    def _exit(*args, **kwargs):
+        depth["n"] -= 1
+        return None
+
+    tx.__enter__.side_effect = _enter
+    tx.__exit__.side_effect = _exit
+
+    inner_cursor_factory = conn.cursor.side_effect
+
+    def _record(*args, **kwargs):
+        depths.append(depth["n"])
+        return inner_cursor_factory(*args, **kwargs)
+
+    conn.cursor.side_effect = _record
+    return depths
+
+
 # ===========================================================================
 # load_genres
 # ===========================================================================
@@ -303,23 +344,26 @@ class TestLoadCatalogServerSideCursor:
         from semantic_index.pg_source import load_catalog
 
         conn = _mock_conn_with_queries(self._QUERIES)
+        cursor_open_depths = _instrument_cursor_transaction_depth(conn)
 
         load_catalog(conn)
 
-        # Three queries (genre xref, artists, library) -> three named cursors,
-        # each in its OWN transaction. Assert the transaction COUNT, not just
-        # .called: a truthy-only check is satisfied by the helper-routed
-        # cursors and would mask the inlined genre-xref cursor being opened
-        # outside a transaction (which raises on a real autocommit connection).
+        # Three queries (genre xref, artists, library) -> three named cursors.
         assert conn.cursor.call_count == 3
-        assert conn.transaction.call_count == 3, (
-            "every catalog cursor must run in its own transaction"
-        )
         for call in conn.cursor.call_args_list:
             assert call.kwargs.get("name"), (
                 "every catalog cursor must be named -- a name is what makes it "
                 "server-side in psycopg3"
             )
+        # Each cursor MUST be opened inside an active transaction (named cursors
+        # error outside one on an autocommit connection). Asserting the depth at
+        # open time -- not the transaction count -- catches the inlined
+        # genre-xref cursor being opened outside a transaction while still
+        # allowing a future single-transaction-for-all-reads refactor.
+        assert all(d >= 1 for d in cursor_open_depths), (
+            f"every catalog cursor must be opened inside a transaction; "
+            f"open-time transaction depths were {cursor_open_depths}"
+        )
 
     def test_sets_itersize_to_bound_libpq_buffer(self):
         from semantic_index.pg_source import load_catalog
@@ -798,15 +842,20 @@ class TestLoadCrossReferencesServerSideCursor:
         from semantic_index.pg_source import load_cross_references
 
         conn = _mock_conn_with_queries(self._QUERIES)
+        cursor_open_depths = _instrument_cursor_transaction_depth(conn)
 
         load_cross_references(conn)
 
-        # Two queries (artist xref, release xref) -> two named cursors, each in
-        # its own transaction. Assert the transaction count, not just .called.
+        # Two queries (artist xref, release xref) -> two named cursors, each
+        # opened inside an active transaction (see the catalog test for why this
+        # asserts open-time depth rather than transaction count).
         assert conn.cursor.call_count == 2
-        assert conn.transaction.call_count == 2, "every xref cursor must run in its own transaction"
         for call in conn.cursor.call_args_list:
             assert call.kwargs.get("name"), "every xref cursor must be named (server-side)"
+        assert all(d >= 1 for d in cursor_open_depths), (
+            f"every xref cursor must be opened inside a transaction; "
+            f"open-time transaction depths were {cursor_open_depths}"
+        )
 
     def test_sets_itersize_to_bound_libpq_buffer(self):
         from semantic_index.pg_source import load_cross_references
