@@ -1,0 +1,14 @@
+# Fires the nightly rebuild conductor (WXYC/semantic-index#347).
+# 08:50 UTC: a little before the old in-process SYNC_HOUR_UTC=9 window, so the
+# new path is the one that produces the day's graph. Persistent=true catches up
+# a missed run if the host was down at the trigger time.
+[Unit]
+Description=Nightly trigger for the semantic-index out-of-process graph rebuild
+
+[Timer]
+OnCalendar=*-*-* 08:50:00 UTC
+Persistent=true
+Unit=semantic-index-build.service
+
+[Install]
+WantedBy=timers.target
