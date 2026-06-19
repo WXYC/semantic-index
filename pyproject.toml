@@ -31,6 +31,13 @@ archive = [
     "boto3>=1.28",
     "essentia-tensorflow>=2.1b6",
 ]
+# Out-of-process nightly rebuild (scripts/run_build_job.py): the Fargate task
+# image installs `.[api,build]` — base + API deps + boto3 for the S3 round-trip,
+# WITHOUT Essentia (nightly_sync imports none of the audio modules). See
+# plans/si-out-of-process-rebuild.
+build = [
+    "boto3>=1.28",
+]
 rust = [
     "wxyc-etl>=0.5.0",
 ]
@@ -40,6 +47,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.25",
+    "moto>=4.0",
     "ruff>=0.4.0",
     "mypy>=1.0.0",
     "types-networkx>=3.0",
