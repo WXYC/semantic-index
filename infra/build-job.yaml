@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Out-of-process nightly rebuild for semantic-index (WXYC/semantic-index#347).
+  Defines an on-demand ECS Fargate task that rebuilds wxyc_artist_graph.db in
+  the Backend-Service VPC (reaching the RDS private endpoint), with an adequate
+  memory budget, and round-trips the DB through S3. The EC2 serving host's
+  conductor (scripts/ec2-build-conductor.sh) seeds the build, launches this task
+  with `aws ecs run-task`, then validates and atomically swaps the result in.
+
+  This stack creates ONLY the runnable task + supporting resources. Three steps
+  touch resources this stack does not own and are applied out of band (see
+  infra/README.md): (1) an inbound rule on the RDS security group allowing 5432
+  from BuildSecurityGroup; (2) the DATABASE_URL_BACKEND SecureString SSM
+  parameter; (3) the S3 + ecs:RunTask + iam:PassRole additions to the EC2
+  instance profile.
+
+# ---------------------------------------------------------------------------
+# Parameters — VPC/subnet IDs are Backend-Service's; look them up from the EC2
+# host (see infra/README.md). The task MUST be in the RDS VPC.
+# ---------------------------------------------------------------------------
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      The Backend-Service VPC (the one the RDS instance lives in). Used for the
+      build task's security group. Subnets are NOT a stack input — the task is
+      run-to-completion, so its network config (subnets + this SG +
+      AssignPublicIp=ENABLED) is supplied at `aws ecs run-task` time by the
+      conductor (SUBNETS in deploy/semantic-index-build.service). Use PUBLIC
+      subnets in this VPC: the IGW gives egress to ECR/S3/Logs while RDS is
+      reached on its private IP via in-VPC routing.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: semantic-index ECR image tag to run (deploy.yml pushes :latest and :sha-*).
+
+  DatabaseUrlSsmParam:
+    Type: String
+    Default: /semantic-index/database-url-backend
+    Description: >
+      Name of the SecureString SSM parameter holding DATABASE_URL_BACKEND (the
+      RDS private-endpoint DSN). Created out of band; see infra/README.md.
+
+  BucketName:
+    Type: String
+    Default: wxyc-semantic-index-build
+    Description: S3 bucket for the seed/ and build/ DB transfer objects.
+
+  TaskCpu:
+    Type: String
+    Default: "1024"
+    Description: Fargate task vCPU units (1024 = 1 vCPU).
+
+  TaskMemory:
+    Type: String
+    Default: "8192"
+    Description: >
+      Fargate task memory (MiB). Start at 8192 — graph_metrics has never run to
+      completion under load, so its peak is unmeasured. Dial down to 4096 once a
+      couple of nights of the [mem] profile are observed in CloudWatch Logs.
+
+Resources:
+  # =========================================================================
+  # S3 — transient seed/ + build/ DB transfer. Private; lifecycle-expired.
+  # =========================================================================
+  BuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-transient-db-objects
+            Status: Enabled
+            ExpirationInDays: 3
+          - Id: abort-incomplete-multipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # =========================================================================
+  # ECS — cluster, task definition (run-to-completion; NO standing service)
+  # =========================================================================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/semantic-index-build
+      RetentionInDays: 14
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: semantic-index-build
+
+  BuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: semantic-index nightly build task - egress only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (RDS 5432 in-VPC, S3/ECR/Logs via IGW)
+
+  # Execution role: ECR pull + CloudWatch Logs + read the DSN SecureString.
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: semantic-index-build-exec
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadDatabaseUrlSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DatabaseUrlSsmParam}"
+              # SecureString uses the AWS-managed alias/aws/ssm key; ECS can
+              # decrypt it with the GetParameters grant above. If the parameter
+              # is ever re-created under a customer-managed KMS key, add a
+              # kms:Decrypt statement scoped to that key ARN here.
+
+  # Task role: the running container downloads the seed and uploads the build.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: semantic-index-build-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3RoundTrip
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${BuildBucket.Arn}/seed/*"
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${BuildBucket.Arn}/build/*"
+              # No s3:ListBucket — run_build_job.py only does get_object/put_object
+              # on known keys. (The conductor lists via the EC2 instance profile,
+              # not this task role.)
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: semantic-index-build
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      # Default 20 GiB ephemeral storage covers the ~3 GB working set (seed copy
+      # + nightly_sync's copy2 temp); no EphemeralStorage override needed.
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: build
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/semantic-index:${ImageTag}"
+          Essential: true
+          # Reuse the serving image; override CMD to run the build wrapper.
+          Command: ["python", "scripts/run_build_job.py"]
+          Environment:
+            - Name: DB_PATH
+              Value: /data/wxyc_artist_graph.db
+            - Name: SEED_S3_URI
+              Value: !Sub "s3://${BucketName}/seed/wxyc_artist_graph.db"
+            - Name: BUILD_S3_URI
+              Value: !Sub "s3://${BucketName}/build/wxyc_artist_graph.db"
+            - Name: SYNC_MIN_COUNT
+              Value: "2"
+            - Name: ENRICHMENT_TOP_K
+              Value: "50"
+          Secrets:
+            - Name: DATABASE_URL_BACKEND
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DatabaseUrlSsmParam}"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: build
+
+# ---------------------------------------------------------------------------
+# Outputs — consumed by infra/README.md (RDS SG rule, instance-profile policy)
+# and by scripts/ec2-build-conductor.sh (cluster / task-def / subnets / SG).
+# ---------------------------------------------------------------------------
+Outputs:
+  ClusterArn:
+    Description: ECS cluster to run the task in.
+    Value: !GetAtt Cluster.Arn
+  TaskDefinitionArn:
+    Description: Task definition to pass to `aws ecs run-task`.
+    Value: !Ref TaskDefinition
+  BuildSecurityGroupId:
+    Description: Add an inbound 5432 rule on the RDS SG FROM this SG.
+    Value: !GetAtt BuildSecurityGroup.GroupId
+  BucketName:
+    Description: S3 bucket for seed/ + build/ transfer.
+    Value: !Ref BucketName
+  TaskRoleArn:
+    Description: Scope the instance profile's iam:PassRole to this (and the exec role).
+    Value: !GetAtt TaskRole.Arn
+  TaskExecutionRoleArn:
+    Description: Scope the instance profile's iam:PassRole to this (and the task role).
+    Value: !GetAtt TaskExecutionRole.Arn

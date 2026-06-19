@@ -56,7 +56,21 @@ Two classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (
 
 Run `actionlint .github/workflows/*.yml` locally before pushing workflow changes; it validates `permissions:` syntax, action-version pins, and shell-script blocks (via shellcheck), and catches the silent-mistake class of errors above before CI does. The current `deploy.yml` has 8 pre-existing SC2086 info-level shellcheck warnings that have been deferred — they're info, not error, and predate the pin work.
 
-## Nightly sync scheduler (in-process)
+## Nightly rebuild (out-of-process — current target state, #347)
+
+The nightly graph rebuild runs **out of the API process** as an on-demand ECS Fargate task in the Backend-Service VPC, and the rebuilt `wxyc_artist_graph.db` is shipped back to the serving host and atomically swapped in without an API restart. This replaces the in-process scheduler (below), which OOM-killed every night under the `--memory 1g` cap and took the API down with it (canary #50). Full design: `WXYC/wxyc-workspace plans/si-out-of-process-rebuild/plan.md`; infra + runbook: [`infra/README.md`](../infra/README.md).
+
+Flow (round-trip; the EC2 host's `scripts/ec2-build-conductor.sh` is the single nightly driver, fired by `deploy/semantic-index-build.timer`):
+
+1. The conductor snapshots the live prod DB (consistent `sqlite .backup`), records its enrichment row counts, and uploads the snapshot to `s3://wxyc-semantic-index-build/seed/` — the build **must** seed from current prod because `nightly_sync` is incremental (`copy2` carries the enrichment tables forward).
+2. It launches the Fargate task (`aws ecs run-task`), which downloads the seed, runs `nightly_sync` against the RDS private endpoint (≥4 GiB budget; first place the full `[mem]` profile past `after _load_from_pg` is observable, in CloudWatch `/ecs/semantic-index-build`), checkpoints, and uploads the result to `s3://.../build/`.
+3. The conductor downloads the artifact, runs the **fail-closed** validation gate (`scripts/validate_graph_db.py`: SQLite header + `artist` floor + enrichment row counts vs. the seed — a build that started empty and lost enrichment is rejected and **not** swapped), then clears stale `-wal`/`-shm` and `os.replace`s it into the live path. The per-request read-only open (`api/database.py`) picks up the new inode on the next request — no restart, no reopen.
+
+AWS: account `203767826763` (`wxyc-api`), us-east-1; the Fargate image is the same `semantic-index` ECR image with its command overridden to `scripts/run_build_job.py`. Cost ≈ $0.30/mo. The container image installs `.[api,build]` (adds boto3 for the S3 round-trip; no Essentia).
+
+**Cutover:** once the off-host path is proven for ≥2 nights, set `SYNC_ENABLED=false` and recreate the container so the API only serves. Until then the in-process scheduler is harmless (it dies in `load_flowsheet_entries` before ever writing the prod file) but keeps causing the nightly restart blip.
+
+## Nightly sync scheduler (in-process — legacy, disabled at cutover)
 
 The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars in `.env.semantic-index`:
 
