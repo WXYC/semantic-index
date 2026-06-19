@@ -181,6 +181,13 @@ Resources:
           # Reuse the serving image; override CMD to run the build wrapper.
           Command: ["python", "scripts/run_build_job.py"]
           Environment:
+            # The image installs deps but not the semantic_index package into
+            # site-packages (source is COPYed to /app after `pip install`); the
+            # API works because it runs with CWD=/app on sys.path. Running
+            # `python scripts/run_build_job.py` puts /app/scripts (not /app) on
+            # the path, so import semantic_index needs /app explicitly.
+            - Name: PYTHONPATH
+              Value: /app
             - Name: DB_PATH
               Value: /data/wxyc_artist_graph.db
             - Name: SEED_S3_URI
