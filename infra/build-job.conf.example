@@ -1,0 +1,33 @@
+# Backend-Service VPC ID for the nightly-build CloudFormation stack
+# (infra/deploy.sh). Copy to build-job.conf (gitignored) and fill in VPC_ID.
+#
+# VPC_ID is the only value deploy.sh needs. The PUBLIC subnet id(s) and the
+# BuildSecurityGroup id go into the conductor's systemd unit
+# (deploy/semantic-index-build.service), NOT the stack — the task is
+# run-to-completion and gets its network config at `aws ecs run-task` time.
+#
+# Look the values up from the EC2 serving host (AWS_PROFILE=wxyc-api), which
+# lives in the same VPC as RDS:
+#
+#   INSTANCE=i-0685e373989cd5daa
+#   aws ec2 describe-instances --instance-ids "$INSTANCE" \
+#     --query 'Reservations[0].Instances[0].{VpcId:VpcId,SubnetId:SubnetId}'
+#   # then list public subnets in that VPC (MapPublicIpOnLaunch==true):
+#   aws ec2 describe-subnets --filters "Name=vpc-id,Values=<VPC_ID>" \
+#     --query 'Subnets[?MapPublicIpOnLaunch==`true`].SubnetId'
+#
+# The RDS security-group id (for the out-of-band inbound rule) comes from:
+#   aws rds describe-db-instances --db-instance-identifier wxyc-db \
+#     --query 'DBInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId'
+
+VPC_ID=vpc-xxxxxxxx
+# Optional: pin a specific image instead of :latest
+# IMAGE_TAG=latest
+# Optional: Fargate task size. Set TASK_MEMORY to "dial down" once the [mem]
+# profile is known (deploy.sh passes these every run, so a tuned value sticks).
+# TASK_CPU=1024
+# TASK_MEMORY=8192
+
+# For the conductor's systemd unit (deploy/semantic-index-build.service), not deploy.sh:
+#   SUBNETS  = a public subnet id in VPC_ID (from the describe-subnets lookup above)
+#   BUILD_SG = the BuildSecurityGroupId from the CloudFormation stack outputs

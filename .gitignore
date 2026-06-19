@@ -46,3 +46,6 @@ data/*.tmp.*.db-wal
 
 wiki/
 slides
+
+# Out-of-process rebuild: per-environment AWS IDs (see infra/build-job.conf.example)
+infra/build-job.conf
