@@ -1,5 +1,7 @@
 """Tests for the Graph API scaffolding."""
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,6 +93,43 @@ class TestHealthEndpoint:
         assert response.status_code == 503
         data = response.json()
         assert data["status"] == "unhealthy"
+
+    def test_health_reports_graph_db_age_seconds(self, client: TestClient, test_db: Path):
+        """The freshness field reflects the serving DB file's mtime.
+
+        The wxyc-canary freshness check (WXYC/wxyc-canary#53) reads this to
+        catch SIGKILL-class silent nightly-sync failures (#348/#329).
+        """
+        # Pin the DB mtime to a known point ~2 hours ago.
+        two_hours_ago = time.time() - 7200
+        os.utime(test_db, (two_hours_ago, two_hours_ago))
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        age = data["graph_db_age_seconds"]
+        assert isinstance(age, (int, float))
+        # Allow generous slack for clock granularity / test execution time.
+        assert 7100 <= age <= 7300
+
+    def test_health_age_is_small_for_fresh_db(self, client: TestClient, test_db: Path):
+        """A just-written DB reports a near-zero age."""
+        os.utime(test_db, None)  # set mtime to now
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["graph_db_age_seconds"] >= 0
+        assert data["graph_db_age_seconds"] < 60
+
+    def test_health_age_degrades_gracefully_when_db_missing(self, client_missing_db: TestClient):
+        """A missing DB (e.g. mid-swap) must not 500; age is reported as null."""
+        response = client_missing_db.get("/health")
+        # The unhealthy path already returns 503; it must still carry the
+        # freshness field so the canary can distinguish stale from absent.
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "unhealthy"
+        assert data["graph_db_age_seconds"] is None
 
 
 class TestReadinessEndpoint:

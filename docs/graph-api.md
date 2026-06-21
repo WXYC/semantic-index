@@ -18,7 +18,7 @@ app = create_app("data/wxyc_artist_graph.db")
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | D3.js graph explorer (interactive visualization). |
-| `GET` | `/health` | Health check — returns artist count or 503 if database is unreachable. |
+| `GET` | `/health` | Health check — returns `status`, `artist_count`, and `graph_db_age_seconds` (age in seconds of the serving DB file's mtime, or `null` if the file is briefly absent mid atomic-swap), or 503 if the database is unreachable. `graph_db_age_seconds` is the freshness signal the WXYC synthetic-DJ canary reads to catch SIGKILL-class silent nightly-sync failures (WXYC/semantic-index#348). |
 | `GET` | `/graph/artists/search?q=autechre&limit=10` | Case-insensitive LIKE search, ordered by total_plays descending. |
 | `GET` | `/graph/artists/{id}` | Full artist detail including external IDs (Discogs, MusicBrainz, Wikidata QID) and streaming service IDs (Spotify, Apple Music, Bandcamp) joined from the entity table. Gracefully degrades on old-schema databases. |
 | `GET` | `/graph/artists/{id}/neighbors?type=djTransition&limit=20` | Neighbors by edge type. Types: `djTransition`, `sharedPersonnel`, `sharedStyle`, `labelFamily`, `compilation`, `crossReference`, `wikidataInfluence`. Supports optional `month` (1-12) and `dj_id` facet filters for `djTransition` — computes PMI dynamically from play-level data. `min_raw_count` (default 1) filters DJ transition edges by minimum co-occurrence count; applies to `djTransition` and `affinity` edge types. |

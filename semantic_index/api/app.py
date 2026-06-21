@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -74,17 +76,37 @@ def create_app(
     # synthetic-DJ canary parses (see WXYC/wxyc-canary). Readiness, which
     # is shape-compatible with the shared router, *is* delegated below.
     # Tracked: WXYC/wxyc-fastapi#19 (extra-fields hook for liveness).
+    def _graph_db_age_seconds() -> float | None:
+        """Age, in seconds, of the serving graph DB file (from its mtime).
+
+        This is the freshness signal the WXYC synthetic-DJ canary reads to
+        catch SIGKILL-class silent nightly-sync failures, where the scheduler
+        fires but the rebuild is OOM-killed before the atomic swap lands — so
+        the DB file's mtime never advances (see WXYC/semantic-index#348 and
+        #329). A single ``os.stat`` of ``db_path`` is cheap enough to compute
+        on every ``/health`` hit. Returns ``None`` if the file is briefly
+        absent (e.g. mid atomic-swap) so ``/health`` never raises on it.
+        """
+        try:
+            mtime = os.stat(db_path).st_mtime
+        except OSError:
+            return None
+        return max(0.0, time.time() - mtime)
+
     @app.get("/health", include_in_schema=False)
     def health() -> JSONResponse:
         """Health check — verifies the SQLite database is readable."""
+        age = _graph_db_age_seconds()
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             count = conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
             conn.close()
-            return JSONResponse({"status": "healthy", "artist_count": count})
+            return JSONResponse(
+                {"status": "healthy", "artist_count": count, "graph_db_age_seconds": age}
+            )
         except Exception as exc:
             return JSONResponse(
-                {"status": "unhealthy", "detail": str(exc)},
+                {"status": "unhealthy", "detail": str(exc), "graph_db_age_seconds": age},
                 status_code=503,
             )
 
