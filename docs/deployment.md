@@ -2,7 +2,7 @@
 
 ## Topology
 
-Production is a single EC2 host (us-east-1) shared with Backend-Service. The Graph API runs there as a Docker container on port 8083, behind an nginx reverse proxy that terminates TLS (Let's Encrypt) for `explore.wxyc.org`. Container images live in [ECR](glossary.md#ecr--ecs--fargate); GitHub Actions builds and ships them. The SQLite database is *not* baked into the image — it lives in a bind-mounted `/data` directory on the host, so deploys never touch data. The nightly graph rebuild runs off-host on a Fargate task and ships its result back — see [Nightly rebuild](#nightly-rebuild-out-of-process--current-target-state-347) below.
+Production is a single EC2 host (us-east-1) shared with Backend-Service. The Graph API runs there as a Docker container on port 8083, behind an nginx reverse proxy that terminates TLS (Let's Encrypt) for `explore.wxyc.org`. Container images live in [ECR](glossary.md#ecr--ecs--fargate); GitHub Actions builds and ships them. The SQLite database is *not* baked into the image — it lives in a bind-mounted `/data` directory on the host, so deploys never touch data. The nightly graph rebuild runs off-host on a Fargate task and ships its result back — see [Nightly rebuild](#nightly-rebuild-out-of-process-347) below.
 
 ## Deploying the API
 
@@ -68,7 +68,7 @@ Two classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (
 
 Run `actionlint .github/workflows/*.yml` locally before pushing workflow changes; it validates `permissions:` syntax, action-version pins, and shell-script blocks (via shellcheck), and catches the silent-mistake class of errors above before CI does. The current `deploy.yml` has 8 pre-existing SC2086 info-level shellcheck warnings that have been deferred — they're info, not error, and predate the pin work.
 
-## Nightly rebuild (out-of-process — current target state, #347)
+## Nightly rebuild (out-of-process, #347)
 
 **Why it works this way:** the graph rebuild used to run inside the API container, where it OOM-killed every night under the container's `--memory 1g` cap and took the API down with it (canary #50). So the rebuild now runs **out of the API process**, as an on-demand [ECS Fargate](glossary.md#ecr--ecs--fargate) task in the Backend-Service VPC with an adequate memory budget, and the rebuilt `wxyc_artist_graph.db` is shipped back to the serving host and [atomically swapped](glossary.md#atomic-swap) in without an API restart. Full design: `WXYC/wxyc-workspace plans/si-out-of-process-rebuild/plan.md`; infra + runbook: [`infra/README.md`](../infra/README.md).
 
@@ -80,9 +80,9 @@ The nightly round-trip, driven by the [conductor](glossary.md#conductor) on the 
 
 AWS specifics: account `203767826763` (`wxyc-api`), us-east-1. The Fargate task reuses the same `semantic-index` ECR image with its command overridden to `scripts/run_build_job.py`; the image installs `.[api,build]` (adds boto3 for the S3 round-trip; no Essentia). Cost ≈ $0.30/mo.
 
-**Cutover:** once the off-host path is proven for ≥2 nights, set `SYNC_ENABLED=false` and recreate the container so the API only serves. Until then the in-process scheduler is harmless (it dies in `load_flowsheet_entries` before ever writing the production file) but keeps causing the nightly restart blip.
+**Cutover status:** complete as of 2026-06-23 — `SYNC_ENABLED=false` is set and the container was recreated, so the API process only serves and the off-host round-trip is the production rebuild path. The in-process scheduler below is retained for reference and manual use.
 
-## Nightly sync scheduler (in-process — legacy, disabled at cutover)
+## Nightly sync scheduler (in-process — legacy, disabled at the 2026-06 cutover)
 
 The API service includes a built-in sync scheduler that runs `nightly_sync()` as a background daemon thread. Enable it by setting env vars in `.env.semantic-index`:
 
