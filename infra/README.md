@@ -4,7 +4,7 @@
 
 **The shape of the fix:** build elsewhere, ship the database back, swap it in without a restart. The rebuild runs as an on-demand **[ECS Fargate](../docs/glossary.md#ecr--ecs--fargate) task in the Backend-Service VPC** with an adequate memory budget. Each night the **conductor** (a script on the EC2 serving host) snapshots the live database as the **seed**, uploads it to S3, launches the Fargate task (which runs the sync and uploads the rebuilt `wxyc_artist_graph.db` as the **build artifact**), then downloads, validates, and [atomically swaps](../docs/glossary.md#atomic-swap) the artifact into the live path — **without an API restart**. The seed step matters because the sync is incremental: enrichment tables are carried forward from the current database, not recomputed, so a build that starts empty silently loses them (which is exactly what the validation gate rejects).
 
-See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo) for the full design, and the deployment-level view in [`docs/deployment.md`](../docs/deployment.md).
+See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo) for the full design, and the deployment-level view in [`docs/deployment.md`](../docs/deployment.md). The proving-and-cutover sequence at the bottom completed in June 2026; it's kept as the runbook for re-deploying or re-proving the path.
 
 ## Pieces
 
