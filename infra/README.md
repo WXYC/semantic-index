@@ -1,8 +1,10 @@
 # infra — out-of-process nightly rebuild
 
-Implements [WXYC/semantic-index#347](https://github.com/WXYC/semantic-index/issues/347). The nightly graph rebuild no longer runs in the API container (where it OOM-killed under the `--memory 1g` cap, taking the API down — canary #50). Instead it runs as an on-demand **ECS Fargate task in the Backend-Service VPC** with an adequate memory budget, and the rebuilt `wxyc_artist_graph.db` is shipped back to the serving host and atomically swapped in **without an API restart**.
+**The problem this solves:** rebuilding the artist graph takes more memory than the serving host can spare. The rebuild used to run inside the API container, where it OOM-killed every night under the container's `--memory 1g` cap and took the API down with it (canary #50). Implements [WXYC/semantic-index#347](https://github.com/WXYC/semantic-index/issues/347).
 
-See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo) for the full design.
+**The shape of the fix:** build elsewhere, ship the database back, swap it in without a restart. The rebuild runs as an on-demand **[ECS Fargate](../docs/glossary.md#ecr--ecs--fargate) task in the Backend-Service VPC** with an adequate memory budget. Each night the **conductor** (a script on the EC2 serving host) snapshots the live database as the **seed**, uploads it to S3, launches the Fargate task (which runs the sync and uploads the rebuilt `wxyc_artist_graph.db` as the **build artifact**), then downloads, validates, and [atomically swaps](../docs/glossary.md#atomic-swap) the artifact into the live path — **without an API restart**. The seed step matters because the sync is incremental: enrichment tables are carried forward from the current database, not recomputed, so a build that starts empty silently loses them (which is exactly what the validation gate rejects).
+
+See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo) for the full design, and the deployment-level view in [`docs/deployment.md`](../docs/deployment.md).
 
 ## Pieces
 
@@ -31,7 +33,7 @@ AWS_PROFILE=wxyc-api ./infra/deploy.sh
 
 ## Out-of-band, one-time setup
 
-These touch resources the stack does not own, so they are applied by hand (all `AWS_PROFILE=wxyc-api`).
+These touch resources the CloudFormation stack does not own, so they are applied by hand (all `AWS_PROFILE=wxyc-api`).
 
 ### 1. RDS security-group inbound rule — the single must-do networking step
 
