@@ -1,10 +1,15 @@
 # Audio Feature Ingest
 
-Two pathways for populating the `audio_profile` table: AcousticBrainz (precomputed features for ~13% of WXYC artists) and direct archive classification (Essentia TF on WXYC's S3 hourly archive).
+The graph's audio features — what an artist actually *sounds* like, as opposed to how they're shelved or tagged — live in the [`audio_profile`](glossary.md#audio-profile) table, which feeds acoustic-similarity edges and enriches narrative generation with genre, mood, and danceability data. Two pathways populate it:
+
+1. **[AcousticBrainz](glossary.md#acousticbrainz) import** — bulk-load features that the (now discontinued) AcousticBrainz project already computed. Cheap, but covers only ~13% of WXYC artists: AcousticBrainz skews toward well-known recordings, and WXYC doesn't play mostly well-known recordings.
+2. **Archive classification** — run audio classifiers ourselves over the [WXYC audio archive](glossary.md#wxyc-audio-archive), the station's own hourly broadcast recordings. Costs real compute, but covers exactly what the station actually played.
+
+Both pathways produce profiles in the same 59-dimension layout, so downstream code doesn't care which source an artist's profile came from.
 
 ## AcousticBrainz import
 
-One-time ETL to populate the `ab_recording` table in the musicbrainz PostgreSQL database from the AcousticBrainz data dump tar archives. The import is resumable — per-tar checkpointing skips completed tars, and `ON CONFLICT DO NOTHING` handles duplicate MBIDs.
+A one-time ETL that populates the `ab_recording` table in the musicbrainz-cache PostgreSQL from the AcousticBrainz data-dump tar archives. The import is resumable — per-tar [checkpointing](glossary.md#checkpoint) skips completed tars, and `ON CONFLICT DO NOTHING` handles duplicate [MBIDs](glossary.md#musicbrainz) — so an interrupted run picks up where it left off.
 
 ```bash
 python scripts/import_acousticbrainz.py \
@@ -14,11 +19,11 @@ python scripts/import_acousticbrainz.py \
     [--retry-failed]
 ```
 
-The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured columns plus JSONB for probability distributions and metadata tags. The feature vector uses all 18 classifiers for a 59-dimension representation.
+The `ab_recording` table stores all 18 AcousticBrainz classifiers as structured columns plus JSONB for probability distributions and metadata tags. The feature vector uses all 18 classifiers for the 59-dimension representation.
 
 ## Archive audio classification
 
-Extends audio feature coverage beyond AcousticBrainz (which covers only ~13% of WXYC artists) by classifying WXYC's hourly audio archives directly. Uses flowsheet timestamps to locate each play within the S3 archive, extracts 30-second segments, and runs Essentia TF classifiers (VGGish + 15 classification heads) to produce per-segment features. Results are aggregated per-artist and written to the `audio_profile` table, enriching narrative generation with genre, mood, and danceability data.
+The pipeline knows *when* each flowsheet entry was played, and the archive stores *what was on air* at every moment since June 2021 — so each play can be located inside its archive hour. The script extracts 30-second segments at those timestamps, runs them through [Essentia](glossary.md#essentia) TF classifiers ([VGGish](glossary.md#vggish) embeddings + 15 [classification heads](glossary.md#classification-head)) to produce per-segment features, then aggregates the segments per artist and writes the resulting profiles to `audio_profile`.
 
 ```bash
 python scripts/process_archive.py \
@@ -33,10 +38,10 @@ python scripts/process_archive.py \
     [--dry-run]
 ```
 
-- `--backend-dsn` / `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL DSN (required). Queries `wxyc_schema.flowsheet` for entry timestamps.
-- `--model-dir` / `ESSENTIA_MODEL_DIR` — Directory containing Essentia TF models: `audioset-vggish-3.pb` (275 MB feature extractor) + 15 classification heads (~50 KB each).
+- `--backend-dsn` / `DATABASE_URL_BACKEND` — Backend-Service PostgreSQL [DSN](glossary.md#dsn) (required). Queries `wxyc_schema.flowsheet` for entry timestamps.
+- `--model-dir` / `ESSENTIA_MODEL_DIR` — Directory containing the Essentia TF models: `audioset-vggish-3.pb` (the 275 MB feature extractor) + 15 classification heads (~50 KB each). Download commands below.
 - `--db-path` / `DB_PATH` — Pipeline SQLite database for writing aggregated audio profiles (optional; omit to skip aggregation).
-- `--checkpoint` / `ARCHIVE_CHECKPOINT` — Path to checkpoint SQLite database (default: `output/archive_progress.db`).
+- `--checkpoint` / `ARCHIVE_CHECKPOINT` — Path to the checkpoint SQLite database (default: `output/archive_progress.db`).
 - `--bucket` — S3 bucket name (default: `wxyc-archive`).
 - `--date-range` — Date range to process as `START:END` (YYYY-MM-DD:YYYY-MM-DD, required unless `--aggregate-only`).
 - `--max-hours` — Maximum archive hours to process (0 = unlimited).
@@ -45,7 +50,7 @@ python scripts/process_archive.py \
 - `--retry-failed` — Re-attempt previously failed archive hours.
 - `--dry-run` — Log what would be processed without downloading audio.
 
-System dependencies: `ffmpeg`. Python: `pip install -e ".[archive]"` (essentia-tensorflow requires Python 3.13, not 3.14).
+System dependencies: `ffmpeg` (for MP3 → PCM decoding). Python: `pip install -e ".[archive]"` — note this optional extra is stricter about interpreter version than the rest of the project (which needs only 3.12+): essentia-tensorflow currently requires Python 3.13 and does not support 3.14.
 
 **Essentia model setup:**
 
