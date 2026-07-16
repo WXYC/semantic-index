@@ -45,7 +45,7 @@ These are the everyday flags; the pipeline has more (compilation resolution, Dis
 3. **Extract** consecutive artist pairs within each [radio show](docs/glossary.md#radio-show)
 4. **Compute** PMI for every recurring pair: `log2(P(a,b) / (P(a) * P(b)))` — high PMI means two artists appear together more than chance predicts
 5. **Extract** the cross-reference edges music directors curated in the catalog
-6. **Export** the SQLite graph database, and optionally a GEXF graph loadable in [Gephi](https://gephi.org/)
+6. **Export** a GEXF graph loadable in [Gephi](https://gephi.org/) and the SQLite graph database (`--no-sqlite` skips the latter)
 
 ## Graph API
 
