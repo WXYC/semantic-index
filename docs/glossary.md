@@ -46,7 +46,7 @@ A "see also" link between catalog entries, curated by WXYC music directors — f
 
 ### Semantic artist graph
 
-The project's output artifact: a graph whose nodes are canonical artists and whose edges are typed relationships between them — DJ transitions, shared personnel, shared styles, label families, compilation co-appearances, cross-references, Wikidata influences, acoustic similarity. It is exported as a SQLite database (and optionally [GEXF](#gexf)), served by the Graph API, and drawn by the explorer at [explore.wxyc.org](https://explore.wxyc.org).
+The project's output artifact: a graph whose nodes are canonical artists and whose edges are typed relationships between them — DJ transitions, shared personnel, shared styles, label families, compilation co-appearances, cross-references, Wikidata influences, acoustic similarity. It is exported as a SQLite database (plus a [GEXF](#gexf) file in SQL-dump mode), served by the Graph API, and drawn by the explorer at [explore.wxyc.org](https://explore.wxyc.org).
 
 ### PMI
 
