@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from generated.api_models import ReconciledIdentity
+from generated.api_models import ReconciledIdentity, SimilarArtist
 
 
 class ArtistSummary(BaseModel):
@@ -91,6 +91,26 @@ class ArtistDetail(BaseModel):
     apple_music_artist_id: str | None = None
     bandcamp_id: str | None = None
     reconciled_identity: ReconciledIdentity | None = None
+    # Backend catalog library-artist id (the SimilarArtist.artist_id keyspace),
+    # populated by the nightly sync (#358). NULL for raw/CTA-only and homonym
+    # names. Exposed additively so individual mappings are spot-checkable from a
+    # browser; the batch translation itself lives at
+    # POST /graph/library-artists/neighbors/batch.
+    wxyc_library_code_id: int | None = None
+
+
+class LibraryNeighborsBatchResponse(BaseModel):
+    """Response for POST /graph/library-artists/neighbors/batch.
+
+    Keyed by requested library artist id (rendered as a string, per JSON object
+    keys); each value is the top-K affinity neighbors translated back into the
+    same Backend catalog library-artist id keyspace as shared ``SimilarArtist``
+    items (``{artist_id, weight}``), weight-descending. Unknown, unmapped, and
+    ambiguous (homonym) ids are present with an empty list rather than omitted,
+    so the consumer can tell "asked, no neighbors" from "never asked".
+    """
+
+    results: dict[str, list[SimilarArtist]]
 
 
 class EntityArtists(BaseModel):
