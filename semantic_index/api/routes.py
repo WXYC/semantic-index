@@ -13,9 +13,9 @@ from typing import Any
 
 import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from generated.api_models import ReconciledIdentity
+from generated.api_models import ReconciledIdentity, SimilarArtist
 from semantic_index.api.database import get_db
 from semantic_index.api.schemas import (
     ArtistDetail,
@@ -28,6 +28,7 @@ from semantic_index.api.schemas import (
     EntityArtists,
     ExplainResponse,
     FacetsResponse,
+    LibraryNeighborsBatchResponse,
     NeighborEntry,
     NeighborsResponse,
     Relationship,
@@ -457,6 +458,116 @@ def get_neighbors_batch(
     return BatchNeighborsResponse(results=results)
 
 
+class LibraryNeighborsBatchRequest(BaseModel):
+    """Request body for POST /graph/library-artists/neighbors/batch.
+
+    ``library_artist_ids`` are Backend catalog artist ids (the
+    ``SimilarArtist.artist_id`` keyspace), NOT internal graph ids. The sibling
+    /artists/neighbors/batch endpoint's ``artist_ids`` are graph ids, so the
+    distinct field name here is deliberate — it guards against the id-space
+    confusion this endpoint exists to resolve. The 100-id cap (``max_length``)
+    returns a structured 422 on overflow rather than the sibling's silent
+    truncation, which for an unattended nightly job would be silent data loss.
+    """
+
+    library_artist_ids: list[int] = Field(..., max_length=100)
+    limit: int = Field(20, ge=1, le=100)
+    heat: float = Field(0.5, ge=0.0, le=1.0)
+
+
+# Rank-then-filter over-fetch multiple. The affinity ranker returns graph
+# neighbors; an unmapped neighbor (NULL wxyc_library_code_id) drops during
+# translation, so a raw top-`limit` can come back short. Empirical probe (40
+# simulated headliners, popularity ranks 1-600, local graph): at limit=20 only
+# 19/40 lists survived to a full 20 mapped neighbors (min 16); 2x saturated
+# 40/40 at heat 0.0 / 0.5 / 1.0. Over-fetch is nearly free — affinity SQL cost
+# lives in the AFFINITY_PER_SOURCE_CAP-bounded candidate scans, not the final
+# limit — so a single pass at 2x then a hard cut to `limit`, with no refill loop.
+_LIBRARY_NEIGHBOR_OVERFETCH = 2
+
+
+@router.post("/library-artists/neighbors/batch", response_model=LibraryNeighborsBatchResponse)
+def get_library_neighbors_batch(
+    body: LibraryNeighborsBatchRequest,
+    db: sqlite3.Connection = Depends(get_db),
+) -> LibraryNeighborsBatchResponse:
+    """Batch affinity neighbors keyed by Backend catalog library-artist id.
+
+    For each requested library id: reverse-map it to a graph artist via
+    ``artist.wxyc_library_code_id`` (#358), rank affinity neighbors, translate
+    those neighbors back into library ids, drop any that are unmapped, and cut to
+    ``limit``. Every requested id appears in ``results``; unknown, unmapped, and
+    ambiguous (homonym) ids map to an empty list. Duplicate ids collapse.
+
+    Read-only over the precomputed affinity edges plus the mapping; called
+    nightly server-to-server by the Backend-Service concerts enrichment
+    (WXYC/Backend-Service#1626). Public and unauthenticated, consistent with the
+    rest of the graph API — worst case is a bounded local SQLite read.
+
+    ``weight`` is the raw affinity composite and is list-relative (type-max
+    normalized per source artist), so consumers must rank and cap within a single
+    list, not across lists (guidance on WXYC/wxyc-ios-64#493).
+    """
+    _init_metrics_flag(db)
+
+    # Dedupe, preserving first-seen order; empty input short-circuits to {}.
+    requested = list(dict.fromkeys(body.library_artist_ids))
+    if not requested:
+        return LibraryNeighborsBatchResponse(results={})
+
+    # Reverse lookup: library code id -> graph artist id. Injective (each code
+    # belongs to at most one graph artist, since canonical_name is UNIQUE),
+    # backed by the partial index idx_artist_library_code. A pre-#358 served DB
+    # has no such column yet — degrade to "nothing mapped" (empty lists) rather
+    # than 500, per the endpoint's deploy-order contract.
+    code_placeholders = ",".join("?" * len(requested))
+    try:
+        code_rows = db.execute(
+            f"SELECT id, wxyc_library_code_id FROM artist "  # noqa: S608
+            f"WHERE wxyc_library_code_id IN ({code_placeholders})",
+            requested,
+        ).fetchall()
+        code_to_graph: dict[int, int] = {r["wxyc_library_code_id"]: r["id"] for r in code_rows}
+    except sqlite3.OperationalError:
+        code_to_graph = {}
+
+    graph_ids = [code_to_graph[c] for c in requested if c in code_to_graph]
+    per_source = _neighbors_affinity_batch(
+        db, graph_ids, body.limit * _LIBRARY_NEIGHBOR_OVERFETCH, heat=body.heat
+    )
+
+    # Forward translation: neighbor graph id -> library code id, across every
+    # neighbor surfaced for every source. Neighbors absent here are unmapped and
+    # drop during the per-source cut below. The mapping filter stays in Python,
+    # NOT in the shared affinity SQL, which also serves the public explorer.
+    neighbor_gids = {entry.artist.id for entries in per_source.values() for entry in entries}
+    graph_to_code: dict[int, int] = {}
+    if neighbor_gids:
+        nbr_placeholders = ",".join("?" * len(neighbor_gids))
+        nbr_rows = db.execute(
+            f"SELECT id, wxyc_library_code_id FROM artist "  # noqa: S608
+            f"WHERE id IN ({nbr_placeholders}) AND wxyc_library_code_id IS NOT NULL",
+            list(neighbor_gids),
+        ).fetchall()
+        graph_to_code = {r["id"]: r["wxyc_library_code_id"] for r in nbr_rows}
+
+    results: dict[str, list[SimilarArtist]] = {}
+    for code_id in requested:
+        gid = code_to_graph.get(code_id)
+        neighbors: list[SimilarArtist] = []
+        if gid is not None:
+            for entry in per_source.get(gid, []):
+                mapped = graph_to_code.get(entry.artist.id)
+                if mapped is None:
+                    continue  # unmapped neighbor dropped, then over-fetch refills
+                neighbors.append(SimilarArtist(artist_id=mapped, weight=entry.weight))
+                if len(neighbors) >= body.limit:
+                    break
+        results[str(code_id)] = neighbors
+
+    return LibraryNeighborsBatchResponse(results=results)
+
+
 @router.get("/artists/{artist_id}/explain/{target_id}", response_model=ExplainResponse)
 def explain_relationship(
     artist_id: int,
@@ -521,6 +632,23 @@ def _build_reconciled_identity(row: sqlite3.Row) -> ReconciledIdentity | None:
     return ReconciledIdentity(**fields)
 
 
+def _fetch_library_code_id(db: sqlite3.Connection, artist_id: int) -> int | None:
+    """Read ``artist.wxyc_library_code_id`` defensively for the old-schema path.
+
+    The ``ArtistDetail`` fallback SELECT omits it (that branch handles lean
+    SQL-dump / pre-entity-store databases). The column lives on ``artist``, so it
+    is still readable there; a genuinely pre-#358 served DB lacks the column and
+    degrades to None rather than 500.
+    """
+    try:
+        row = db.execute(
+            "SELECT wxyc_library_code_id FROM artist WHERE id = ?", (artist_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row["wxyc_library_code_id"] if row is not None else None
+
+
 def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
     """Fetch full artist detail, joining entity table when available.
 
@@ -533,7 +661,7 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
             "  a.active_first_year, a.active_last_year, a.dj_count, "
             "  a.request_ratio, a.show_count, "
             "  a.entity_id, a.discogs_artist_id, a.musicbrainz_artist_id, "
-            "  a.reconciliation_status, "
+            "  a.reconciliation_status, a.wxyc_library_code_id, "
             "  e.wikidata_qid, "
             "  e.spotify_artist_id, e.apple_music_artist_id, e.bandcamp_id "
             "FROM artist a "
@@ -562,6 +690,7 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
             dj_count=row["dj_count"],
             request_ratio=row["request_ratio"],
             show_count=row["show_count"],
+            wxyc_library_code_id=_fetch_library_code_id(db, artist_id),
         )
 
     if row is None:
@@ -588,6 +717,7 @@ def _get_artist_detail(db: sqlite3.Connection, artist_id: int) -> ArtistDetail:
         apple_music_artist_id=row["apple_music_artist_id"],
         bandcamp_id=row["bandcamp_id"],
         reconciled_identity=reconciled_identity,
+        wxyc_library_code_id=row["wxyc_library_code_id"],
     )
 
 
