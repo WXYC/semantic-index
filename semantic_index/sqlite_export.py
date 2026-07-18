@@ -41,8 +41,11 @@ CREATE TABLE IF NOT EXISTS artist (
     dj_count INTEGER NOT NULL DEFAULT 0,
     request_ratio REAL NOT NULL DEFAULT 0.0,
     show_count INTEGER NOT NULL DEFAULT 0,
-    discogs_artist_id INTEGER
+    discogs_artist_id INTEGER,
+    wxyc_library_code_id INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS dj_transition (
     source_id INTEGER NOT NULL REFERENCES artist(id),

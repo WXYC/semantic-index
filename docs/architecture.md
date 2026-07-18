@@ -113,7 +113,11 @@ CREATE TABLE artist (
     betweenness REAL,              -- Betweenness centrality
     pagerank REAL,                 -- PageRank score
     request_ratio REAL NOT NULL DEFAULT 0.0,
-    show_count INTEGER NOT NULL DEFAULT 0
+    show_count INTEGER NOT NULL DEFAULT 0,
+    -- Backend library-artist id (wxyc_schema.artists.id). Populated by nightly
+    -- sync (PG mode) for unambiguous catalog names; NULL for raw/CTA-only and
+    -- homonym names. Backs the neighbors-by-library-id endpoint (WXYC/semantic-index#358).
+    wxyc_library_code_id INTEGER
 );
 
 CREATE TABLE dj_transition (

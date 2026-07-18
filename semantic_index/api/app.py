@@ -95,14 +95,37 @@ def create_app(
 
     @app.get("/health", include_in_schema=False)
     def health() -> JSONResponse:
-        """Health check — verifies the SQLite database is readable."""
+        """Health check — verifies the SQLite database is readable.
+
+        ``mapped_artist_count`` is the number of graph artists carrying a Backend
+        library-code id (WXYC/semantic-index#358). It is the integration-day
+        disambiguator for the neighbors-by-library-id consumer
+        (WXYC/Backend-Service#1626): all-empty responses with a healthy
+        ~22K here means "mapping present, endpoint fine"; 0 or ``null`` means the
+        mapping hasn't been rebuilt yet. Reported as ``null`` (not a 503) on a
+        pre-#358 served DB whose ``artist`` table lacks the column, so a stale
+        serving image degrades the field rather than the whole check.
+        """
         age = _graph_db_age_seconds()
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            count = conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
-            conn.close()
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
+                try:
+                    mapped = conn.execute(
+                        "SELECT COUNT(*) FROM artist WHERE wxyc_library_code_id IS NOT NULL"
+                    ).fetchone()[0]
+                except sqlite3.OperationalError:
+                    mapped = None  # pre-#358 DB: column not present yet
+            finally:
+                conn.close()
             return JSONResponse(
-                {"status": "healthy", "artist_count": count, "graph_db_age_seconds": age}
+                {
+                    "status": "healthy",
+                    "artist_count": count,
+                    "mapped_artist_count": mapped,
+                    "graph_db_age_seconds": age,
+                }
             )
         except Exception as exc:
             return JSONResponse(

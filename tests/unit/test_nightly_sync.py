@@ -354,8 +354,12 @@ def _stub_wxyc_etl():
         sys.modules.setdefault(name, stub)
 
 
-class TestNightlySyncDeduplication:
-    """Verify that nightly_sync calls deduplicate_by_qid after export and before facets."""
+class _NightlySyncHarness:
+    """Shared harness: run nightly_sync end-to-end with heavy dependencies mocked.
+
+    Not collected as tests (name doesn't start with ``Test``); concrete test
+    classes inherit the ``_run_nightly_sync`` orchestration driver from here.
+    """
 
     def _make_args(self, tmp_path: Path) -> argparse.Namespace:
         return argparse.Namespace(
@@ -366,13 +370,13 @@ class TestNightlySyncDeduplication:
             dry_run=True,
         )
 
-    def _set_up_mocks(self, mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls):
+    def _set_up_mocks(self, mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls, codes=None):
         """Configure common mocks for nightly_sync orchestration tests."""
         from semantic_index.models import DeduplicationReport
 
         mock_load.return_value = (
             {},  # genres
-            [],  # codes
+            codes if codes is not None else [],  # codes
             [],  # releases
             [MagicMock(artist_name="Autechre", canonical_name="Autechre")],
             {},  # show_to_dj
@@ -395,6 +399,7 @@ class TestNightlySyncDeduplication:
         mock_pdb = mock_pdb_cls.return_value
         mock_pdb.bulk_upsert_artists.return_value = {"Autechre": 1}
         mock_pdb.get_name_to_id_mapping.return_value = {"Autechre": 1}
+        mock_pdb.map_library_code_ids.return_value = 0
         mock_pdb.deduplicate_by_qid.return_value = DeduplicationReport(
             groups_found=1,
             entities_merged=1,
@@ -403,7 +408,7 @@ class TestNightlySyncDeduplication:
         )
         return mock_pdb
 
-    def _run_nightly_sync(self, tmp_path, extra_setup=None):
+    def _run_nightly_sync(self, tmp_path, extra_setup=None, codes=None):
         """Run nightly_sync with all heavy dependencies mocked out.
 
         Returns the mock PipelineDB instance for assertions.
@@ -426,7 +431,9 @@ class TestNightlySyncDeduplication:
             patch("semantic_index.facet_export.export_facet_tables") as mock_facets,
             patch("semantic_index.graph_metrics.compute_and_persist") as mock_metrics,
         ):
-            mock_pdb = self._set_up_mocks(mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls)
+            mock_pdb = self._set_up_mocks(
+                mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls, codes=codes
+            )
             mock_metrics.return_value = MagicMock(community_count=0, artists_scored=0)
 
             if extra_setup:
@@ -442,6 +449,10 @@ class TestNightlySyncDeduplication:
             nightly_sync(args)
 
         return mock_pdb
+
+
+class TestNightlySyncDeduplication(_NightlySyncHarness):
+    """Verify that nightly_sync calls deduplicate_by_qid after export and before facets."""
 
     def test_dedup_called_after_export_before_facets(self, tmp_path):
         mock_pdb = self._run_nightly_sync(tmp_path)
@@ -476,6 +487,56 @@ class TestNightlySyncDeduplication:
         assert export_idx < dedup_idx < facet_idx, (
             f"Expected export < dedup < facets, got: {call_order}"
         )
+
+
+# ===========================================================================
+# Library-code mapping post-pass (WXYC/semantic-index#358)
+# ===========================================================================
+
+
+class TestNightlySyncLibraryCodeMapping(_NightlySyncHarness):
+    """nightly_sync must build the unambiguous name→code map from the loaded
+    catalog and apply it to artist.wxyc_library_code_id, after entity dedup
+    (so canonical names are stable) and while the pipeline DB is still open."""
+
+    def test_maps_library_code_ids_from_catalog(self, tmp_path):
+        from semantic_index.models import LibraryCode
+
+        # Two bands share the name "Lake" (homonym) → excluded; "Autechre" is
+        # unambiguous → mapped. Proves the real build_library_code_map runs on
+        # the loaded codes and its result is forwarded to the DB writer.
+        codes = [
+            LibraryCode(id=4, genre_id=0, presentation_name="Lake"),
+            LibraryCode(id=33, genre_id=0, presentation_name="Lake"),
+            LibraryCode(id=1, genre_id=0, presentation_name="Autechre"),
+        ]
+        mock_pdb = self._run_nightly_sync(tmp_path, codes=codes)
+        mock_pdb.map_library_code_ids.assert_called_once_with({"Autechre": 1})
+
+    def test_mapping_runs_after_dedup_before_close(self, tmp_path):
+        from semantic_index.models import DeduplicationReport
+
+        call_order = []
+
+        def setup(mock_pdb, mock_export, mock_facets):
+            mock_pdb.deduplicate_by_qid.side_effect = lambda: (
+                call_order.append("deduplicate_by_qid")
+                or DeduplicationReport(
+                    groups_found=0, entities_merged=0, artists_reassigned=0, edges_rekeyed=0
+                )
+            )
+            mock_pdb.map_library_code_ids.side_effect = lambda _m: (
+                call_order.append("map_library_code_ids") or 0
+            )
+            mock_pdb.close.side_effect = lambda: call_order.append("close")
+
+        self._run_nightly_sync(tmp_path, extra_setup=setup)
+
+        assert "map_library_code_ids" in call_order
+        dedup_idx = call_order.index("deduplicate_by_qid")
+        map_idx = call_order.index("map_library_code_ids")
+        close_idx = call_order.index("close")
+        assert dedup_idx < map_idx < close_idx, f"expected dedup < map < close, got {call_order}"
 
 
 # ===========================================================================

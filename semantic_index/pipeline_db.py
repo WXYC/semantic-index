@@ -352,6 +352,59 @@ class PipelineDB:
         rows = self._conn.execute("SELECT id, canonical_name FROM artist").fetchall()
         return {row[1]: row[0] for row in rows}
 
+    def map_library_code_ids(self, name_to_code_id: dict[str, int]) -> int:
+        """Set ``artist.wxyc_library_code_id`` to exactly the given name→code map.
+
+        Recomputes the column from scratch each call (like ``dj_transition`` — it
+        is *derived*, not accumulated): every artist is first reset to NULL, then
+        each ``canonical_name`` present in the map is matched **exactly and
+        case-sensitively** and set to its code id. Clearing first is load-bearing
+        under the incremental nightly sync — the working DB is copied forward from
+        production, so a name that was mapped last night but is absent tonight
+        (e.g. it became a homonym) must drop to NULL rather than retain a stale id.
+
+        The caller must pass only unambiguous names (see
+        :func:`semantic_index.nightly_sync.build_library_code_map`). Because each
+        code id appears under exactly one name and ``canonical_name`` is UNIQUE,
+        the resulting mapping is injective — no two artists receive the same id.
+
+        Names absent from the ``artist`` table are skipped (a catalog artist WXYC
+        has never played has no graph node). Implemented as a single
+        ``UPDATE ... FROM`` over a temp table so the join runs in one SQL pass
+        rather than a Python loop over the hundreds of thousands of catalog names.
+
+        Returns the number of artist rows left mapped (non-NULL) after the pass —
+        the same figure the coverage gate and ``/health`` report.
+        """
+        self._conn.execute(
+            "UPDATE artist SET wxyc_library_code_id = NULL WHERE wxyc_library_code_id IS NOT NULL"
+        )
+        if name_to_code_id:
+            self._conn.execute("DROP TABLE IF EXISTS _library_code_map")
+            self._conn.execute(
+                "CREATE TEMP TABLE _library_code_map "
+                "(canonical_name TEXT PRIMARY KEY, code_id INTEGER NOT NULL)"
+            )
+            try:
+                self._conn.executemany(
+                    "INSERT INTO _library_code_map (canonical_name, code_id) VALUES (?, ?)",
+                    name_to_code_id.items(),
+                )
+                self._conn.execute(
+                    "UPDATE artist "
+                    "SET wxyc_library_code_id = _library_code_map.code_id, "
+                    "    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                    "FROM _library_code_map "
+                    "WHERE artist.canonical_name = _library_code_map.canonical_name"
+                )
+            finally:
+                self._conn.execute("DROP TABLE IF EXISTS _library_code_map")
+        mapped = self._conn.execute(
+            "SELECT COUNT(*) FROM artist WHERE wxyc_library_code_id IS NOT NULL"
+        ).fetchone()[0]
+        self._conn.commit()
+        return int(mapped)
+
     # ------------------------------------------------------------------
     # Artist Stats
     # ------------------------------------------------------------------

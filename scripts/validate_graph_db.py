@@ -57,6 +57,17 @@ ENRICHMENT_TABLES: tuple[str, ...] = (
 # run), strict enough to catch a build that started empty (count → 0).
 DEFAULT_COLLAPSE_FRACTION = 0.1
 
+# Virtual "table" name for the count of graph artists carrying a Backend
+# library-code id (``artist.wxyc_library_code_id IS NOT NULL``). Not a real
+# table — it flows through the same ``--emit-counts`` / seed ratchet machinery
+# as the enrichment tables so a code change that silently zeroes the mapping is
+# caught with identical fail-closed semantics (WXYC/semantic-index#358).
+MAPPED_ARTISTS_KEY = "artist_mapped_library"
+
+# Default key set for ``count_rows`` / ``--emit-counts``: enrichment tables plus
+# the mapping virtual counter.
+_DEFAULT_COUNT_KEYS: tuple[str, ...] = (*ENRICHMENT_TABLES, MAPPED_ARTISTS_KEY)
+
 
 class ValidationError(Exception):
     """Raised when a built graph DB fails a pre-swap validation check."""
@@ -85,20 +96,48 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def count_rows(
-    db_path: str | Path, tables: tuple[str, ...] = ENRICHMENT_TABLES
-) -> dict[str, int]:
-    """Return ``{table: row_count}`` for each named table that exists.
+def _count_mapped_artists(conn: sqlite3.Connection) -> int | None:
+    """Count graph artists carrying a Backend library-code id.
 
-    Tables absent from the database are omitted from the result (rather than
+    Returns ``None`` (not ``0``) when the ``artist`` table or its
+    ``wxyc_library_code_id`` column is absent — a pre-WXYC/semantic-index#358
+    database — so a caller can distinguish "mapping feature not present in this
+    build" from "present but zero mapped".
+    """
+    if not _table_exists(conn, "artist"):
+        return None
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(artist)")}
+    if "wxyc_library_code_id" not in columns:
+        return None
+    return conn.execute(
+        "SELECT COUNT(*) FROM artist WHERE wxyc_library_code_id IS NOT NULL"
+    ).fetchone()[0]
+
+
+def count_rows(
+    db_path: str | Path, tables: tuple[str, ...] = _DEFAULT_COUNT_KEYS
+) -> dict[str, int]:
+    """Return ``{name: count}`` for each named table (or virtual counter) present.
+
+    Real tables absent from the database are omitted from the result (rather than
     reported as ``0``) so a caller can distinguish "table missing" from "table
-    present but empty" when it needs to. The rebuild conductor calls this on the
-    *seed* to capture the baseline it later validates the build against.
+    present but empty". The rebuild conductor calls this on the *seed* to capture
+    the baseline it later validates the build against.
+
+    The virtual counter :data:`MAPPED_ARTISTS_KEY` is handled specially: it
+    counts non-NULL ``artist.wxyc_library_code_id`` values, is reported as ``0``
+    when the column exists but is all-NULL (bootstrap night), and is omitted only
+    when the column itself is absent.
     """
     counts: dict[str, int] = {}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         for table in tables:
+            if table == MAPPED_ARTISTS_KEY:
+                n = _count_mapped_artists(conn)
+                if n is not None:
+                    counts[table] = n
+                continue
             if _table_exists(conn, table):
                 counts[table] = conn.execute(
                     f"SELECT COUNT(*) FROM {table}"  # noqa: S608 — table name guarded by _table_exists above
@@ -114,6 +153,7 @@ def validate(
     seed_counts: dict[str, int] | None = None,
     min_artists: int = 1,
     collapse_fraction: float = DEFAULT_COLLAPSE_FRACTION,
+    min_mapped_artists: int = 0,
 ) -> None:
     """Validate a built graph DB. Raise :class:`ValidationError` on any failure.
 
@@ -124,16 +164,26 @@ def validate(
     2. The ``artist`` table exists and has at least ``min_artists`` rows — catches
        an empty or half-written graph. The conductor passes the live artist count
        (scaled down) so a graph that shrank dramatically is rejected.
-    3. For each enrichment table that was **non-empty in the seed**, the build
-       retains at least ``collapse_fraction * seed_count`` rows (and > 0) — the
-       core enrichment-preservation guard (acceptance criterion #2 of #347).
+    3. If ``min_mapped_artists > 0``, at least that many artists carry a Backend
+       library-code id (``wxyc_library_code_id IS NOT NULL``) — the absolute
+       floor that closes the bootstrap hole for the graph↔library mapping
+       (WXYC/semantic-index#358): the first post-deploy build has an all-NULL
+       seed, so the seed ratchet is inactive, yet that is exactly the night fresh
+       mapping code is most likely broken. A ``None`` mapping column counts as 0.
+    4. For each enrichment table (and the ``artist_mapped_library`` virtual
+       counter) that was **non-empty in the seed**, the build retains at least
+       ``collapse_fraction * seed_count`` rows (and > 0) — the core
+       preservation guard (acceptance criterion #2 of #347). The mapping counter
+       joins this ratchet once past the bootstrap night.
 
     Args:
         db_path: Path to the candidate (just-built) graph database.
-        seed_counts: Enrichment row counts captured from the seed DB (see
-            :func:`count_rows`). When ``None``, only checks 1–2 run.
+        seed_counts: Row counts captured from the seed DB (see
+            :func:`count_rows`). When ``None``, only checks 1–3 run.
         min_artists: Minimum acceptable ``artist`` row count.
         collapse_fraction: Per-table floor as a fraction of the seed count.
+        min_mapped_artists: Absolute floor on library-code-mapped artists. 0
+            (default) disables the check.
     """
     path = Path(db_path)
     if not _is_sqlite(path):
@@ -147,6 +197,7 @@ def validate(
             if not _table_exists(conn, "artist"):
                 raise ValidationError("missing `artist` table")
             n_artists = conn.execute("SELECT COUNT(*) FROM artist").fetchone()[0]
+            n_mapped = _count_mapped_artists(conn)
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
@@ -161,6 +212,16 @@ def validate(
             f"artist count {n_artists} is below the required minimum {min_artists}"
         )
     logger.info("artist count: %d (minimum %d)", n_artists, min_artists)
+
+    if min_mapped_artists > 0:
+        actual_mapped = n_mapped or 0
+        if actual_mapped < min_mapped_artists:
+            raise ValidationError(
+                f"mapped artist count {actual_mapped} is below the required minimum "
+                f"{min_mapped_artists} (library-code mapping missing or collapsed; "
+                "see WXYC/semantic-index#358)"
+            )
+        logger.info("mapped artist count: %d (minimum %d)", actual_mapped, min_mapped_artists)
 
     if seed_counts:
         required = {t: n for t, n in seed_counts.items() if n > 0}
@@ -218,6 +279,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--collapse-fraction", type=float, default=DEFAULT_COLLAPSE_FRACTION
     )
+    parser.add_argument(
+        "--min-mapped-artists",
+        type=int,
+        default=10000,
+        help=(
+            "Absolute floor on artists carrying a Backend library-code id "
+            "(wxyc_library_code_id). Default 10000 — conservative against the "
+            "~22K production estimate — closes the bootstrap-night hole in the "
+            "seed ratchet (WXYC/semantic-index#358). Pass 0 to disable for "
+            "non-production / SQL-dump builds that don't populate the mapping."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -236,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             seed_counts=seed_counts,
             min_artists=args.min_artists,
             collapse_fraction=args.collapse_fraction,
+            min_mapped_artists=args.min_mapped_artists,
         )
     except ValidationError as exc:
         logger.error("VALIDATION FAILED: %s", exc)

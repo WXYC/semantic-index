@@ -98,6 +98,10 @@ The process of mapping the free-text artist names DJs typed into the flowsheet (
 
 The single authoritative display name chosen for an artist, under which all of that artist's name variants are merged. Each canonical artist is one node in the graph (one row in the `artist` table).
 
+### Homonym
+
+Two or more *distinct* artists that share a name — e.g. several unrelated bands all filed as "Lake" in the [library catalog](#library-catalog) under different library codes. Because the resolver keys artists by [canonical name](#canonical-name), its first-wins name index conflates homonyms into a single graph node whose neighborhood mixes all of them. No single library code is correct for such a node, so the graph↔Backend-library-id mapping (see [docs/pipeline.md](pipeline.md)) deliberately leaves ambiguous names **unmapped** rather than guessing. Splitting conflated homonym nodes is a separate, open track (WXYC/semantic-index#360).
+
 ### FK chain
 
 Foreign-key chain — the most reliable resolution tier. When a DJ picked a release from the catalog while logging, the flowsheet entry carries a database link to that release, and the pipeline follows it: flowsheet entry → library release → library code → artist presentation name. No string matching involved, so it can't be fooled by spelling.
