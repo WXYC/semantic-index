@@ -14,7 +14,6 @@ never pass by accidentally conflating the two keyspaces.
 from __future__ import annotations
 
 import sqlite3
-import tempfile
 
 import pytest
 import pytest_asyncio
@@ -22,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 
 from semantic_index.api.app import create_app
 from semantic_index.models import PmiEdge
+from semantic_index.pipeline_db import PipelineDB
 from semantic_index.sqlite_export import export_sqlite
 from tests.conftest import make_artist_stats
 
@@ -44,13 +44,12 @@ _CODE_MAP = {
 # Stereolab, Broadcast: intentionally absent from _CODE_MAP (unmapped / NULL).
 
 
-def _build_library_fixture_db() -> tuple[str, dict[str, int]]:
+def _build_library_fixture_db(path: str) -> tuple[str, dict[str, int]]:
     """Build a fixture DB and map a subset of artists to library code ids.
 
     Returns ``(db_path, name_to_graph_id)``. Names absent from ``_CODE_MAP`` are
     left NULL, modeling homonym/raw names #358 excludes from the mapping.
     """
-    path = tempfile.mktemp(suffix=".db")
     names = [
         "Autechre",
         "Stereolab",
@@ -90,8 +89,9 @@ def _build_library_fixture_db() -> tuple[str, dict[str, int]]:
 
 
 @pytest.fixture(scope="module")
-def _fixture() -> tuple[str, dict[str, int]]:
-    return _build_library_fixture_db()
+def _fixture(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, dict[str, int]]:
+    path = str(tmp_path_factory.mktemp("library_neighbors") / "graph.db")
+    return _build_library_fixture_db(path)
 
 
 @pytest.fixture(scope="module")
@@ -272,6 +272,21 @@ class TestSimilarArtistContract:
         assert set(SimilarArtist.model_fields.keys()) == {"artist_id", "weight"}
 
 
+def _build_entity_primary_path_db(path: str) -> int:
+    """Build a pipeline-DB fixture whose entity table makes ``_get_artist_detail``
+    take its PRIMARY (entity-JOIN) branch — the path production's served DB uses —
+    with ``wxyc_library_code_id`` set, so the primary read is covered. The SQL-dump
+    fixtures above have no entity table and always fall back to
+    ``_fetch_library_code_id`` instead. Returns Autechre's graph id.
+    """
+    db = PipelineDB(path)
+    db.initialize()
+    db.upsert_artist("Autechre", genre="Electronic", wxyc_library_code_id=1000)
+    aid = db._conn.execute("SELECT id FROM artist WHERE canonical_name = 'Autechre'").fetchone()[0]
+    db.close()
+    return int(aid)
+
+
 class TestArtistDetailLibraryCodeId:
     """ArtistDetail exposes wxyc_library_code_id for browser spot-checks."""
 
@@ -291,6 +306,42 @@ class TestArtistDetailLibraryCodeId:
         assert resp.status_code == 200
         assert resp.json()["wxyc_library_code_id"] is None
 
+    @pytest.mark.asyncio
+    async def test_primary_path_reports_code_id(self, tmp_path) -> None:
+        """The entity-JOIN branch reads ``a.wxyc_library_code_id`` directly — the
+        production served DB has an entity table, so this, not the fallback the other
+        two tests hit, is the live read path.
+        """
+        path = str(tmp_path / "entity_primary.db")
+        aid = _build_entity_primary_path_db(path)
+        app = create_app(path)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{aid}")
+        assert resp.status_code == 200
+        assert resp.json()["wxyc_library_code_id"] == 1000
+
+
+def _build_pre_358_db(path: str) -> int:
+    """Export a fixture DB, then drop the #358 column and its index to model a served
+    DB that predates the mapping. Returns Autechre's graph id.
+    """
+    export_sqlite(
+        path,
+        artist_stats={"Autechre": make_artist_stats("Autechre")},
+        pmi_edges=[],
+        xref_edges=[],
+        min_count=1,
+    )
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    aid = conn.execute("SELECT id FROM artist WHERE canonical_name = 'Autechre'").fetchone()["id"]
+    conn.execute("DROP INDEX IF EXISTS idx_artist_library_code")
+    conn.execute("ALTER TABLE artist DROP COLUMN wxyc_library_code_id")
+    conn.commit()
+    conn.close()
+    return int(aid)
+
 
 class TestDeployOrderDegradation:
     """A pre-#358 served DB has no wxyc_library_code_id column yet."""
@@ -298,18 +349,7 @@ class TestDeployOrderDegradation:
     @pytest.mark.asyncio
     async def test_missing_column_returns_empty_not_500(self, tmp_path) -> None:
         path = str(tmp_path / "old_schema.db")
-        export_sqlite(
-            path,
-            artist_stats={"Autechre": make_artist_stats("Autechre")},
-            pmi_edges=[],
-            xref_edges=[],
-            min_count=1,
-        )
-        conn = sqlite3.connect(path)
-        conn.execute("DROP INDEX IF EXISTS idx_artist_library_code")
-        conn.execute("ALTER TABLE artist DROP COLUMN wxyc_library_code_id")
-        conn.commit()
-        conn.close()
+        _build_pre_358_db(path)
 
         app = create_app(path)
         transport = ASGITransport(app=app)
@@ -317,3 +357,18 @@ class TestDeployOrderDegradation:
             resp = await ac.post(ENDPOINT, json={"library_artist_ids": [1000], "limit": 5})
         assert resp.status_code == 200
         assert resp.json()["results"] == {"1000": []}
+
+    @pytest.mark.asyncio
+    async def test_artist_detail_survives_missing_column(self, tmp_path) -> None:
+        """GET /graph/artists/{id} degrades wxyc_library_code_id to null rather than
+        500 when the served DB predates #358 — the _fetch_library_code_id guard.
+        """
+        path = str(tmp_path / "old_schema.db")
+        aid = _build_pre_358_db(path)
+
+        app = create_app(path)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(f"/graph/artists/{aid}")
+        assert resp.status_code == 200
+        assert resp.json()["wxyc_library_code_id"] is None
