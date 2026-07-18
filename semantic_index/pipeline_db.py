@@ -156,7 +156,7 @@ _ARTIST_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_artist_entity ON artist(entity_id);
 CREATE INDEX IF NOT EXISTS idx_artist_discogs ON artist(discogs_artist_id) WHERE discogs_artist_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_artist_musicbrainz ON artist(musicbrainz_artist_id) WHERE musicbrainz_artist_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_artist_reconciliation ON artist(reconciliation_status);
 """
 
@@ -209,6 +209,7 @@ class PipelineDB:
         self._migrate_artist_table()
         if self._has_table("artist"):
             self._conn.executescript(_ARTIST_INDEXES)
+            self._migrate_artist_library_code_unique()
         self._conn.commit()
         logger.info("Pipeline DB initialized: %s", self._db_path)
 
@@ -285,6 +286,47 @@ class PipelineDB:
             self._conn.execute("""UPDATE artist
                    SET created_at = COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                        updated_at = COALESCE(updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))""")
+
+    def _migrate_artist_library_code_unique(self) -> None:
+        """Upgrade a legacy non-UNIQUE ``idx_artist_library_code`` to UNIQUE.
+
+        ``CREATE UNIQUE INDEX IF NOT EXISTS`` is a no-op when an index of that
+        name already exists (whatever its uniqueness), so flipping the DDL in
+        ``_ARTIST_INDEXES`` alone never reaches production: the nightly sync copies
+        the served DB forward with ``shutil.copy2``, and that file has carried the
+        non-unique index since the mapping shipped. Without an explicit
+        drop-and-recreate the served DB would never gain the uniqueness guarantee
+        the neighbors-by-library-id endpoint relies on (WXYC/semantic-index#365) —
+        mirroring :meth:`_migrate_entity_unique_qid`, which exists for the same
+        "``IF NOT EXISTS`` can't change a constraint" reason.
+
+        Runs after ``_ARTIST_INDEXES``: on a fresh DB the index is already UNIQUE
+        and this is a no-op; on a copied-forward DB it is non-unique and gets
+        rebuilt. The recreate raises ``sqlite3.IntegrityError`` if the live DB
+        already holds a duplicate non-null code, surfacing a latent writer bug
+        loudly rather than baking a silent mis-mapping into the served DB
+        (production was verified dup-free — ``/health`` mapped_artist_count=0 —
+        before this shipped).
+        """
+        if not self._has_table("artist"):
+            return
+        existing = next(
+            (
+                idx
+                for idx in self._conn.execute("PRAGMA index_list(artist)")
+                if idx[1] == "idx_artist_library_code"
+            ),
+            None,
+        )
+        if existing is None or bool(existing[2]):
+            return  # absent (fresh DB, just created UNIQUE) or already UNIQUE
+        logger.info("Upgrading idx_artist_library_code to a UNIQUE partial index (#365)")
+        self._conn.execute("DROP INDEX idx_artist_library_code")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX idx_artist_library_code "
+            "ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL"
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Artist CRUD

@@ -16,6 +16,10 @@ conflates them into a single graph node so no code id is correct. See the ticket
 and WXYC/semantic-index#360 for the splitting track.
 """
 
+import sqlite3
+
+import pytest
+
 from semantic_index.models import LibraryCode
 from semantic_index.nightly_sync import build_library_code_map
 from semantic_index.pipeline_db import PipelineDB
@@ -37,6 +41,28 @@ def _make_db(tmp_path, names: list[str]) -> PipelineDB:
     for name in names:
         db.upsert_artist(name)
     return db
+
+
+def _library_code_index_is_unique(conn: sqlite3.Connection) -> bool:
+    """Whether ``idx_artist_library_code`` exists and is a UNIQUE index."""
+    return any(
+        row[1] == "idx_artist_library_code" and bool(row[2])
+        for row in conn.execute("PRAGMA index_list(artist)")
+    )
+
+
+def _downgrade_to_legacy_nonunique_index(db: PipelineDB) -> None:
+    """Replace the UNIQUE index with the pre-#365 non-unique one, in place.
+
+    Mimics a production DB that shipped before the uniqueness guarantee and is
+    copied forward untouched by the nightly sync's ``shutil.copy2``.
+    """
+    db._conn.execute("DROP INDEX idx_artist_library_code")
+    db._conn.execute(
+        "CREATE INDEX idx_artist_library_code "
+        "ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL"
+    )
+    db._conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +175,83 @@ class TestMapLibraryCodeIds:
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_artist_library_code'"
         ).fetchone()
         assert idx is not None
+
+
+# ---------------------------------------------------------------------------
+# Uniqueness enforcement — the reverse lookup's injectivity is schema-backed
+# ---------------------------------------------------------------------------
+
+
+class TestLibraryCodeUniqueness:
+    """The partial index is UNIQUE, so injectivity is enforced, not assumed
+    (WXYC/semantic-index#365).
+
+    ``map_library_code_ids`` cannot itself produce a duplicate — it joins on the
+    UNIQUE ``canonical_name`` — so a regression would have to arrive through some
+    *other* writer. Without a UNIQUE constraint that duplicate would surface as a
+    silent, nondeterministic mis-mapping in the neighbors-by-library-id endpoint
+    (WXYC/semantic-index#354), whose reverse lookup collapses rows into a dict
+    keyed by code id with no ``ORDER BY``. The UNIQUE index turns it into a loud
+    ``IntegrityError`` at write time instead.
+    """
+
+    def test_duplicate_non_null_code_rejected(self, tmp_path):
+        db = _make_db(tmp_path, ["Autechre", "Stereolab"])
+        db._conn.execute(
+            "UPDATE artist SET wxyc_library_code_id = 10 WHERE canonical_name = 'Autechre'"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            db._conn.execute(
+                "UPDATE artist SET wxyc_library_code_id = 10 WHERE canonical_name = 'Stereolab'"
+            )
+
+    def test_writer_surfaces_duplicate_assignment(self, tmp_path):
+        # The production writer propagates the violation rather than swallowing
+        # it: ``map_library_code_ids`` only wraps its temp table in try/finally
+        # (to DROP it), so the UNIQUE-index IntegrityError raised by the
+        # ``UPDATE ... FROM`` bubbles up and fails the rebuild loudly. Nothing at
+        # the ``dict[str, int]`` boundary stops two names sharing a code, even
+        # though ``build_library_code_map`` never emits one.
+        db = _make_db(tmp_path, ["Autechre", "Stereolab"])
+        with pytest.raises(sqlite3.IntegrityError):
+            db.map_library_code_ids({"Autechre": 10, "Stereolab": 10})
+
+    def test_multiple_null_codes_coexist(self, tmp_path):
+        # The partial ``WHERE ... IS NOT NULL`` clause leaves unmapped artists
+        # (the common case — most nodes are NULL, and every homonym stays NULL)
+        # entirely unconstrained. Only non-null codes must be distinct.
+        db = _make_db(tmp_path, ["Lake", "Autechre", "Stereolab"])
+        mapped = db.map_library_code_ids({"Autechre": 1})
+        assert mapped == 1
+        assert _artist_map(db) == {"Lake": None, "Autechre": 1, "Stereolab": None}
+
+    def test_initialize_upgrades_legacy_nonunique_index(self, tmp_path):
+        # ``CREATE UNIQUE INDEX IF NOT EXISTS`` is a no-op over an existing
+        # same-named index, so flipping the DDL alone never reaches the served
+        # DB: nightly sync copies the production file forward (``shutil.copy2``),
+        # and that file has carried the non-unique index since the mapping
+        # shipped. ``initialize()`` must actively drop-and-recreate it, or
+        # production stays unprotected while the fresh-DB tests above pass.
+        db = _make_db(tmp_path, ["Autechre", "Stereolab"])
+        path = db._db_path
+        _downgrade_to_legacy_nonunique_index(db)
+        assert not _library_code_index_is_unique(db._conn)  # pre-#365 state
+        db.close()
+
+        # Re-open + initialize, exactly as the nightly sync does on the
+        # copied-forward working DB.
+        migrated = PipelineDB(path)
+        migrated.initialize()
+        assert _library_code_index_is_unique(migrated._conn)
+
+        # The constraint is live end-to-end: a duplicate non-null code is rejected.
+        migrated._conn.execute(
+            "UPDATE artist SET wxyc_library_code_id = 10 WHERE canonical_name = 'Autechre'"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            migrated._conn.execute(
+                "UPDATE artist SET wxyc_library_code_id = 10 WHERE canonical_name = 'Stereolab'"
+            )
 
 
 # ---------------------------------------------------------------------------
