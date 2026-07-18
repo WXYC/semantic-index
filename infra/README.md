@@ -14,7 +14,7 @@ See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo
 | `deploy.sh` | `aws cloudformation deploy` wrapper; reads `build-job.conf`. |
 | `build-job.conf.example` | Template for the BS-VPC IDs (`build-job.conf` is gitignored). |
 | `scripts/run_build_job.py` | Container entrypoint: S3 seed → `nightly_sync` → S3 build. |
-| `scripts/validate_graph_db.py` | Pre-swap validation gate (header + artist + enrichment-preservation). |
+| `scripts/validate_graph_db.py` | Pre-swap validation gate (header + artist-count + library-code mapping floor + enrichment-preservation). |
 | `scripts/ec2-build-conductor.sh` | Nightly driver on the EC2 host (snapshot → run-task → validate → swap). |
 | `deploy/semantic-index-build.{service,timer}` | systemd units that run the conductor. |
 
@@ -88,7 +88,7 @@ The conductor runs on the EC2 host under the `wxyc-ec2-backend` instance profile
      --launch-type FARGATE \
      --network-configuration "awsvpcConfiguration={subnets=[<SUBNET>],securityGroups=[<BUILD_SG>],assignPublicIp=ENABLED}"
    ```
-   Download `s3://wxyc-semantic-index-build/build/wxyc_artist_graph.db` and run `validate_graph_db.py` — **do not swap yet**.
+   Download `s3://wxyc-semantic-index-build/build/wxyc_artist_graph.db` and run `validate_graph_db.py` — **do not swap yet**. The first mapping-capable build must clear the `--min-mapped-artists` floor (default 10000; expect ~22K); a build from an image that predates WXYC/semantic-index#358 reports 0 mapped and fail-closes by design, so verify the builder image carries the mapping code before cutover. Confirm post-swap with `GET /health` → `mapped_artist_count`.
 2. Install the conductor + timer on EC2 (see `deploy/`), let it run the full round-trip for ≥2 nights; confirm prod mtime advances and enrichment persists.
 3. Set `SYNC_ENABLED=false` in `.env.semantic-index` and **recreate** the container (`docker restart` does not re-read env).
 4. Over ≥2 further nights confirm mtime keeps advancing and canary #50 stops firing on the 09:00 window.

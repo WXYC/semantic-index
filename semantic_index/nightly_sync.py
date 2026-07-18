@@ -24,9 +24,14 @@ import shutil
 import sqlite3
 import sys
 import time
+from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from wxyc_etl.logger import init_logger
+
+if TYPE_CHECKING:
+    from semantic_index.models import LibraryCode
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,40 @@ _TABLES_TO_CLEAR = ("dj_transition", "cross_reference")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def build_library_code_map(codes: list[LibraryCode]) -> dict[str, int]:
+    """Map each *unambiguous* catalog presentation name to its library code id.
+
+    The result feeds :meth:`PipelineDB.map_library_code_ids`, which sets
+    ``artist.wxyc_library_code_id`` for graph artists whose ``canonical_name``
+    matches a key exactly. Together they populate the graph-artist ↔ Backend
+    library-artist-id mapping the neighbors-by-library-id endpoint needs
+    (WXYC/semantic-index#354, On Tour R3b).
+
+    **Ambiguity exclusion.** A presentation name borne by ≥2 distinct catalog
+    codes is omitted entirely, so its graph node stays unmapped. Such names are
+    usually *distinct artists sharing a name* — homonyms, e.g. several bands
+    filed as "Lake" (LA 4 / LA 33 / LA 168) — which the resolver's first-wins
+    name index already conflates into a single graph node. No single code id is
+    correct for that node in either direction, so refusing to map is the honest
+    behavior; it also keeps the mapping injective (each code id is claimed by at
+    most one graph artist). Splitting the conflated nodes is a separate track
+    (WXYC/semantic-index#360); do not "fix" this into a pick-one rule.
+
+    **Verbatim names.** Presentation names are used with no case/whitespace
+    folding: ``artist_resolver`` stores them unchanged as ``canonical_name`` for
+    catalog-resolved artists, so exact equality reproduces the resolver's
+    collapse and a case-variant graph node (a Discogs-sourced "BOLA" beside
+    catalog "Bola") can never claim the catalog code.
+
+    Note for WXYC/semantic-index#345 (streaming ``load_catalog``): this reads
+    ``codes`` fully in memory. If that list becomes a stream, fold this join
+    into the streaming pass (or materialize codes SQL-side) rather than
+    re-materializing the whole catalog here.
+    """
+    name_counts: Counter[str] = Counter(c.presentation_name for c in codes)
+    return {c.presentation_name: c.id for c in codes if name_counts[c.presentation_name] == 1}
 
 
 def _log_memory(phase: str) -> None:
@@ -398,7 +437,24 @@ def nightly_sync(args: argparse.Namespace) -> None:
             )
         _log_memory("after dedup")
 
-        # --- Step 7c: Prune preserved enrichment edges ---
+        # --- Step 7c: Map graph artists to Backend library code ids ---
+        # Name-equality post-pass: catalog-resolved canonical names are verbatim
+        # LIBRARY_CODE presentation names, so an exact-name join reproduces the
+        # resolver's collapse without plumbing the code id through ResolvedEntry.
+        # Runs after dedup (canonical names are stable) and while pipeline_db is
+        # still open. Unambiguous names only — homonyms stay NULL. This is the
+        # graph↔library mapping the neighbors-by-library-id endpoint needs
+        # (WXYC/semantic-index#354, populated per WXYC/semantic-index#358).
+        library_code_map = build_library_code_map(codes)
+        mapped = pipeline_db.map_library_code_ids(library_code_map)
+        logger.info(
+            "  Mapped %d graph artists to library code ids (%d unambiguous catalog names)",
+            mapped,
+            len(library_code_map),
+        )
+        _log_memory("after library_code_map")
+
+        # --- Step 7d: Prune preserved enrichment edges ---
         # Snapshot the mapping and close pipeline_db before the prune opens its own
         # connection — two write-capable handles to the same SQLite file under WAL
         # are merely slow, but the prune commits inside its transaction and we

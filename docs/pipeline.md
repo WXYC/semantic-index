@@ -68,3 +68,14 @@ DATABASE_URL_BACKEND=postgresql://... DB_PATH=data/wxyc_artist_graph.db python s
 - `library` → `LibraryRelease` (id, artist_id → library_code_id)
 - `flowsheet` → `FlowsheetEntry` (filtered to `entry_type = 'track'`, `add_time` → epoch, `request_flag` boolean → int)
 - `shows` → show-to-DJ mapping (keyed by `shows.id`, `primary_dj_id` as value)
+
+### Library-code mapping post-pass (nightly-sync only)
+
+After entity dedup, nightly sync populates `artist.wxyc_library_code_id` — the graph-artist ↔ Backend library-artist-id mapping the neighbors-by-library-id endpoint reads (WXYC/semantic-index#354, On Tour R3b). It is a **name-equality post-pass**, not resolver plumbing: catalog-resolved canonical names are verbatim `LIBRARY_CODE` presentation names, so an exact-name join over the loaded `codes` reproduces the resolver's collapse without touching `ResolvedEntry` or the SQL-dump path. `build_library_code_map` builds the `{presentation_name → id}` dict and `PipelineDB.map_library_code_ids` applies it, recomputing the column from scratch each run (a name that became ambiguous since the last sync drops back to NULL rather than retaining a stale id from the copied-forward DB).
+
+Two rules make the mapping trustworthy:
+
+- **Case-sensitive exact match** on `canonical_name = artists.artist_name` (no lower/trim). Exact equality captures every catalog-resolved artist by construction and keeps the mapping **injective** (`canonical_name` is UNIQUE, so no two graph artists claim one code id). A lowered join would let a Discogs-cased `BOLA` node and catalog `Bola` collide onto one code.
+- **Ambiguity exclusion.** A name borne by ≥2 catalog codes stays **NULL**. These are usually [homonyms](glossary.md#homonym) — distinct artists sharing a name (e.g. several bands filed as "Lake") — that the resolver's first-wins name index already conflates into one graph node, so no code id is correct. This is deliberate, not a bug to "fix" into a pick-one rule; splitting the conflated nodes is a separate track (WXYC/semantic-index#360). Measured impact: ~1% of catalog names, but ~22K artists still map, covering 974 of the top 1,000 by plays.
+
+SQL-dump mode leaves the column NULL (present, unpopulated): tubafrenzy `LIBRARY_CODE.ID`s are probably the same id-space but that invariant is unverified, and dump builds don't serve production. The pre-swap [coverage gate](deployment.md#pre-swap-validation) fail-closes if a build's mapped-artist count collapses.

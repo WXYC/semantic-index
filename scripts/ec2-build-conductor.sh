@@ -28,6 +28,7 @@
 #   BUILD_SG        BuildSecurityGroup id
 #   AWS_REGION      us-east-1
 #   MIN_ARTISTS     artist-count floor for validation (default 1000)
+#   MIN_MAPPED_ARTISTS  library-code-mapped-artist floor (default 10000; see #358)
 
 set -euo pipefail
 
@@ -39,6 +40,12 @@ CLUSTER="${CLUSTER:-semantic-index-build}"
 TASK_DEF="${TASK_DEF:-semantic-index-build}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 MIN_ARTISTS="${MIN_ARTISTS:-1000}"
+# Absolute floor on graph artists mapped to a Backend library-code id
+# (WXYC/semantic-index#358). Closes the bootstrap-night hole in the seed
+# ratchet. On a transition night where the builder image predates the mapping
+# code, this fail-closes and the conductor keeps serving the previous DB — the
+# gate working as designed. Set to 0 to disable (e.g. a temporary rollback).
+MIN_MAPPED_ARTISTS="${MIN_MAPPED_ARTISTS:-10000}"
 # Ceiling for waiting on the Fargate build. Must exceed the build's worst case
 # (graph_metrics is unmeasured under load) but stay under the systemd unit's
 # TimeoutStartSec. NOT `aws ecs wait tasks-stopped`, whose botocore waiter is
@@ -126,10 +133,11 @@ log "task stopped: exitCode=${EXIT_CODE:-<none>} reason=${STOP_REASON:-<none>}"
 log "Downloading build artifact -> $INCOMING_DB"
 aws s3 cp "s3://$BUCKET/$BUILD_KEY" "$INCOMING_DB" --only-show-errors || fail "build download failed"
 
-log "Validating build artifact (header + artist>=$MIN_ARTISTS + enrichment vs seed)..."
+log "Validating build artifact (header + artist>=$MIN_ARTISTS + mapped>=$MIN_MAPPED_ARTISTS + enrichment vs seed)..."
 in_image python scripts/validate_graph_db.py "/data/${DB_NAME}.incoming" \
   --seed-counts "/data/${DB_NAME}.seed-counts.json" \
   --min-artists "$MIN_ARTISTS" \
+  --min-mapped-artists "$MIN_MAPPED_ARTISTS" \
   || fail "validation failed — keeping current DB, NOT swapping"
 
 # --- 5. Atomic swap (same filesystem) ----------------------------------------

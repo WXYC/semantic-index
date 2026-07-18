@@ -94,6 +94,60 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "unhealthy"
 
+    def test_health_reports_mapped_artist_count(self, client: TestClient):
+        # The exported test DB has the wxyc_library_code_id column but no
+        # nightly-sync mapping, so the count is 0 (present, not null-because-absent).
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["mapped_artist_count"] == 0
+
+    def test_health_mapped_artist_count_counts_non_null(self, tmp_path: Path):
+        # WXYC/semantic-index#358: mapped_artist_count is the integration-day
+        # disambiguator for Backend-Service#1626 (expect ~22K in production).
+        import sqlite3
+
+        from semantic_index.api.app import create_app
+
+        db = tmp_path / "mapped.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT UNIQUE, "
+            "wxyc_library_code_id INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO artist (canonical_name, wxyc_library_code_id) VALUES (?, ?)",
+            [("Autechre", 10), ("Stereolab", 20), ("Juana Molina", None)],
+        )
+        conn.commit()
+        conn.close()
+
+        with TestClient(create_app(str(db))) as tc:
+            data = tc.get("/health").json()
+        assert data["artist_count"] == 3
+        assert data["mapped_artist_count"] == 2
+
+    def test_health_mapped_artist_count_null_when_column_absent(self, tmp_path: Path):
+        # A pre-#358 served DB (no mapping column) must stay healthy and report
+        # the field as null — never flip to 503 over a missing optional column.
+        import sqlite3
+
+        from semantic_index.api.app import create_app
+
+        db = tmp_path / "old.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE artist (id INTEGER PRIMARY KEY, canonical_name TEXT UNIQUE)")
+        conn.execute("INSERT INTO artist (canonical_name) VALUES ('Autechre')")
+        conn.commit()
+        conn.close()
+
+        with TestClient(create_app(str(db))) as tc:
+            response = tc.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["artist_count"] == 1
+        assert data["mapped_artist_count"] is None
+
     def test_health_reports_graph_db_age_seconds(self, client: TestClient, test_db: Path):
         """The freshness field reflects the serving DB file's mtime.
 

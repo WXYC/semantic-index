@@ -249,6 +249,30 @@ class TestLoadCatalog:
         assert stereolab.presentation_name == "Stereolab"
         assert stereolab.genre_id == 1
 
+    def test_homonym_rows_survive_as_distinct_codes_and_are_excluded(self):
+        """Two catalog rows sharing an artist_name (a homonym, e.g. multiple
+        bands filed as "Lake") load as two distinct LibraryCodes with the same
+        presentation_name, so build_library_code_map excludes the name — the
+        PG→codes→mapping path that WXYC/semantic-index#358 relies on."""
+        from semantic_index.nightly_sync import build_library_code_map
+        from semantic_index.pg_source import load_catalog
+
+        conn = self._make_catalog_conn(
+            artists=[
+                {"id": 4, "artist_name": "Lake"},
+                {"id": 33, "artist_name": "Lake"},
+                {"id": 19516, "artist_name": "Autechre"},
+            ],
+            genre_xrefs=[],
+            library=[],
+        )
+
+        codes, _ = load_catalog(conn)
+
+        lake_codes = [c for c in codes if c.presentation_name == "Lake"]
+        assert {c.id for c in lake_codes} == {4, 33}  # both rows preserved
+        assert build_library_code_map(codes) == {"Autechre": 19516}  # homonym excluded
+
     def test_artist_without_genre_gets_zero(self):
         """Artists not in genre_artist_crossreference get genre_id=0."""
         from semantic_index.pg_source import load_catalog
