@@ -117,6 +117,9 @@ CREATE TABLE artist (
     -- Backend library-artist id (wxyc_schema.artists.id). Populated by nightly
     -- sync (PG mode) for unambiguous catalog names; NULL for raw/CTA-only and
     -- homonym names. Backs the neighbors-by-library-id endpoint (WXYC/semantic-index#358).
+    -- A UNIQUE partial index (idx_artist_library_code, WHERE ... IS NOT NULL)
+    -- enforces the injective code->artist mapping the endpoint assumes, so a
+    -- writer bug fails the rebuild loudly instead of mis-mapping (WXYC/semantic-index#365).
     wxyc_library_code_id INTEGER
 );
 

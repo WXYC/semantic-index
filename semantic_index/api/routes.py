@@ -516,10 +516,13 @@ def get_library_neighbors_batch(
         return LibraryNeighborsBatchResponse(results={})
 
     # Reverse lookup: library code id -> graph artist id. Injective (each code
-    # belongs to at most one graph artist, since canonical_name is UNIQUE),
-    # backed by the partial index idx_artist_library_code. A pre-#358 served DB
-    # has no such column yet — degrade to "nothing mapped" (empty lists) rather
-    # than 500, per the endpoint's deploy-order contract.
+    # belongs to at most one graph artist): the nightly writer maps only
+    # unambiguous names (canonical_name is UNIQUE), and the UNIQUE partial index
+    # idx_artist_library_code enforces that at the schema level (#365) — a
+    # duplicate code fails the rebuild loudly instead of silently collapsing into
+    # an arbitrary row here (this dict has no ORDER BY to make the winner stable).
+    # A pre-#358 served DB has no such column yet — degrade to "nothing mapped"
+    # (empty lists) rather than 500, per the endpoint's deploy-order contract.
     code_placeholders = ",".join("?" * len(requested))
     try:
         code_rows = db.execute(

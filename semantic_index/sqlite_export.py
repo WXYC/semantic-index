@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS artist (
     wxyc_library_code_id INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS dj_transition (
     source_id INTEGER NOT NULL REFERENCES artist(id),

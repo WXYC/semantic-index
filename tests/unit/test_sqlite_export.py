@@ -4,6 +4,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from semantic_index.models import (
     ArtistStats,
     CompilationEdge,
@@ -57,6 +59,41 @@ class TestSchemaCreation:
         assert "idx_xref_b" in indexes
         assert "idx_wikidata_influence_source" in indexes
         assert "idx_wikidata_influence_target" in indexes
+
+
+class TestLibraryCodeUniqueness:
+    """``idx_artist_library_code`` is a UNIQUE partial index, so a second row
+    with an already-used non-null library code fails at write time
+    (WXYC/semantic-index#365).
+
+    ``export_sqlite`` never writes the column itself, so this guards the schema
+    against any writer that copies codes into an export product — the same
+    injectivity the neighbors-by-library-id endpoint (WXYC/semantic-index#354)
+    assumes, made a schema guarantee rather than a convention.
+    """
+
+    def test_duplicate_non_null_code_rejected(self):
+        conn, _ = _export_and_connect(artist_stats={}, pmi_edges=[], xref_edges=[])
+        conn.execute(
+            "INSERT INTO artist (id, canonical_name, wxyc_library_code_id) "
+            "VALUES (1, 'Autechre', 10)"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO artist (id, canonical_name, wxyc_library_code_id) "
+                "VALUES (2, 'Stereolab', 10)"
+            )
+
+    def test_multiple_null_codes_coexist(self):
+        # The partial ``WHERE ... IS NOT NULL`` clause leaves unmapped artists
+        # unconstrained — the common case, since most nodes carry no code.
+        conn, _ = _export_and_connect(artist_stats={}, pmi_edges=[], xref_edges=[])
+        conn.execute("INSERT INTO artist (id, canonical_name) VALUES (1, 'Autechre')")
+        conn.execute("INSERT INTO artist (id, canonical_name) VALUES (2, 'Stereolab')")
+        null_count = conn.execute(
+            "SELECT COUNT(*) FROM artist WHERE wxyc_library_code_id IS NULL"
+        ).fetchone()[0]
+        assert null_count == 2
 
 
 class TestArtistInsertion:
