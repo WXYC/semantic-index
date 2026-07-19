@@ -82,9 +82,15 @@ def _build_discogs_fixture_db(path: str) -> tuple[str, dict[str, int]]:
         PmiEdge(source="Autechre", target="Mouse on Mars", raw_count=20, pmi=2.0),
         PmiEdge(source="Autechre", target="Pole", raw_count=10, pmi=1.0),
         PmiEdge(source="Cat Power", target="Jessica Pratt", raw_count=5, pmi=1.5),
-        # Homonym One WOULD map to Boards of Canada (1002) if the endpoint picked
-        # an arbitrary node for the ambiguous Discogs id 900009 — it must not.
+        # Both nodes sharing the ambiguous Discogs id 900009 carry a DISTINCT mapped
+        # neighbor (Homonym One -> Boards of Canada 1002, Homonym Two -> Oval 1003),
+        # so a naive "pick one node" impl returns a non-empty list whichever node it
+        # lands on — only the correct ambiguity DROP yields []. Giving Homonym Two a
+        # neighbor is load-bearing: without it, the rowid-order dict-overwrite would
+        # land on the edgeless Homonym Two and return [] anyway, letting a regression
+        # that deletes the `GROUP BY ... HAVING COUNT(*) = 1` guard pass unnoticed.
         PmiEdge(source="Homonym One", target="Boards of Canada", raw_count=15, pmi=2.5),
+        PmiEdge(source="Homonym Two", target="Oval", raw_count=15, pmi=2.5),
     ]
     export_sqlite(path, artist_stats=stats, pmi_edges=pmi_edges, xref_edges=[], min_count=1)
 
@@ -160,9 +166,10 @@ class TestAmbiguousDiscogsId:
 
     @pytest.mark.asyncio
     async def test_ambiguous_discogs_id_returns_empty(self, client: AsyncClient) -> None:
-        # 900009 is carried by both Homonym One and Homonym Two. Homonym One has a
-        # mapped neighbor (Boards of Canada, 1002), so a naive "pick one node" impl
-        # would return [1002]. The contract requires [] — ambiguity is unresolvable.
+        # 900009 is carried by both Homonym One and Homonym Two, each with a distinct
+        # mapped neighbor, so a naive "pick one node" impl would return [1002] or
+        # [1003] whichever node it lands on. The contract requires [] — ambiguity is
+        # unresolvable, so the id is dropped rather than collapsed to a winner.
         resp = await client.post(ENDPOINT, json={"discogs_artist_ids": [900009], "limit": 20})
         assert resp.status_code == 200
         results = resp.json()["results"]
@@ -324,6 +331,31 @@ def _build_pre_358_db(path: str) -> None:
     conn.close()
 
 
+def _build_pre_discogs_column_db(path: str) -> None:
+    """Export a fixture, then drop the discogs_artist_id column + its index to model a
+    served DB so old it predates the Discogs reverse-lookup KEY itself. The SOURCE
+    lookup can't run, so every requested id degrades to empty — exercising the FIRST
+    OperationalError guard (the reverse discogs query), which ``_build_pre_358_db``
+    leaves untouched because it keeps discogs_artist_id and only drops the mapping.
+    """
+    stats = {
+        "Autechre": make_artist_stats("Autechre", genre="Electronic"),
+        "Boards of Canada": make_artist_stats("Boards of Canada", genre="Electronic"),
+    }
+    export_sqlite(
+        path,
+        artist_stats=stats,
+        pmi_edges=[PmiEdge(source="Autechre", target="Boards of Canada", raw_count=40, pmi=4.0)],
+        xref_edges=[],
+        min_count=1,
+    )
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX IF EXISTS idx_artist_discogs")
+    conn.execute("ALTER TABLE artist DROP COLUMN discogs_artist_id")
+    conn.commit()
+    conn.close()
+
+
 class TestDeployOrderDegradation:
     """A pre-#358 served DB has no wxyc_library_code_id column to translate into."""
 
@@ -338,5 +370,19 @@ class TestDeployOrderDegradation:
             resp = await ac.post(ENDPOINT, json={"discogs_artist_ids": [900000], "limit": 5})
         # Source resolves via discogs_artist_id, but neighbor translation cannot
         # run without wxyc_library_code_id — degrade to empty, never 500.
+        assert resp.status_code == 200
+        assert resp.json()["results"] == {"900000": []}
+
+    @pytest.mark.asyncio
+    async def test_missing_discogs_column_returns_empty_not_500(self, tmp_path) -> None:
+        path = str(tmp_path / "pre_discogs.db")
+        _build_pre_discogs_column_db(path)
+
+        app = create_app(path)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(ENDPOINT, json={"discogs_artist_ids": [900000], "limit": 5})
+        # The reverse discogs_artist_id lookup can't run on a DB without the column;
+        # the source-query OperationalError guard degrades it to empty, never 500.
         assert resp.status_code == 200
         assert resp.json()["results"] == {"900000": []}
