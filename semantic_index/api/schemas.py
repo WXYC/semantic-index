@@ -113,6 +113,22 @@ class LibraryNeighborsBatchResponse(BaseModel):
     results: dict[str, list[SimilarArtist]]
 
 
+class DiscogsNeighborsBatchResponse(BaseModel):
+    """Response for POST /graph/discogs-artists/neighbors/batch (#367).
+
+    Same shape and neighbor keyspace as ``LibraryNeighborsBatchResponse`` — the
+    values are top-K affinity neighbors in the Backend catalog library-artist id
+    keyspace (``SimilarArtist`` ``{artist_id, weight}``), weight-descending. Only
+    the request KEY differs: here it is an external Discogs artist id. Keyed by
+    the requested Discogs id (rendered as a string). Unknown, unmapped, and
+    ambiguous (a Discogs id borne by >=2 graph nodes) ids are present with an
+    empty list rather than omitted, so the consumer can tell "asked, no
+    neighbors" from "never asked".
+    """
+
+    results: dict[str, list[SimilarArtist]]
+
+
 class EntityArtists(BaseModel):
     """Response for GET /graph/entities/{id}/artists — all artists sharing an entity."""
 

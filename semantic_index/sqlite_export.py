@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS artist (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_artist_library_code ON artist(wxyc_library_code_id) WHERE wxyc_library_code_id IS NOT NULL;
 
+-- Non-UNIQUE (homonym-collapse can share a Discogs id across nodes) partial index
+-- backing the reverse lookup in POST /graph/discogs-artists/neighbors/batch (#367).
+-- Mirrors idx_artist_discogs in pipeline_db.py so the served export is indexed too.
+CREATE INDEX IF NOT EXISTS idx_artist_discogs ON artist(discogs_artist_id) WHERE discogs_artist_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS dj_transition (
     source_id INTEGER NOT NULL REFERENCES artist(id),
     target_id INTEGER NOT NULL REFERENCES artist(id),
