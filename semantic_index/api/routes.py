@@ -24,6 +24,7 @@ from semantic_index.api.schemas import (
     BatchNeighborsResponse,
     CommunitiesResponse,
     CommunityDetail,
+    DiscogsNeighborsBatchResponse,
     DjSummary,
     EntityArtists,
     ExplainResponse,
@@ -569,6 +570,125 @@ def get_library_neighbors_batch(
         results[str(code_id)] = neighbors
 
     return LibraryNeighborsBatchResponse(results=results)
+
+
+class DiscogsNeighborsBatchRequest(BaseModel):
+    """Request body for POST /graph/discogs-artists/neighbors/batch (#367).
+
+    ``discogs_artist_ids`` are EXTERNAL Discogs artist ids — the key a non-library
+    concert headliner is looked up by (WXYC/Backend-Service#1614's LML-minted
+    ids), distinct from the sibling endpoints' ``library_artist_ids`` (catalog
+    codes) and ``artist_ids`` (internal graph ids). The distinct field name is
+    deliberate: it names the input keyspace and guards against the id-space
+    confusion this family of endpoints exists to resolve. The 100-id cap
+    (``max_length``) returns a structured 422 on overflow rather than silent
+    truncation, which for an unattended nightly job would be silent data loss.
+    """
+
+    discogs_artist_ids: list[int] = Field(..., max_length=100)
+    limit: int = Field(20, ge=1, le=100)
+    heat: float = Field(0.5, ge=0.0, le=1.0)
+
+
+@router.post("/discogs-artists/neighbors/batch", response_model=DiscogsNeighborsBatchResponse)
+def get_discogs_neighbors_batch(
+    body: DiscogsNeighborsBatchRequest,
+    db: sqlite3.Connection = Depends(get_db),
+) -> DiscogsNeighborsBatchResponse:
+    """Batch affinity neighbors keyed by an EXTERNAL Discogs artist id.
+
+    Sibling of :func:`get_library_neighbors_batch` (#354) for concert headliners
+    that are NOT in the WXYC library — Discogs-only touring artists resolved via
+    ``concerts.headlining_discogs_artist_id`` (WXYC/Backend-Service#1614) that have
+    no catalog code to ask under. For each requested Discogs id: reverse-map it to
+    a graph artist via ``artist.discogs_artist_id``, rank affinity neighbors,
+    translate those neighbors back into library ids (``wxyc_library_code_id``),
+    drop any that are unmapped, and cut to ``limit``. Every requested id appears in
+    ``results``; unknown, unmapped, and ambiguous ids map to an empty list.
+    Duplicate ids collapse. The NEIGHBORS returned are library code ids — the same
+    keyspace #354 returns and the same one iOS intersects against listener likes;
+    only the lookup KEY changed.
+
+    The one real divergence from #354: ``idx_artist_discogs`` is a PLAIN partial
+    index, not UNIQUE like ``idx_artist_library_code``, so a Discogs id can be
+    borne by >=2 graph nodes (homonym-collapse). The reverse lookup therefore keeps
+    only ids that resolve to EXACTLY ONE node (``GROUP BY … HAVING COUNT(*) = 1``)
+    and drops the ambiguous ones to ``[]`` rather than collapse to an arbitrary
+    winner — the schema can't guarantee injectivity here the way #365 does for
+    library codes, so this query enforces it.
+
+    Read-only, public, unauthenticated — consistent with the rest of the graph API;
+    worst case is a bounded local SQLite read. Called nightly server-to-server by
+    the Backend-Service concerts enrichment's Discogs lane (WXYC/Backend-Service#1701).
+    ``weight`` is the raw affinity composite and is list-relative, so consumers
+    must rank and cap within a single list, not across lists.
+    """
+    _init_metrics_flag(db)
+
+    # Dedupe, preserving first-seen order; empty input short-circuits to {}.
+    requested = list(dict.fromkeys(body.discogs_artist_ids))
+    if not requested:
+        return DiscogsNeighborsBatchResponse(results={})
+
+    # Reverse lookup: Discogs id -> graph artist id. NOT injective by schema —
+    # idx_artist_discogs is a plain (non-UNIQUE) partial index, unlike the library
+    # sibling's #365 UNIQUE index — so a homonym-collapsed Discogs id can sit on
+    # >=2 graph nodes. GROUP BY … HAVING COUNT(*) = 1 keeps only the unambiguous
+    # ones; an id on >=2 nodes falls out of the map and lands as an empty list
+    # below, never an arbitrary node's neighbors. A served DB that predates the
+    # discogs column would degrade to "nothing mapped" here rather than 500.
+    placeholders = ",".join("?" * len(requested))
+    try:
+        source_rows = db.execute(
+            f"SELECT discogs_artist_id, id FROM artist "  # noqa: S608
+            f"WHERE discogs_artist_id IN ({placeholders}) "
+            f"GROUP BY discogs_artist_id HAVING COUNT(*) = 1",
+            requested,
+        ).fetchall()
+        discogs_to_graph: dict[int, int] = {r["discogs_artist_id"]: r["id"] for r in source_rows}
+    except sqlite3.OperationalError:
+        discogs_to_graph = {}
+
+    graph_ids = [discogs_to_graph[d] for d in requested if d in discogs_to_graph]
+    per_source = _neighbors_affinity_batch(
+        db, graph_ids, body.limit * _LIBRARY_NEIGHBOR_OVERFETCH, heat=body.heat
+    )
+
+    # Forward translation: neighbor graph id -> library code id, dropping unmapped
+    # neighbors (the over-fetch refills past them). Unlike the library sibling, the
+    # source lookup above succeeds on a pre-#358 served DB (discogs_artist_id is an
+    # old column), so this translation query is the one that would hit a missing
+    # wxyc_library_code_id column — wrap it too, degrading every neighbor to
+    # "unmapped" (empty lists) rather than 500.
+    neighbor_gids = {entry.artist.id for entries in per_source.values() for entry in entries}
+    graph_to_code: dict[int, int] = {}
+    if neighbor_gids:
+        nbr_placeholders = ",".join("?" * len(neighbor_gids))
+        try:
+            nbr_rows = db.execute(
+                f"SELECT id, wxyc_library_code_id FROM artist "  # noqa: S608
+                f"WHERE id IN ({nbr_placeholders}) AND wxyc_library_code_id IS NOT NULL",
+                list(neighbor_gids),
+            ).fetchall()
+            graph_to_code = {r["id"]: r["wxyc_library_code_id"] for r in nbr_rows}
+        except sqlite3.OperationalError:
+            graph_to_code = {}
+
+    results: dict[str, list[SimilarArtist]] = {}
+    for discogs_id in requested:
+        gid = discogs_to_graph.get(discogs_id)
+        neighbors: list[SimilarArtist] = []
+        if gid is not None:
+            for entry in per_source.get(gid, []):
+                mapped = graph_to_code.get(entry.artist.id)
+                if mapped is None:
+                    continue  # unmapped neighbor dropped, then over-fetch refills
+                neighbors.append(SimilarArtist(artist_id=mapped, weight=entry.weight))
+                if len(neighbors) >= body.limit:
+                    break
+        results[str(discogs_id)] = neighbors
+
+    return DiscogsNeighborsBatchResponse(results=results)
 
 
 @router.get("/artists/{artist_id}/explain/{target_id}", response_model=ExplainResponse)
