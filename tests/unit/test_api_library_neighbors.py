@@ -357,6 +357,8 @@ class TestDeployOrderDegradation:
             resp = await ac.post(ENDPOINT, json={"library_artist_ids": [1000], "limit": 5})
         assert resp.status_code == 200
         assert resp.json()["results"] == {"1000": []}
+        # The degrade branch yields no station-play signal either (#369).
+        assert resp.json()["source_plays"] == {}
 
     @pytest.mark.asyncio
     async def test_artist_detail_survives_missing_column(self, tmp_path) -> None:
@@ -372,3 +374,68 @@ class TestDeployOrderDegradation:
             resp = await ac.get(f"/graph/artists/{aid}")
         assert resp.status_code == 200
         assert resp.json()["wxyc_library_code_id"] is None
+
+
+def _build_source_plays_db(path: str) -> None:
+    """Build a fixture whose mapped source artists carry DISTINCT total_plays, so
+    a source_plays value can't pass by coincidentally matching a shared count.
+    Father John Misty (code 3000) has 812 plays, Stereolab (code 3001) has 337.
+    """
+    stats = {
+        "Father John Misty": make_artist_stats("Father John Misty", total_plays=812),
+        "Stereolab": make_artist_stats("Stereolab", total_plays=337),
+    }
+    export_sqlite(path, artist_stats=stats, pmi_edges=[], xref_edges=[], min_count=1)
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "UPDATE artist SET wxyc_library_code_id = 3000 WHERE canonical_name = 'Father John Misty'"
+    )
+    conn.execute("UPDATE artist SET wxyc_library_code_id = 3001 WHERE canonical_name = 'Stereolab'")
+    conn.commit()
+    conn.close()
+
+
+class TestSourcePlays:
+    """source_plays carries each mapped source artist's own total_plays (#369)."""
+
+    @pytest_asyncio.fixture
+    async def sp_client(self, tmp_path) -> AsyncClient:
+        path = str(tmp_path / "source_plays.db")
+        _build_source_plays_db(path)
+        app = create_app(path)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    @pytest.mark.asyncio
+    async def test_mapped_ids_carry_total_plays_unmapped_absent(
+        self, sp_client: AsyncClient
+    ) -> None:
+        # 3000/3001 map to graph artists; 999999 is unknown to the mapping.
+        resp = await sp_client.post(
+            ENDPOINT, json={"library_artist_ids": [3000, 3001, 999999], "limit": 20}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        # Each mapped id carries its OWN total_plays, keyed by the request string.
+        assert body["source_plays"] == {"3000": 812, "3001": 337}
+        # Unknown id: present in results (empty list), ABSENT from source_plays —
+        # the two maps diverge on unmapped ids by design.
+        assert body["results"]["999999"] == []
+        assert "999999" not in body["source_plays"]
+
+    @pytest.mark.asyncio
+    async def test_results_shape_unchanged_by_source_plays(self, sp_client: AsyncClient) -> None:
+        # source_plays is additive: results still carries every requested id.
+        resp = await sp_client.post(
+            ENDPOINT, json={"library_artist_ids": [3000, 3001, 999999], "limit": 20}
+        )
+        assert resp.status_code == 200
+        assert set(resp.json()["results"].keys()) == {"3000", "3001", "999999"}
+
+    @pytest.mark.asyncio
+    async def test_empty_input_yields_empty_source_plays(self, sp_client: AsyncClient) -> None:
+        resp = await sp_client.post(ENDPOINT, json={"library_artist_ids": [], "limit": 20})
+        assert resp.status_code == 200
+        assert resp.json()["source_plays"] == {}
