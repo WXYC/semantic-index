@@ -525,13 +525,18 @@ def get_library_neighbors_batch(
     # A pre-#358 served DB has no such column yet — degrade to "nothing mapped"
     # (empty lists) rather than 500, per the endpoint's deploy-order contract.
     code_placeholders = ",".join("?" * len(requested))
+    source_plays: dict[str, int] = {}
     try:
         code_rows = db.execute(
-            f"SELECT id, wxyc_library_code_id FROM artist "  # noqa: S608
+            f"SELECT id, wxyc_library_code_id, total_plays FROM artist "  # noqa: S608
             f"WHERE wxyc_library_code_id IN ({code_placeholders})",
             requested,
         ).fetchall()
         code_to_graph: dict[int, int] = {r["wxyc_library_code_id"]: r["id"] for r in code_rows}
+        # Station play-affinity signal (#1702): the source artist's own all-time
+        # play count, keyed like `results` but present only for mapped ids.
+        # total_plays is NOT NULL DEFAULT 0, so the value is always an int.
+        source_plays = {str(r["wxyc_library_code_id"]): r["total_plays"] for r in code_rows}
     except sqlite3.OperationalError:
         code_to_graph = {}
 
@@ -569,7 +574,7 @@ def get_library_neighbors_batch(
                     break
         results[str(code_id)] = neighbors
 
-    return LibraryNeighborsBatchResponse(results=results)
+    return LibraryNeighborsBatchResponse(results=results, source_plays=source_plays)
 
 
 class DiscogsNeighborsBatchRequest(BaseModel):

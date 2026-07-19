@@ -108,9 +108,18 @@ class LibraryNeighborsBatchResponse(BaseModel):
     items (``{artist_id, weight}``), weight-descending. Unknown, unmapped, and
     ambiguous (homonym) ids are present with an empty list rather than omitted,
     so the consumer can tell "asked, no neighbors" from "never asked".
+
+    ``source_plays`` is the station play-affinity signal (WXYC/Backend-Service#1702):
+    the requested source artist's own all-time WXYC play count (``artist.total_plays``),
+    keyed by the same requested library-artist-id strings as ``results``. Unlike
+    ``results``, it is present ONLY for ids that mapped to a graph artist —
+    unknown, unmapped, and ambiguous (homonym) ids are absent from the map rather
+    than carried with a zero. Additive (default ``{}``); consumers reading only
+    ``results`` are unaffected.
     """
 
     results: dict[str, list[SimilarArtist]]
+    source_plays: dict[str, int] = {}
 
 
 class DiscogsNeighborsBatchResponse(BaseModel):
