@@ -43,10 +43,12 @@ POST /graph/library-artists/neighbors/batch
 
 { "results": {
     "4210": [ {"artist_id": 5121, "weight": 4.83} ],
-    "887":  [] } }
+    "887":  [] },
+  "source_plays": { "4210": 312 } }
 ```
 
 - **Shape** — each requested id maps to a list of `SimilarArtist` items (`{artist_id, weight}`, the wxyc-shared DTO verbatim), weight-descending. Every requested id is present in `results`; an unknown, unmapped, or [homonym](glossary.md#homonym) id maps to an empty list rather than being omitted, so the caller can tell "asked, none" from "never asked". Duplicate ids collapse.
+- **`source_plays`** (WXYC/Backend-Service#1702) — each mapped source artist's own all-time WXYC play count (`artist.total_plays`), keyed by the same requested library-artist-id strings as `results`. Present **only** for ids that mapped to a graph artist; an unknown, unmapped, or [homonym](glossary.md#homonym) id is absent from the map (distinct from `results`, which carries it with an empty list). Additive and backward-compatible — consumers reading only `results` are unaffected. Feeds the Backend concerts "On Tour" station play-affinity shelf (WXYC/Backend-Service#1626).
 - **`heat`** (optional, 0.0–1.0, default 0.5) — the same discovery dial as the neighbors endpoints: cool ranks by well-worn co-occurrence, hot by surprising enrichment edges. One heat per request keeps a response's weights mutually comparable. The production consumer omits it; the iOS debug dial (WXYC/wxyc-ios-64#534) passes it for live preview.
 - **`weight`** is the raw affinity composite and is **list-relative** — type-max normalized per source artist, so weights are comparable *within* one list, not *across* lists. Rank and cap relative to a list's own maximum; never compare a weight from one list against a weight from another.
 - **Cap and overflow** — at most 100 ids per request (`limit` 1–100, default 20); 101+ ids returns a structured `422`, never a silent truncation, because the nightly caller is unattended and a dropped id would be silent data loss. Empty input returns `200` with empty `results`.
