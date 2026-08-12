@@ -1,6 +1,7 @@
 [project]
 name = "semantic-index"
 version = "0.1.0"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "WXYC semantic artist graph from DJ transition data"
 requires-python = ">=3.12"
 readme = "README.md"
@@ -55,7 +56,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=65.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
