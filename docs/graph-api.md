@@ -12,6 +12,7 @@ Or programmatically:
 
 ```python
 from semantic_index.api.app import create_app
+
 app = create_app("data/wxyc_artist_graph.db")
 ```
 
