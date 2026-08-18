@@ -902,3 +902,165 @@ class TestLoadCrossReferencesServerSideCursor:
 
         assert artist_xrefs == [(0, 1, 2, "see also")]
         assert release_xrefs == [(0, 10, 20, "compilation")]
+
+
+# ===========================================================================
+# load_compilation_track_artists
+# ===========================================================================
+
+
+class TestLoadCompilationTrackArtists:
+    """load_compilation_track_artists() reads wxyc_schema.compilation_track_artist.
+
+    The id space is the whole point. This table's ``library_id`` is a foreign
+    key to ``library.id`` — Backend's serial — which is the same space
+    ``flowsheet.album_id`` (and therefore ``FlowsheetEntry.library_release_id``)
+    lives in. Tier 0a can only fire when the index key and the probe value
+    agree, and on this path they agree without any translation.
+
+    That is *not* true of the tubafrenzy-dump path, whose CTA rows are keyed by
+    ``LIBRARY_RELEASE.ID``. Both paths feed the same ``build_cta_index``, so the
+    invariant lives at each source, not in the index builder.
+    """
+
+    def test_returns_rows_in_build_cta_index_tuple_order(self):
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        rows = [
+            {
+                "id": 1,
+                "library_id": 40521,
+                "artist_name": "Chuquimamani-Condori",
+                "track_title": "Call Your Name",
+            },
+            {
+                "id": 2,
+                "library_id": 40521,
+                "artist_name": "Jessica Pratt",
+                "track_title": "Back, Baby",
+            },
+        ]
+        conn = _mock_conn_with_rows(rows)
+
+        result = load_compilation_track_artists(conn)
+
+        assert result == [
+            (1, 40521, "Chuquimamani-Condori", "Call Your Name"),
+            (2, 40521, "Jessica Pratt", "Back, Baby"),
+        ]
+
+    def test_feeds_build_cta_index_without_translation(self):
+        """End-to-end on the tuple contract: PG rows in, serial-keyed index out."""
+        from semantic_index.artist_resolver import build_cta_index
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        conn = _mock_conn_with_rows(
+            [
+                {
+                    "id": 7,
+                    "library_id": 40521,
+                    "artist_name": "Juana Molina",
+                    "track_title": "la paradoja",
+                }
+            ]
+        )
+
+        index = build_cta_index(load_compilation_track_artists(conn))
+
+        assert index == {(40521, "la paradoja"): "Juana Molina"}
+
+    def test_selects_library_id_not_legacy_release_id(self):
+        """The serial column, by name.
+
+        ``library`` carries both ``id`` and ``legacy_release_id``, and this
+        table's FK is to the former. A query that reached for the legacy column
+        would build an index no PG-path probe can ever hit — the failure is
+        silent, because the two spaces are numerically coextensive and a miss
+        just falls through to the next resolution tier.
+        """
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        conn = _mock_conn_with_rows([])
+        load_compilation_track_artists(conn)
+
+        queries = [str(call.args[0]) for call in conn.execute.call_args_list]
+        queries += [
+            str(call.args[0])
+            for cur in getattr(conn, "created_cursors", [])
+            for call in cur.execute.call_args_list
+        ]
+        assert queries, "expected the loader to issue a query"
+        combined = " ".join(queries)
+        assert "compilation_track_artist" in combined
+        assert "library_id" in combined
+        assert "legacy_release_id" not in combined
+
+    def test_empty_table_returns_empty_list(self):
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        conn = _mock_conn_with_rows([])
+        assert load_compilation_track_artists(conn) == []
+
+    def test_null_track_titles_pass_through_for_the_index_to_skip(self):
+        """A titleless credit is a real row; dropping it is build_cta_index's call.
+
+        The unique index that permits these rows is partial on
+        ``track_title IS NULL``, so they exist in production. Filtering here
+        would move the decision away from the one place that documents it.
+        """
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        conn = _mock_conn_with_rows(
+            [{"id": 3, "library_id": 99, "artist_name": "Stereolab", "track_title": None}]
+        )
+
+        assert load_compilation_track_artists(conn) == [(3, 99, "Stereolab", None)]
+
+
+class TestCatalogIdSpaceMatchesTheProbe:
+    """The FK-chain tier's map and the flowsheet probe must share an id space.
+
+    ``load_catalog`` keys releases by ``library.id`` and ``load_flowsheet_entries``
+    probes with ``flowsheet.album_id``, a foreign key to that same column. This
+    is already correct — the pin exists because ``library`` carries a second,
+    unrelated identifier (``legacy_release_id``) whose values overlap these
+    numerically, so a projection that reached for the wrong one would resolve
+    entries to *different real releases* rather than failing.
+    """
+
+    def test_library_projection_uses_the_serial_not_the_legacy_id(self):
+        from semantic_index.pg_source import _LIBRARY_SQL
+
+        assert "legacy_release_id" not in _LIBRARY_SQL
+
+    def test_release_map_and_probe_agree_on_the_same_row(self):
+        from semantic_index.artist_resolver import ArtistResolver
+        from semantic_index.models import LibraryCode, LibraryRelease
+        from semantic_index.pg_source import _build_flowsheet_entry
+
+        serial_library_id = 40521
+
+        resolver = ArtistResolver(
+            releases=[LibraryRelease(id=serial_library_id, library_code_id=7)],
+            codes=[LibraryCode(id=7, genre_id=1, presentation_name="Juana Molina")],
+        )
+        entry = _build_flowsheet_entry(
+            {
+                "id": 1,
+                "artist_name": "juana molina",
+                "track_title": "la paradoja",
+                "album_title": "DOGA",
+                "record_label": "Sonamos",
+                "show_id": 1,
+                "play_order": 1,
+                "album_id": serial_library_id,
+                "request_flag": False,
+                "add_time_epoch": 1_700_000_000,
+                "legacy_entry_id": None,
+            }
+        )
+
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "catalog"
+        assert resolved.canonical_name == "Juana Molina"

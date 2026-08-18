@@ -383,6 +383,8 @@ class _NightlySyncHarness:
             {},  # show_dj_names
             [],  # artist_xrefs
             [],  # release_xrefs
+            # cta_rows, keyed by Backend's serial library.id
+            [(1, 40521, "Chuquimamani-Condori", "Call Your Name")],
         )
 
         resolved = MagicMock()
@@ -434,6 +436,9 @@ class _NightlySyncHarness:
             mock_pdb = self._set_up_mocks(
                 mock_pdb_cls, mock_load, mock_resolver_cls, mock_xref_cls, codes=codes
             )
+            # Exposed for tests that assert on how the resolver was constructed
+            # rather than on what the pipeline DB received.
+            self.mock_resolver_cls = mock_resolver_cls
             mock_metrics.return_value = MagicMock(community_count=0, artists_scored=0)
 
             if extra_setup:
@@ -820,3 +825,125 @@ class TestLogMemory:
         peak_only = [r.getMessage() for r in caplog.records if "[mem] malformed" in r.getMessage()]
         assert peak_only, "malformed VmRSS should not crash the helper"
         assert all("current=" not in m for m in peak_only)
+
+
+# ===========================================================================
+# Compilation-track resolution on the PG path (WXYC/semantic-index#375)
+# ===========================================================================
+
+
+class TestNightlySyncCompilationTrackIndex(_NightlySyncHarness):
+    """Tier 0a must be wired on the PG path, and wired in the serial id space.
+
+    Two ways this stays broken, and both are silent. It can be *unwired* — the
+    resolver simply never receives an index, and every Various-Artists entry
+    falls through to name resolution as "Various Artists". Or it can be wired
+    from a legacy-keyed source, in which case the probe (Backend's serial
+    ``flowsheet.album_id``) misses on nearly every row, because the two id
+    spaces are numerically coextensive but unrelated. Neither raises.
+    """
+
+    def test_resolver_receives_a_compilation_track_index(self, tmp_path):
+        self._run_nightly_sync(tmp_path)
+
+        kwargs = self.mock_resolver_cls.call_args.kwargs
+        assert kwargs.get("compilation_track_index") is not None, (
+            "nightly_sync must pass a CTA index; without one Tier 0a never fires "
+            "and every compilation entry resolves to the Various-Artists placeholder"
+        )
+
+    def test_the_index_is_built_from_the_loaded_cta_rows(self, tmp_path):
+        """Not merely non-None: keyed by what Backend actually returned."""
+        self._run_nightly_sync(tmp_path)
+
+        index = self.mock_resolver_cls.call_args.kwargs["compilation_track_index"]
+        assert index == {(40521, "call your name"): "Chuquimamani-Condori"}
+
+    def test_va_entry_resolves_via_compilation_track_end_to_end(self):
+        """The id-space agreement, exercised rather than asserted.
+
+        Both halves come from the same Backend rows a real nightly sync reads:
+        the probe from ``flowsheet.album_id``, the index key from
+        ``compilation_track_artist.library_id``. Nothing translates between
+        them, and nothing should need to.
+        """
+        from semantic_index.artist_resolver import ArtistResolver, build_cta_index
+        from semantic_index.pg_source import (
+            _build_flowsheet_entry,
+            load_compilation_track_artists,
+        )
+
+        serial_library_id = 40521
+
+        cta_conn = MagicMock()
+        cta_cursor = MagicMock()
+        cta_cursor.fetchall.return_value = [
+            {
+                "id": 1,
+                "library_id": serial_library_id,
+                "artist_name": "Chuquimamani-Condori",
+                "track_title": "Call Your Name",
+            }
+        ]
+        cta_conn.execute.return_value = cta_cursor
+
+        index = build_cta_index(load_compilation_track_artists(cta_conn))
+
+        entry = _build_flowsheet_entry(
+            {
+                "id": 900,
+                "artist_name": "Various Artists",
+                "track_title": "Call Your Name",
+                "album_title": "Edits",
+                "record_label": "self-released",
+                "show_id": 12,
+                "play_order": 3,
+                "album_id": serial_library_id,
+                "request_flag": False,
+                "add_time_epoch": 1_700_000_000,
+                "legacy_entry_id": None,
+            }
+        )
+
+        resolver = ArtistResolver(releases=[], codes=[], compilation_track_index=index)
+        resolved = resolver.resolve(entry)
+
+        assert resolved.resolution_method == "compilation_track"
+        assert resolved.canonical_name == "chuquimamani-condori"
+
+    def test_a_legacy_keyed_index_would_not_resolve_the_same_entry(self):
+        """The negative that makes the positive above mean something.
+
+        Keyed by the row's ``legacy_release_id`` instead of its serial
+        ``library.id``, the identical data misses — and misses *quietly*, which
+        is why the space is pinned at the source rather than left to convention.
+        """
+        from semantic_index.artist_resolver import ArtistResolver, build_cta_index
+        from semantic_index.pg_source import _build_flowsheet_entry
+
+        serial_library_id = 40521
+        legacy_release_id = 18374
+
+        legacy_keyed = build_cta_index(
+            [(1, legacy_release_id, "Chuquimamani-Condori", "Call Your Name")]
+        )
+
+        entry = _build_flowsheet_entry(
+            {
+                "id": 900,
+                "artist_name": "Various Artists",
+                "track_title": "Call Your Name",
+                "album_title": "Edits",
+                "record_label": "self-released",
+                "show_id": 12,
+                "play_order": 3,
+                "album_id": serial_library_id,
+                "request_flag": False,
+                "add_time_epoch": 1_700_000_000,
+                "legacy_entry_id": None,
+            }
+        )
+
+        resolver = ArtistResolver(releases=[], codes=[], compilation_track_index=legacy_keyed)
+
+        assert resolver.resolve(entry).resolution_method != "compilation_track"
