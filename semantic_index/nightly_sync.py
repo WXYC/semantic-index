@@ -347,27 +347,17 @@ def nightly_sync(args: argparse.Namespace) -> None:
 
         # --- Step 3: Resolve artists ---
         logger.info("Resolving artists...")
-        # Tier 0a only fires when the index key and the probe are in the same id
-        # space. Both come from Backend here — `compilation_track_artist.library_id`
-        # and `flowsheet.album_id` are each a foreign key to `library.id` — so no
-        # translation is involved and none should be introduced.
+        # Tier 0b is not wired on this path; docs/pipeline.md says what it would
+        # take. Tier 0a is, and its correctness is entirely an id-space question:
+        # `resolve()` probes both the CTA index and the FK-chain release map with
+        # `entry.library_release_id`, so all three must be Backend serials. They
+        # are, by construction — `compilation_track_artist.library_id` and
+        # `flowsheet.album_id` are both foreign keys to `library.id`.
         #
-        # Tier 0b is not wired here yet. Its only source is
-        # `compilation_track_artists.json`, whose `comp_id` is a tubafrenzy
-        # `LIBRARY_RELEASE.ID`, and this entry point takes no input data files —
-        # only a DSN. Wiring it needs both a file input and a legacy->serial
-        # bridge through `library.legacy_release_id`; that is possible (the
-        # column is NOT NULL and unique, and `_LIBRARY_SQL` is one column away),
-        # just not done. Until then only the dump pipeline runs Tier 0b, and
-        # that pipeline's input disappears with tubafrenzy.
+        # Checked anyway, because a wrong-space index is silent: every lookup
+        # misses, entries fall through to name resolution, and the index size
+        # logs identically. A near-zero overlap is the only signal there would be.
         compilation_track_index = build_cta_index(cta_rows)
-
-        # The id-space invariant, checked rather than asserted in prose: the CTA
-        # index keys and the FK-chain release ids must be the same space, since
-        # `resolve()` probes both with `entry.library_release_id`. A wrong-space
-        # index is silent — every lookup misses and entries fall through to name
-        # resolution — so a near-zero overlap against a non-empty index is the
-        # only signal that would ever appear.
         if compilation_track_index:
             cta_keys = {key[0] for key in compilation_track_index}
             overlap = len(cta_keys & {r.id for r in releases})
