@@ -68,6 +68,15 @@ DATABASE_URL_BACKEND=postgresql://... DB_PATH=data/wxyc_artist_graph.db python s
 - `library` → `LibraryRelease` (id, artist_id → library_code_id)
 - `flowsheet` → `FlowsheetEntry` (filtered to `entry_type = 'track'`, `add_time` → epoch, `request_flag` boolean → int)
 - `shows` → show-to-DJ mapping (keyed by `shows.id`, `primary_dj_id` as value)
+- `compilation_track_artist` → the Tier 0a CTA index (`library_id`, `artist_name`, `track_title`)
+
+### Compilation-track resolution and the two id spaces (nightly-sync only)
+
+Tier 0a resolves a Various-Artists entry to the artist actually credited for that track, and it only fires when the index key and the probe value are in the same id space. On this path both come from Backend: `compilation_track_artist.library_id` and `flowsheet.album_id` are each a foreign key to `library.id`, so the index is built straight from PG with no translation (WXYC/semantic-index#375).
+
+That equivalence is worth stating because `library` carries a *second* identifier — `legacy_release_id`, the tubafrenzy `LIBRARY_RELEASE.ID` — whose values overlap the serials numerically without meaning the same thing. An index keyed in one space and probed from the other does not raise; it misses, and the entry quietly falls through to name resolution as "Various Artists". That is the failure this section exists to prevent, and it is pinned by tests rather than left to convention.
+
+**Tier 0b is deliberately not wired here.** Its only source is `compilation_track_artists.json`, whose `comp_id` is a legacy `LIBRARY_RELEASE_ID`, and the nightly sync takes no file inputs — only a DSN. Feeding that file to this path unbridged would key the index in the space no probe here can reach. It belongs to the SQL-dump pipeline, whose flowsheet entries carry legacy ids and whose CTA dump is legacy-keyed too: that path is internally consistent in the other space.
 
 ### Library-code mapping post-pass (nightly-sync only)
 

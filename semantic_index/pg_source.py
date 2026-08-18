@@ -54,6 +54,10 @@ FROM wxyc_schema.genre_artist_crossreference
 ORDER BY artist_id, artist_genre_code
 """
 
+# `id` here is Backend's serial, the same space `flowsheet.album_id` points at,
+# so the resolver's FK chain probes its release map with a matching key. The
+# `library.legacy_release_id` column alongside it is a different space entirely
+# and is not what any consumer on this path resolves against.
 _LIBRARY_SQL = """\
 SELECT id, artist_id
 FROM wxyc_schema.library
@@ -73,6 +77,17 @@ ORDER BY show_id, play_order
 _SHOWS_SQL = """\
 SELECT id, primary_dj_id, legacy_dj_name, legacy_show_id
 FROM wxyc_schema.shows
+ORDER BY id
+"""
+
+# `library_id` is a foreign key to `library.id` — Backend's serial — which is
+# the same space `flowsheet.album_id` lives in. Selecting `library.legacy_release_id`
+# here instead would build an index no probe on this path can ever hit, and the
+# two spaces are numerically coextensive enough that the miss would look like
+# absent data rather than a wrong join.
+_COMPILATION_TRACK_ARTIST_SQL = """\
+SELECT id, library_id, artist_name, track_title
+FROM wxyc_schema.compilation_track_artist
 ORDER BY id
 """
 
@@ -134,6 +149,34 @@ def load_genres(conn: Any) -> dict[int, str]:
     """
     rows = conn.execute(_GENRES_SQL).fetchall()
     return {row["id"]: row["genre_name"] for row in rows}
+
+
+def load_compilation_track_artists(conn: Any) -> list[tuple[int, int, str, str | None]]:
+    """Load per-track artist credits from ``wxyc_schema.compilation_track_artist``.
+
+    Feeds :func:`semantic_index.artist_resolver.build_cta_index`, which is why
+    the tuples come back in that function's ``(id, library_release_id,
+    artist_name, track_title)`` order rather than as dicts.
+
+    The second element is Backend's serial ``library.id``, matching the space
+    ``FlowsheetEntry.library_release_id`` carries on this path. Both sources of
+    this index must agree with their own probe: the tubafrenzy-dump path pairs
+    legacy-keyed CTA rows with legacy-keyed flowsheet entries, this one pairs
+    serial with serial, and neither needs a translation — but mixing a source
+    from one path with a probe from the other produces silent misses, not
+    errors.
+
+    Rows with a NULL ``track_title`` are returned as-is; ``build_cta_index``
+    owns the decision to skip them.
+
+    Args:
+        conn: psycopg connection (dict_row factory).
+
+    Returns:
+        List of ``(id, library_id, artist_name, track_title)`` tuples.
+    """
+    rows = conn.execute(_COMPILATION_TRACK_ARTIST_SQL).fetchall()
+    return [(r["id"], r["library_id"], r["artist_name"], r["track_title"]) for r in rows]
 
 
 def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:

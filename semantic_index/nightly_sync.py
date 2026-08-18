@@ -253,13 +253,14 @@ def _load_from_pg(dsn: str):
 
     Returns:
         Tuple of (genres, codes, releases, entries, show_to_dj,
-        show_dj_names, artist_xrefs, release_xrefs).
+        show_dj_names, artist_xrefs, release_xrefs, cta_rows).
     """
     import psycopg
     from psycopg.rows import dict_row
 
     from semantic_index.pg_source import (
         load_catalog,
+        load_compilation_track_artists,
         load_cross_references,
         load_flowsheet_entries,
         load_genres,
@@ -283,16 +284,29 @@ def _load_from_pg(dsn: str):
 
         artist_xrefs, release_xrefs = load_cross_references(conn)
         logger.info("  %d artist xrefs, %d release xrefs", len(artist_xrefs), len(release_xrefs))
+
+        cta_rows = load_compilation_track_artists(conn)
+        logger.info("  %d compilation track-artist credits", len(cta_rows))
     finally:
         conn.close()
 
-    return genres, codes, releases, entries, show_to_dj, show_dj_names, artist_xrefs, release_xrefs
+    return (
+        genres,
+        codes,
+        releases,
+        entries,
+        show_to_dj,
+        show_dj_names,
+        artist_xrefs,
+        release_xrefs,
+        cta_rows,
+    )
 
 
 def nightly_sync(args: argparse.Namespace) -> None:
     """Main orchestration: PG → resolve → PMI → export → dedup → facets → metrics → swap."""
     from semantic_index.adjacency import extract_adjacency_pairs
-    from semantic_index.artist_resolver import ArtistResolver
+    from semantic_index.artist_resolver import ArtistResolver, build_cta_index
     from semantic_index.cross_reference import CrossReferenceExtractor
     from semantic_index.facet_export import export_facet_tables
     from semantic_index.graph_metrics import compute_and_persist
@@ -323,6 +337,7 @@ def nightly_sync(args: argparse.Namespace) -> None:
             show_dj_names,
             artist_xrefs,
             release_xrefs,
+            cta_rows,
         ) = _load_from_pg(args.dsn)
         _log_memory("after _load_from_pg")
 
@@ -332,7 +347,24 @@ def nightly_sync(args: argparse.Namespace) -> None:
 
         # --- Step 3: Resolve artists ---
         logger.info("Resolving artists...")
-        resolver = ArtistResolver(releases=releases, codes=codes)
+        # Tier 0a only fires when the index key and the probe are in the same id
+        # space. Both come from Backend here — `compilation_track_artist.library_id`
+        # and `flowsheet.album_id` are each a foreign key to `library.id` — so no
+        # translation is involved and none should be introduced.
+        #
+        # Tier 0b is deliberately absent on this path. Its only source is
+        # `compilation_track_artists.json`, whose `comp_id` is a tubafrenzy
+        # `LIBRARY_RELEASE.ID`; feeding it here unbridged would key the index in a
+        # space no probe on this path can reach, and the miss would be silent
+        # rather than an error. The dump pipeline, whose entries carry legacy ids,
+        # is where that file belongs.
+        compilation_track_index = build_cta_index(cta_rows)
+        logger.info("  %d compilation track-artist index entries", len(compilation_track_index))
+        resolver = ArtistResolver(
+            releases=releases,
+            codes=codes,
+            compilation_track_index=compilation_track_index,
+        )
 
         resolved_entries = []
         method_counts: dict[str, int] = {}
