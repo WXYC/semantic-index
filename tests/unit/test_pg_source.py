@@ -923,10 +923,8 @@ class TestLoadCompilationTrackArtists:
     invariant lives at each source, not in the index builder.
     """
 
-    def test_returns_rows_in_build_cta_index_tuple_order(self):
-        from semantic_index.pg_source import load_compilation_track_artists
-
-        rows = [
+    _QUERIES = {
+        "compilation_track_artist": [
             {
                 "id": 1,
                 "library_id": 40521,
@@ -940,11 +938,14 @@ class TestLoadCompilationTrackArtists:
                 "track_title": "Back, Baby",
             },
         ]
-        conn = _mock_conn_with_rows(rows)
+    }
 
-        result = load_compilation_track_artists(conn)
+    def test_returns_rows_in_build_cta_index_tuple_order(self):
+        from semantic_index.pg_source import load_compilation_track_artists
 
-        assert result == [
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        assert load_compilation_track_artists(conn) == [
             (1, 40521, "Chuquimamani-Condori", "Call Your Name"),
             (2, 40521, "Jessica Pratt", "Back, Baby"),
         ]
@@ -954,52 +955,55 @@ class TestLoadCompilationTrackArtists:
         from semantic_index.artist_resolver import build_cta_index
         from semantic_index.pg_source import load_compilation_track_artists
 
-        conn = _mock_conn_with_rows(
-            [
-                {
-                    "id": 7,
-                    "library_id": 40521,
-                    "artist_name": "Juana Molina",
-                    "track_title": "la paradoja",
-                }
-            ]
+        conn = _mock_conn_with_queries(
+            {
+                "compilation_track_artist": [
+                    {
+                        "id": 7,
+                        "library_id": 40521,
+                        "artist_name": "Juana Molina",
+                        "track_title": "la paradoja",
+                    }
+                ]
+            }
         )
 
         index = build_cta_index(load_compilation_track_artists(conn))
 
         assert index == {(40521, "la paradoja"): "Juana Molina"}
 
-    def test_selects_library_id_not_legacy_release_id(self):
-        """The serial column, by name.
+    def test_takes_library_id_when_the_row_also_carries_a_legacy_id(self):
+        """The serial column, chosen against a row that offers both.
 
-        ``library`` carries both ``id`` and ``legacy_release_id``, and this
-        table's FK is to the former. A query that reached for the legacy column
-        would build an index no PG-path probe can ever hit — the failure is
-        silent, because the two spaces are numerically coextensive and a miss
-        just falls through to the next resolution tier.
+        A row is the only place the two id spaces sit side by side, so this is
+        the one assertion that fails if the projection is ever re-pointed at
+        ``library.legacy_release_id``. Asserting on the SQL text instead only
+        proves what the query says, not what the loader returns — and the two
+        spaces are numerically coextensive, so a re-pointed projection builds a
+        full-looking index that simply never matches a probe.
         """
         from semantic_index.pg_source import load_compilation_track_artists
 
-        conn = _mock_conn_with_rows([])
-        load_compilation_track_artists(conn)
+        conn = _mock_conn_with_queries(
+            {
+                "compilation_track_artist": [
+                    {
+                        "id": 3,
+                        "library_id": 40521,
+                        "legacy_release_id": 18374,
+                        "artist_name": "Stereolab",
+                        "track_title": "Metronomic Underground",
+                    }
+                ]
+            }
+        )
 
-        queries = [str(call.args[0]) for call in conn.execute.call_args_list]
-        queries += [
-            str(call.args[0])
-            for cur in getattr(conn, "created_cursors", [])
-            for call in cur.execute.call_args_list
-        ]
-        assert queries, "expected the loader to issue a query"
-        combined = " ".join(queries)
-        assert "compilation_track_artist" in combined
-        assert "library_id" in combined
-        assert "legacy_release_id" not in combined
+        assert load_compilation_track_artists(conn)[0][1] == 40521
 
     def test_empty_table_returns_empty_list(self):
         from semantic_index.pg_source import load_compilation_track_artists
 
-        conn = _mock_conn_with_rows([])
-        assert load_compilation_track_artists(conn) == []
+        assert load_compilation_track_artists(_mock_conn_with_queries({})) == []
 
     def test_null_track_titles_pass_through_for_the_index_to_skip(self):
         """A titleless credit is a real row; dropping it is build_cta_index's call.
@@ -1010,11 +1014,33 @@ class TestLoadCompilationTrackArtists:
         """
         from semantic_index.pg_source import load_compilation_track_artists
 
-        conn = _mock_conn_with_rows(
-            [{"id": 3, "library_id": 99, "artist_name": "Stereolab", "track_title": None}]
+        conn = _mock_conn_with_queries(
+            {
+                "compilation_track_artist": [
+                    {"id": 3, "library_id": 99, "artist_name": "Stereolab", "track_title": None}
+                ]
+            }
         )
 
         assert load_compilation_track_artists(conn) == [(3, 99, "Stereolab", None)]
+
+    def test_streams_server_side_like_the_other_high_cardinality_loaders(self):
+        """~145K rows today, and BS#801 projects 500K-1M once non-V/A lands.
+
+        A buffered ``fetchall()`` would hold the whole dict-row result in libpq
+        and in Python at once, at the point in the sync where memory already
+        peaks — the failure mode ``_stream_into_list`` exists to prevent.
+        """
+        from semantic_index.pg_source import load_compilation_track_artists
+
+        conn = _mock_conn_with_queries(self._QUERIES)
+
+        load_compilation_track_artists(conn)
+
+        assert conn.created_cursors, "expected a server-side cursor"
+        for cur in conn.created_cursors:
+            assert cur.itersize >= 1000, f"itersize must be >=1000; got {cur.itersize}"
+        conn.execute.assert_not_called()
 
 
 class TestCatalogIdSpaceMatchesTheProbe:
