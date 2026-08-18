@@ -875,17 +875,22 @@ class TestNightlySyncCompilationTrackIndex(_NightlySyncHarness):
 
         serial_library_id = 40521
 
-        cta_conn = MagicMock()
+        # Server-side cursor shape, matching the loader's streaming read.
         cta_cursor = MagicMock()
-        cta_cursor.fetchall.return_value = [
-            {
-                "id": 1,
-                "library_id": serial_library_id,
-                "artist_name": "Chuquimamani-Condori",
-                "track_title": "Call Your Name",
-            }
-        ]
-        cta_conn.execute.return_value = cta_cursor
+        cta_cursor.__enter__.return_value = cta_cursor
+        cta_cursor.__exit__.return_value = None
+        cta_cursor.__iter__.side_effect = lambda: iter(
+            [
+                {
+                    "id": 1,
+                    "library_id": serial_library_id,
+                    "artist_name": "Chuquimamani-Condori",
+                    "track_title": "Call Your Name",
+                }
+            ]
+        )
+        cta_conn = MagicMock()
+        cta_conn.cursor.return_value = cta_cursor
 
         index = build_cta_index(load_compilation_track_artists(cta_conn))
 

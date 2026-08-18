@@ -352,14 +352,34 @@ def nightly_sync(args: argparse.Namespace) -> None:
         # and `flowsheet.album_id` are each a foreign key to `library.id` — so no
         # translation is involved and none should be introduced.
         #
-        # Tier 0b is deliberately absent on this path. Its only source is
+        # Tier 0b is not wired here yet. Its only source is
         # `compilation_track_artists.json`, whose `comp_id` is a tubafrenzy
-        # `LIBRARY_RELEASE.ID`; feeding it here unbridged would key the index in a
-        # space no probe on this path can reach, and the miss would be silent
-        # rather than an error. The dump pipeline, whose entries carry legacy ids,
-        # is where that file belongs.
+        # `LIBRARY_RELEASE.ID`, and this entry point takes no input data files —
+        # only a DSN. Wiring it needs both a file input and a legacy->serial
+        # bridge through `library.legacy_release_id`; that is possible (the
+        # column is NOT NULL and unique, and `_LIBRARY_SQL` is one column away),
+        # just not done. Until then only the dump pipeline runs Tier 0b, and
+        # that pipeline's input disappears with tubafrenzy.
         compilation_track_index = build_cta_index(cta_rows)
-        logger.info("  %d compilation track-artist index entries", len(compilation_track_index))
+
+        # The id-space invariant, checked rather than asserted in prose: the CTA
+        # index keys and the FK-chain release ids must be the same space, since
+        # `resolve()` probes both with `entry.library_release_id`. A wrong-space
+        # index is silent — every lookup misses and entries fall through to name
+        # resolution — so a near-zero overlap against a non-empty index is the
+        # only signal that would ever appear.
+        if compilation_track_index:
+            cta_keys = {key[0] for key in compilation_track_index}
+            overlap = len(cta_keys & {r.id for r in releases})
+            log = logger.info if overlap else logger.warning
+            log(
+                "  %d compilation track-artist index entries over %d releases, "
+                "%d of which are in the catalog's id space",
+                len(compilation_track_index),
+                len(cta_keys),
+                overlap,
+            )
+
         resolver = ArtistResolver(
             releases=releases,
             codes=codes,

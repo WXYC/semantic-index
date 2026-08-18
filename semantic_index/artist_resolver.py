@@ -1,8 +1,9 @@
 """Artist name resolution via library catalog, compilation track data, and Discogs.
 
 Resolution strategies (in order of precedence):
-0a. Compilation track (CTA): for VA entries, look up per-track artist in tubafrenzy
-    COMPILATION_TRACK_ARTIST index (from SQL dump via --compilation-track-artist-dump)
+0a. Compilation track (CTA): for VA entries, look up per-track artist in a
+    COMPILATION_TRACK_ARTIST index — built from the tubafrenzy SQL dump
+    (--compilation-track-artist-dump) or from Backend PG (the nightly sync)
 0b. Compilation track (Discogs): fallback for VA entries not matched by CTA, using
     pre-computed track credits from compilation_track_artists.json (via --discogs-track-json)
 1. FK chain: LIBRARY_RELEASE_ID → LIBRARY_RELEASE → LIBRARY_CODE → PRESENTATION_NAME
@@ -112,10 +113,23 @@ def build_cta_index(rows: list[tuple]) -> dict[tuple[int, str], str]:
     Args:
         rows: Tuples of (id, library_release_id, artist_name, track_title).
 
+    The caller owns the id space. Rows from the tubafrenzy dump are keyed by
+    ``LIBRARY_RELEASE.ID``; rows from Backend PG are keyed by the serial
+    ``library.id``. This builder does not know or check which it was handed —
+    it must match whatever space the probe (``FlowsheetEntry.library_release_id``)
+    carries on the same path, and a mismatch produces silent misses, never an
+    error.
+
     Returns:
         Dict keyed on (library_release_id, normalized_track_title) → artist_name.
         Track titles are stripped and lowercased. NULL titles are skipped.
-        Duplicate keys are overwritten (last write wins).
+
+        Duplicate keys are overwritten, so a track with several credited
+        artists collapses to whichever row came last — the table's grain is one
+        row per credited artist per track, so this is common, not exceptional.
+        "Last" follows the caller's row order: the PG loader sorts by ``id``,
+        which is insertion order, so a librarian-entered credit outranks an
+        ETL-imported one for the same track.
     """
     index: dict[tuple[int, str], str] = {}
     for row in rows:

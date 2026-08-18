@@ -166,17 +166,26 @@ def load_compilation_track_artists(conn: Any) -> list[tuple[int, int, str, str |
     from one path with a probe from the other produces silent misses, not
     errors.
 
+    Streams through :func:`_stream_into_list` rather than buffering: the table
+    is the third-largest read here (~145K rows, and BS#801 projects 500K-1M
+    once non-V/A credits land), and it is loaded last, at the sync's existing
+    memory peak.
+
     Rows with a NULL ``track_title`` are returned as-is; ``build_cta_index``
     owns the decision to skip them.
 
     Args:
-        conn: psycopg connection (dict_row factory).
+        conn: psycopg connection (dict_row factory, autocommit=True).
 
     Returns:
         List of ``(id, library_id, artist_name, track_title)`` tuples.
     """
-    rows = conn.execute(_COMPILATION_TRACK_ARTIST_SQL).fetchall()
-    return [(r["id"], r["library_id"], r["artist_name"], r["track_title"]) for r in rows]
+    return _stream_into_list(
+        conn,
+        "compilation_track_artists",
+        _COMPILATION_TRACK_ARTIST_SQL,
+        lambda row: (row["id"], row["library_id"], row["artist_name"], row["track_title"]),
+    )
 
 
 def load_catalog(conn: Any) -> tuple[list[LibraryCode], list[LibraryRelease]]:
