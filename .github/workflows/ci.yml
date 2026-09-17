@@ -44,8 +44,9 @@ jobs:
   test:
     # Default (no-marker) tests: everything in tests/ that isn't gated by an
     # infra marker. Includes tests/unit/ plus the unmarked in-memory tests under
-    # tests/integration/ and tests/e2e/ (which self-skip when the tubafrenzy
-    # fixture is absent).
+    # tests/integration/ and tests/e2e/, which run the pipeline against the
+    # tubafrenzy fixture dump committed at tests/fixtures/wxycmusic-fixture.sql
+    # (no external checkout needed; see tests/fixtures/README.md).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

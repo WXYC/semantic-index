@@ -1,7 +1,7 @@
 """Full pipeline E2E test: run the complete semantic-index pipeline on the tubafrenzy fixture dump.
 
-Runs run_pipeline.py as an in-process call against the tubafrenzy fixture dump at
-tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql. Verifies:
+Runs run_pipeline.py as an in-process call against the vendored tubafrenzy fixture dump at
+tests/fixtures/wxycmusic-fixture.sql. Verifies:
   - SQLite output has correct schema (all expected tables exist)
   - Non-zero artist count
   - Non-zero dj_transition edges with PMI scores computed
@@ -23,21 +23,14 @@ from pathlib import Path
 
 import pytest
 
-# Walk up from this file to find the WXYC org directory containing sibling repos.
-_FIXTURE_RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
+# Vendored into this repo (see tests/fixtures/README.md for provenance).
+# Override with the TUBAFRENZY_FIXTURE env var to use a different tubafrenzy dump.
+_DEFAULT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "wxycmusic-fixture.sql"
 
 
 def _find_fixture() -> Path:
     override = os.environ.get("TUBAFRENZY_FIXTURE")
-    if override:
-        return Path(override)
-    d = Path(__file__).resolve().parent
-    while d != d.parent:
-        candidate = d / _FIXTURE_RELATIVE
-        if candidate.exists():
-            return candidate
-        d = d.parent
-    return Path(_FIXTURE_RELATIVE)
+    return Path(override) if override else _DEFAULT_FIXTURE
 
 
 FIXTURE_PATH = _find_fixture()
@@ -49,8 +42,8 @@ class TestFullPipeline:
     @pytest.fixture(autouse=True, scope="class")
     def _run_pipeline(self):
         """Run the full pipeline in-process against the fixture dump."""
-        if not FIXTURE_PATH.exists():
-            pytest.skip(f"Fixture dump not found at {FIXTURE_PATH}")
+        # Fail loud rather than skip: the fixture is committed in this repo.
+        assert FIXTURE_PATH.exists(), f"Fixture dump not found at {FIXTURE_PATH}"
 
         tmpdir = tempfile.mkdtemp(prefix="semantic_index_e2e_")
         self.__class__._tmpdir = tmpdir
@@ -210,13 +203,14 @@ class TestFullPipeline:
         appending synthetic rows whose FKs land inside the truncation window
         or (b) pulling in the extra referenced rows via the supplemental
         ``--no-create-info`` mysqldump invocations in
-        ``scripts/dev/generate-fixture-dump.sh``. Either mechanism keeps both
-        ``source`` flavours populated; if you regenerate the fixture and this
-        test starts failing, that's the contract that broke. See
-        WXYC/semantic-index#185 and WXYC/tubafrenzy#486.
+        ``scripts/dev/generate-fixture-dump.sh`` in the tubafrenzy repo.
+        Either mechanism keeps both ``source`` flavours populated; if you
+        regenerate the fixture and this test starts failing, that's the
+        contract that broke. See WXYC/semantic-index#185 and
+        WXYC/tubafrenzy#486.
 
         Source of truth for the cross-ref IDs:
-        ``tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql``.
+        ``tests/fixtures/wxycmusic-fixture.sql``.
         """
         rows = self.conn.execute(
             "SELECT source, count(*) FROM cross_reference GROUP BY source"

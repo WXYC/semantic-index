@@ -842,7 +842,7 @@ Create the `semantic-index` repo and build the production pipeline. Canonicaliza
 
 **Repo setup:**
 - Create `semantic-index` repo with pyproject.toml, CI (`.github/workflows/ci.yml`), tooling (black 100-char, ruff, pytest with markers)
-- Copy fixture dump to `tests/fixtures/wxycmusic-fixture.sql` (from tubafrenzy's `scripts/dev/fixtures/`)
+- Copy fixture dump to `tests/fixtures/wxycmusic-fixture.sql` (originally generated in the tubafrenzy repo; vendored here — see [`tests/fixtures/README.md`](../tests/fixtures/README.md))
 - Set up Docker Compose for integration test MySQL (port 3307)
 - Set up `.env.example` with `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`
 
