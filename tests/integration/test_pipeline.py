@@ -1,4 +1,4 @@
-"""Integration test: run the full pipeline against the tubafrenzy fixture dump.
+"""Integration test: run the full pipeline against the vendored tubafrenzy fixture dump.
 
 The fixture has minimal data (~3 flowsheet entries, 1000 library codes/releases),
 so assertions focus on structural correctness rather than meaningful PMI values.
@@ -10,22 +10,15 @@ from pathlib import Path
 
 import pytest
 
-# Default: walk up from this file to find the WXYC parent dir containing sibling repos.
-# Override with TUBAFRENZY_FIXTURE env var if the layout differs.
-_RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
+# The fixture is vendored into this repo (see tests/fixtures/README.md for
+# provenance) so the suite has no cross-repo path dependency. Override with the
+# TUBAFRENZY_FIXTURE env var to run against a different tubafrenzy dump.
+_DEFAULT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "wxycmusic-fixture.sql"
 
 
 def _find_fixture() -> Path:
     override = os.environ.get("TUBAFRENZY_FIXTURE")
-    if override:
-        return Path(override)
-    d = Path(__file__).resolve().parent
-    while d != d.parent:
-        candidate = d / _RELATIVE
-        if candidate.exists():
-            return candidate
-        d = d.parent
-    return Path(_RELATIVE)  # will fail gracefully via pytest.skip
+    return Path(override) if override else _DEFAULT_FIXTURE
 
 
 FIXTURE_PATH = _find_fixture()
@@ -33,8 +26,9 @@ FIXTURE_PATH = _find_fixture()
 
 @pytest.fixture
 def fixture_dump():
-    if not FIXTURE_PATH.exists():
-        pytest.skip(f"Fixture dump not found at {FIXTURE_PATH}")
+    # Deliberately fail loud rather than skip: the fixture is committed here, so
+    # a missing file means it was deleted or the override points somewhere wrong.
+    assert FIXTURE_PATH.exists(), f"Fixture dump not found at {FIXTURE_PATH}"
     return str(FIXTURE_PATH)
 
 

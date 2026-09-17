@@ -19,20 +19,14 @@ import pytest
 
 from semantic_index.lml_identity import LmlEntitySourceError
 
-_RELATIVE = "tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql"
+# Vendored into this repo (see tests/fixtures/README.md for provenance).
+# Override with the TUBAFRENZY_FIXTURE env var to use a different tubafrenzy dump.
+_DEFAULT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "wxycmusic-fixture.sql"
 
 
 def _find_fixture() -> Path:
     override = os.environ.get("TUBAFRENZY_FIXTURE")
-    if override:
-        return Path(override)
-    d = Path(__file__).resolve().parent
-    while d != d.parent:
-        candidate = d / _RELATIVE
-        if candidate.exists():
-            return candidate
-        d = d.parent
-    return Path(_RELATIVE)
+    return Path(override) if override else _DEFAULT_FIXTURE
 
 
 FIXTURE_PATH = _find_fixture()
@@ -40,8 +34,8 @@ FIXTURE_PATH = _find_fixture()
 
 @pytest.fixture
 def fixture_dump() -> str:
-    if not FIXTURE_PATH.exists():
-        pytest.skip(f"Fixture dump not found at {FIXTURE_PATH}")
+    # Fail loud rather than skip: the fixture is committed in this repo.
+    assert FIXTURE_PATH.exists(), f"Fixture dump not found at {FIXTURE_PATH}"
     return str(FIXTURE_PATH)
 
 

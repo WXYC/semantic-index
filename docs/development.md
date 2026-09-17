@@ -12,7 +12,7 @@ pytest -m slow                  # slow tests, e.g. the artist-resolver-rust perf
 
 Test *markers* describe what infrastructure a test needs, so CI knows which tests can run in which environment; test *directories* (`tests/unit/`, `tests/integration/`, `tests/e2e/`) describe what kind of test it is. This split is "architecture A" from [the org test-patterns doc](https://github.com/WXYC/wiki/blob/main/plans/test-patterns.md), Section 3.
 
-- **Default (no marker)** — pure logic tests plus the in-memory pipeline tests in `tests/integration/test_pipeline.py`, `tests/integration/test_entity_source_fallback.py`, and `tests/e2e/test_full_pipeline.py`. These self-skip when the tubafrenzy fixture (`tubafrenzy/scripts/dev/fixtures/wxycmusic-fixture.sql`) is not on disk.
+- **Default (no marker)** — pure logic tests plus the in-memory pipeline tests in `tests/integration/test_pipeline.py`, `tests/integration/test_entity_source_fallback.py`, and `tests/e2e/test_full_pipeline.py`. These run against the tubafrenzy MySQL fixture dump committed at [`tests/fixtures/wxycmusic-fixture.sql`](../tests/fixtures/README.md), so they need no external checkout and never skip; set `TUBAFRENZY_FIXTURE` to point them at a different dump.
 - **`pg`** — needs a PostgreSQL server. Currently the discogs-edges SQL tests in `tests/integration/test_discogs_edges_sql.py`, which query the discogs-cache PostgreSQL via `DATABASE_URL_DISCOGS`. Self-skip when the DSN is unreachable.
 - **`slow`** — an orthogonal cost dimension: anything taking longer than ~10s. Currently the Rust resolver perf benchmark in `tests/unit/test_artist_resolver_rust.py`. Manual-only, via `# ci-sync-skip: slow` in `pyproject.toml`.
 
