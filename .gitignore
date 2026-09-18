@@ -13,7 +13,7 @@ env/
 .env
 # Production MySQL dumps are never committed; the small test fixture is.
 *.sql
-!tests/fixtures/wxycmusic-fixture.sql
+!tests/fixtures/*.sql
 
 output/
 

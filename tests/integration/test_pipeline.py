@@ -1,7 +1,8 @@
 """Integration test: run the full pipeline against the vendored tubafrenzy fixture dump.
 
-The fixture has minimal data (~3 flowsheet entries, 1000 library codes/releases),
-so assertions focus on structural correctness rather than meaningful PMI values.
+The fixture has minimal data (164 FLOWSHEET_ENTRY / 1000 FLOWSHEET_ENTRY_PROD rows,
+top-1000-by-ID library codes and releases), so assertions focus on structural
+correctness rather than meaningful PMI values. See tests/fixtures/README.md.
 """
 
 import os
@@ -38,7 +39,7 @@ class TestFullPipeline:
         from run_pipeline import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1"])
+            main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1", "--skip-enrichment"])
 
     def test_gexf_output_is_parseable(self, fixture_dump):
         """The output GEXF file is valid XML loadable by NetworkX."""
@@ -47,7 +48,7 @@ class TestFullPipeline:
         from run_pipeline import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1"])
+            main([fixture_dump, "--output-dir", tmpdir, "--min-count", "1", "--skip-enrichment"])
             gexf_path = Path(tmpdir) / "wxyc_artist_pmi.gexf"
             assert gexf_path.exists()
             graph = nx.read_gexf(str(gexf_path))
