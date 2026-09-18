@@ -2,7 +2,7 @@
 
 ## `wxycmusic-fixture.sql`
 
-A truncated `mysqldump` of the tubafrenzy `wxycmusic` MySQL database (23 tables, 20 of them with rows; ~750 music entries, ~500 unique artists, top-1000-by-ID library codes and releases). It is the substrate for the pipeline tests that run the real extractor against real tubafrenzy table shapes:
+A truncated `mysqldump` of the tubafrenzy `wxycmusic` MySQL database (23 tables, 20 of them with rows; 164 `FLOWSHEET_ENTRY` and 1000 `FLOWSHEET_ENTRY_PROD` rows, top-1000-by-ID `LIBRARY_CODE` / `LIBRARY_RELEASE`). The pipeline resolves 551 artists and 721 DJ-transition edges from it. It is the substrate for the pipeline tests that run the real extractor against real tubafrenzy table shapes:
 
 - [`tests/integration/test_pipeline.py`](../integration/test_pipeline.py)
 - [`tests/integration/test_entity_source_fallback.py`](../integration/test_entity_source_fallback.py)

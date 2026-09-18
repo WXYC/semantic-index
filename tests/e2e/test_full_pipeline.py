@@ -315,8 +315,8 @@ class TestFullPipelineWithEnrichment:
 
         from semantic_index.discogs_client import DiscogsClient
 
-        if not FIXTURE_PATH.exists():
-            pytest.skip(f"Fixture dump not found at {FIXTURE_PATH}")
+        # Fail loud rather than skip: the fixture is committed in this repo.
+        assert FIXTURE_PATH.exists(), f"Fixture dump not found at {FIXTURE_PATH}"
 
         canned_path = Path(__file__).parent.parent / "fixtures" / "canned_enrichment.json"
         canned = json.loads(canned_path.read_text())
