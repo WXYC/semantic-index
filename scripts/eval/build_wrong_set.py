@@ -330,7 +330,12 @@ def run_data_shuffle(args: argparse.Namespace) -> int:
 
     import anthropic
 
-    from semantic_index.api.narrative import _SYSTEM_PROMPT, _lookup_artist_metadata
+    from semantic_index.api.narrative import (
+        _GENERATOR_MAX_TOKENS,
+        _GENERATOR_MODEL,
+        _SYSTEM_PROMPT,
+        _lookup_artist_metadata,
+    )
 
     db = _open_ro_db(args.db_path)
     eligible = _load_eligible_pairs(Path(args.narratives))
@@ -388,8 +393,8 @@ def run_data_shuffle(args: argparse.Namespace) -> int:
             t0 = time.time()
             try:
                 response = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=150,
+                    model=_GENERATOR_MODEL,
+                    max_tokens=_GENERATOR_MAX_TOKENS,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_message}],
                 )
@@ -467,7 +472,12 @@ def run_field_corruption(args: argparse.Namespace) -> int:
 
     import anthropic
 
-    from semantic_index.api.narrative import _SYSTEM_PROMPT, _lookup_artist_metadata
+    from semantic_index.api.narrative import (
+        _GENERATOR_MAX_TOKENS,
+        _GENERATOR_MODEL,
+        _SYSTEM_PROMPT,
+        _lookup_artist_metadata,
+    )
 
     db = _open_ro_db(args.db_path)
     eligible = _load_eligible_pairs(Path(args.narratives))
@@ -554,8 +564,8 @@ def run_field_corruption(args: argparse.Namespace) -> int:
             t0 = time.time()
             try:
                 response = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=150,
+                    model=_GENERATOR_MODEL,
+                    max_tokens=_GENERATOR_MAX_TOKENS,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_message}],
                 )

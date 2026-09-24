@@ -139,6 +139,11 @@ MONTH_NAMES = [
     "December",
 ]
 
+# One pin per role. `scripts/eval/build_wrong_set.py` imports these alongside
+# _SYSTEM_PROMPT so the eval generator cannot drift from the production one.
+_GENERATOR_MODEL = "claude-haiku-4-5-20251001"
+_GENERATOR_MAX_TOKENS = 150
+
 _SYSTEM_PROMPT = (
     "You are a music knowledge assistant for WXYC 89.3 FM, a freeform college radio station. "
     "Given structured data about the relationship between two artists in the station's play "
@@ -938,8 +943,8 @@ def get_narrative(
     while True:
         try:
             response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=150,
+                model=_GENERATOR_MODEL,
+                max_tokens=_GENERATOR_MAX_TOKENS,
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": current_message}],
             )
