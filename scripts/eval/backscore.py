@@ -100,7 +100,7 @@ def _build_score_input(db: sqlite3.Connection, row: dict) -> dict:
 def _score_one(client, db: sqlite3.Connection, row: dict) -> dict:
     """Compute token-match v1 and claim-ratio v1 for a single eval-set row."""
     from semantic_index.api.narrative import _token_match_score
-    from semantic_index.narrative_audit import _CLAIM_DECOMPOSE_PROMPT, parse_claim_counts
+    from semantic_index.narrative_audit import score_claims
 
     input_data = _build_score_input(db, row)
     narrative = row.get("narrative") or ""
@@ -118,13 +118,7 @@ def _score_one(client, db: sqlite3.Connection, row: dict) -> dict:
         {"narrative": narrative, "provided_data": input_data},
         separators=(",", ":"),
     )
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=400,
-        system=_CLAIM_DECOMPOSE_PROMPT,
-        messages=[{"role": "user", "content": verify_payload}],
-    )
-    grounded, ungrounded = parse_claim_counts(response.content[0].text)
+    grounded, ungrounded = score_claims(client, verify_payload)
     total = grounded + ungrounded
     ratio = (ungrounded / total) if total else 0.0
 

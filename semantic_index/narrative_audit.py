@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
 from semantic_index.api.database import open_cache_db
+
+# One pin per repo: a model migration edits this line, not 28 call sites.
+_VERIFIER_MODEL = "claude-haiku-4-5-20251001"
 
 _AUDIT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS narrative_audit (
@@ -153,13 +155,7 @@ def run_audit(
                 {"narrative": sample["narrative"], "provided_data": input_data},
                 separators=(",", ":"),
             )
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=400,
-                system=_CLAIM_DECOMPOSE_PROMPT,
-                messages=[{"role": "user", "content": verify_payload}],
-            )
-            grounded, ungrounded = parse_claim_counts(response.content[0].text)
+            grounded, ungrounded = score_claims(client, verify_payload)
             total = grounded + ungrounded
             ratio = (ungrounded / total) if total else 0.0
             is_flagged = ratio > threshold
@@ -267,37 +263,54 @@ def record_audit_result(
 
 
 _CLAIM_DECOMPOSE_PROMPT = (
-    "You are a fact-checking assistant. Decompose the following narrative into individual factual "
-    "claims (one per line). For each claim, check whether it is grounded in the provided data.\n\n"
-    "Output format — one claim per line:\n"
-    "  G: <claim>\n"
-    "  U: <claim>\n\n"
-    "G = grounded (the claim is stated or directly implied by a data field).\n"
-    "U = ungrounded (the claim is not in the provided data).\n\n"
-    "Be strict. Describing a neighbor with any adjective is U. Inferring DJ intent is U. "
-    "Stating an artist quality not in the styles/audio/genre fields is U.\n\n"
-    "End with a count line: COUNTS: Xg Yu"
+    "You are a fact-checking assistant. Decompose the narrative into individual factual "
+    "claims, and mark each one grounded or ungrounded against the provided data.\n\n"
+    "Grounded = the claim is stated or directly implied by a data field.\n"
+    "Ungrounded = the claim is not in the provided data.\n\n"
+    "Be strict. Describing a neighbor with any adjective is ungrounded. Inferring DJ intent "
+    "is ungrounded. Stating an artist quality not in the styles/audio/genre fields is ungrounded."
 )
 
+# The response shape is enforced by the API, not by prose plus a regex: a
+# missing or malformed field is a 400, not a silently-wrong claim ratio.
+_CLAIM_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string"},
+                        "grounded": {"type": "boolean"},
+                    },
+                    "required": ["claim", "grounded"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["claims"],
+        "additionalProperties": False,
+    },
+}
 
-def parse_claim_counts(text: str) -> tuple[int, int]:
-    """Extract ``(grounded, ungrounded)`` counts from a verifier response.
 
-    Looks for a ``COUNTS: Xg Yu`` summary line first; falls back to counting
-    ``G:`` / ``U:`` line prefixes for resilience against models that drop the
-    summary.
+def score_claims(client: Any, verify_payload: str) -> tuple[int, int]:
+    """Run the verifier on one narrative; return ``(grounded, ungrounded)``.
+
+    Shared by the periodic audit and ``scripts/eval/backscore.py`` so both
+    score against exactly the same prompt, model, and response schema.
     """
-    for raw_line in text.strip().split("\n"):
-        line = raw_line.strip().upper()
-        if line.startswith("COUNTS:"):
-            grounded = ungrounded = 0
-            g_match = re.findall(r"(\d+)\s*G", line)
-            u_match = re.findall(r"(\d+)\s*U", line)
-            if g_match:
-                grounded = int(g_match[0])
-            if u_match:
-                ungrounded = int(u_match[0])
-            return grounded, ungrounded
-    grounded = len(re.findall(r"^\s*G[:|]", text, re.MULTILINE))
-    ungrounded = len(re.findall(r"^\s*U[:|]", text, re.MULTILINE))
-    return grounded, ungrounded
+    response = client.messages.create(
+        model=_VERIFIER_MODEL,
+        max_tokens=1000,
+        system=_CLAIM_DECOMPOSE_PROMPT,
+        output_config={"format": _CLAIM_SCHEMA},
+        messages=[{"role": "user", "content": verify_payload}],
+    )
+    text = next(b.text for b in response.content if b.type == "text")
+    claims = json.loads(text)["claims"]
+    grounded = sum(1 for c in claims if c["grounded"])
+    return grounded, len(claims) - grounded
