@@ -2,29 +2,54 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 
-class TestParseClaimCounts:
-    def test_parse_counts_line(self) -> None:
-        from semantic_index.narrative_audit import parse_claim_counts
+class TestScoreClaims:
+    """The response shape is guaranteed by ``output_config``; these cover the
+    tally, not the parsing — there is no longer a text format to mis-parse."""
 
-        text = "G: artists co-occur\nU: psychedelic\nCOUNTS: 1g 1u"
-        assert parse_claim_counts(text) == (1, 1)
+    @staticmethod
+    def _client(claims: list[dict]) -> object:
+        from unittest.mock import MagicMock
 
-    def test_falls_back_to_line_prefix_count_when_no_summary(self) -> None:
-        """Some Haiku responses skip the COUNTS line — fall back to G:/U: prefixes."""
-        from semantic_index.narrative_audit import parse_claim_counts
+        client = MagicMock()
+        block = MagicMock()
+        block.type = "text"
+        block.text = json.dumps({"claims": claims})
+        msg = MagicMock()
+        msg.content = [block]
+        client.messages.create.return_value = msg
+        return client
 
-        text = "G: claim one\nG: claim two\nU: hallucinated thing\nU: another\nU: third"
-        assert parse_claim_counts(text) == (2, 3)
+    def test_counts_grounded_and_ungrounded(self) -> None:
+        from semantic_index.narrative_audit import score_claims
 
-    def test_empty_response_returns_zero_zero(self) -> None:
-        from semantic_index.narrative_audit import parse_claim_counts
+        client = self._client(
+            [
+                {"claim": "artists co-occur", "grounded": True},
+                {"claim": "psychedelic", "grounded": False},
+            ]
+        )
+        assert score_claims(client, "{}") == (1, 1)
 
-        assert parse_claim_counts("") == (0, 0)
+    def test_no_claims_returns_zero_zero(self) -> None:
+        from semantic_index.narrative_audit import score_claims
+
+        assert score_claims(self._client([]), "{}") == (0, 0)
+
+    def test_requests_the_json_schema_format(self) -> None:
+        from semantic_index.narrative_audit import score_claims
+
+        client = self._client([{"claim": "a", "grounded": True}])
+        score_claims(client, "{}")
+        fmt = client.messages.create.call_args.kwargs["output_config"]["format"]
+        assert fmt["type"] == "json_schema"
+        assert fmt["schema"]["required"] == ["claims"]
 
 
 class TestAuditDB:
@@ -196,16 +221,18 @@ class TestRunAudit:
 
         # Mock returns alternating responses: clean, dirty, clean.
         responses = [
-            "G: claim\nCOUNTS: 1g 0u",  # ratio 0.0, not flagged at 0.2
-            "G: a\nU: b\nU: c\nU: d\nCOUNTS: 1g 3u",  # ratio 0.75, flagged
-            "G: a\nG: b\nCOUNTS: 2g 0u",  # ratio 0.0, not flagged
+            [{"claim": "claim", "grounded": True}],  # ratio 0.0, not flagged at 0.2
+            [{"claim": "a", "grounded": True}]
+            + [{"claim": c, "grounded": False} for c in "bcd"],  # ratio 0.75, flagged
+            [{"claim": c, "grounded": True} for c in "ab"],  # ratio 0.0, not flagged
         ]
         mock_client = MagicMock()
 
-        def make_msg(text):
+        def make_msg(claims):
             m = MagicMock()
             block = MagicMock()
-            block.text = text
+            block.type = "text"
+            block.text = json.dumps({"claims": claims})
             m.content = [block]
             return m
 
@@ -252,7 +279,8 @@ class TestRunAudit:
         mock_client = MagicMock()
         msg = MagicMock()
         block = MagicMock()
-        block.text = "G: a\nCOUNTS: 1g 0u"
+        block.type = "text"
+        block.text = json.dumps({"claims": [{"claim": "a", "grounded": True}]})
         msg.content = [block]
         mock_client.messages.create.return_value = msg
 
@@ -279,7 +307,10 @@ class TestRunAudit:
         mock_client = MagicMock()
         msg = MagicMock()
         block = MagicMock()
-        block.text = "G: a\nU: b\nCOUNTS: 1g 1u"
+        block.type = "text"
+        block.text = json.dumps(
+            {"claims": [{"claim": "a", "grounded": True}, {"claim": "b", "grounded": False}]}
+        )
         msg.content = [block]
         mock_client.messages.create.return_value = msg
 
