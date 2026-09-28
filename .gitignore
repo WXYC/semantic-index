@@ -40,9 +40,13 @@ coverage.json
 *.db-wal
 .claude/worktrees/
 
+# Pipeline output. The serving graph database is deliberately NOT in git: the
+# nightly rebuild runs as a Fargate task and ships it to S3, and the conductor
+# swaps it into the live path on the host (see infra/README.md). It was tracked
+# via Git LFS until 2026-09; eleven committed rebuilds cost 9.9 GiB of LFS
+# storage for a file nothing ever fetched.
+data/*.db
 data/*.bak-*
-data/*.bio-cache.db
-data/*.narrative-cache.db
 data/*.tmp.*.db-shm
 data/*.tmp.*.db-wal
 
