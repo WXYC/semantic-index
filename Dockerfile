@@ -15,9 +15,13 @@ COPY semantic_index/ semantic_index/
 COPY generated/ generated/
 COPY scripts/ scripts/
 COPY explorer/ explorer/
-COPY data/ data/
 COPY start.sh .
 
+# No `COPY data/`. The serving database is not in the build context: it reaches
+# the host as an S3 build artifact that the conductor swaps into the volume
+# mounted at /data (see infra/README.md). DB_PATH below is absolute, so the
+# relative default in semantic_index/api/config.py never applies in the image
+# and an /app/data copy would be read by nothing.
 ENV DB_PATH=/data/wxyc_artist_graph.db
 
 EXPOSE 8083
