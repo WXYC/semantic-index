@@ -253,4 +253,4 @@ CREATE TABLE dj_total (
 
 ## Data
 
-The pipeline parses tubafrenzy MySQL dump files directly, so no database server is required for SQL-dump mode. Production dumps are not committed to git — pass the path as a CLI argument. The fixture dump committed at [`tests/fixtures/wxycmusic-fixture.sql`](../tests/fixtures/README.md) has minimal data suitable for structural testing only. The `data/` directory contains a committed copy of the latest pipeline output, used for deployment.
+The pipeline parses tubafrenzy MySQL dump files directly, so no database server is required for SQL-dump mode. Production dumps are not committed to git — pass the path as a CLI argument. The fixture dump committed at [`tests/fixtures/wxycmusic-fixture.sql`](../tests/fixtures/README.md) has minimal data suitable for structural testing only. The `data/` directory holds local pipeline output and is **not** committed. The serving database reaches the production host as an S3 build artifact that the conductor validates and atomically swaps into the live path — see [`../infra/README.md`](../infra/README.md).
