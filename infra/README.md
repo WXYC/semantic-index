@@ -16,12 +16,14 @@ See `plans/si-out-of-process-rebuild/plan.md` (in the `wxyc-workspace` meta-repo
 | `scripts/run_build_job.py` | Container entrypoint: S3 seed → `nightly_sync` → S3 build. |
 | `scripts/validate_graph_db.py` | Pre-swap validation gate (header + artist-count + library-code mapping floor + enrichment-preservation). |
 | `scripts/ec2-build-conductor.sh` | Nightly driver on the EC2 host (snapshot → run-task → validate → swap). |
-| `scripts/conductor_preflight.py` | Disk-space and leftover-artifact checks the conductor runs before each locally-written DB-sized file (WXYC/semantic-index#385). |
+| `scripts/conductor_preflight.py` | Disk-space and leftover-artifact checks the conductor runs before each locally-written DB-sized file (WXYC/semantic-index#385). Stdlib-only; runs under the **host's own `python3`**, not through the conductor's `in_image` docker wrapper (that image tag can be stale — #371 — or fail to even start at 100% disk). Installed by copying it alongside `ec2-build-conductor.sh` (see `deploy/semantic-index-build.service`'s install comment); the conductor resolves its path relative to its own location. |
 | `deploy/semantic-index-build.{service,timer}` | systemd units that run the conductor. |
 
 ## Monitoring
 
 `semantic-index-freshness` (the wxyc-canary check on `graph_db_age_seconds`) is the symptom; when it fires, check the EC2 host's root disk **first** — the conductor writes two database-sized files to local disk every run, and a near-full host fails the whole nightly rebuild closed (WXYC/semantic-index#385). `wxyc-ec2-root-disk-high` (`WXYC/EC2` namespace, `disk_used_percent >= 90`, SNS topic `wxyc-infra-alerts`) is the standing alarm for that condition — check its state and history before assuming the failure is in the pipeline itself.
+
+A `.preprune-*` file under the data directory is a deliberate one-off **operator backup** (nothing in this repo creates one) — the conductor detects and warns about it on every run but never deletes it automatically (data-safety policy). A lingering one still eats disk; clean it up by hand once it's no longer needed, the same way the original WXYC/semantic-index#385 orphan was removed.
 
 ## Account / region
 

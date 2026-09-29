@@ -6,6 +6,11 @@
 #   sudo cp deploy/semantic-index-build.service /etc/systemd/system/
 #   sudo cp deploy/semantic-index-build.timer   /etc/systemd/system/
 #   sudo cp scripts/ec2-build-conductor.sh /home/ec2-user/
+#   sudo cp scripts/conductor_preflight.py /home/ec2-user/
+#   # ^ BOTH files, same directory: the conductor resolves the preflight
+#   #   script's path relative to its own location (WXYC/semantic-index#385).
+#   #   It runs under the host's own python3 (stdlib only, no venv needed) --
+#   #   never through the `IMAGE` docker tag below, which can be stale.
 #   # edit the Environment= lines below with the stack-output SUBNETS / BUILD_SG
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now semantic-index-build.timer
