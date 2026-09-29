@@ -1,37 +1,32 @@
 #!/usr/bin/env python3
 """Disk-space and stale-artifact preflight checks for the nightly rebuild conductor.
 
-``scripts/ec2-build-conductor.sh`` (WXYC/semantic-index#347) writes two
-database-sized files to the EC2 host's local disk on every run: the live-DB
-snapshot (the *seed*) and the downloaded build artifact (the *incoming* DB).
-Neither step checked whether the filesystem had room, so a chronically
-near-full host failed closed mid-snapshot with a raw
+``scripts/ec2-build-conductor.sh`` (#347) writes two database-sized files to
+local disk every run (the live-DB snapshot and the downloaded build artifact)
+without checking for room first, so a near-full host failed closed with a raw
 ``sqlite3.OperationalError: database or disk is full`` instead of a clear,
-alertable message -- and a run killed before its exit trap ran (rather than
-exiting normally) left its working files behind to compound the next night's
-shortfall (WXYC/semantic-index#385).
+alertable message -- and a run killed before its exit trap ran left its
+working files behind to compound the next night's shortfall (#385).
 
-This module is plain Python, not bash, so the logic is unit-testable the way
-``validate_graph_db.py`` and ``run_build_job.py`` already are; the conductor
-shells out to it exactly like it does to those. Two independent checks, run as
-CLI subcommands:
+Plain Python, not bash, so it's unit-testable the way ``validate_graph_db.py``
+and ``run_build_job.py`` already are; the conductor shells out to it the same
+way. Two CLI subcommands:
 
 ``check-space``
-    Compare a caller-supplied payload size -- the conductor already knows it
-    (``stat`` on the live DB before the snapshot, ``aws s3api head-object`` on
-    the build artifact before the download) -- against free space on the
-    target filesystem, plus a margin that scales with the payload rather than
-    a fixed constant. Fails loud, naming both numbers.
+    Compare a caller-supplied payload size (``stat`` on the live DB, or
+    ``aws s3api head-object`` on the build artifact -- the conductor already
+    knows both without downloading anything) against free space on the target
+    filesystem, plus a margin that scales with the payload rather than a fixed
+    constant. Fails loud, naming both numbers.
 
 ``clear-stale``
-    Sweep the data directory for the conductor's own leftover working files
-    from a run that never reached its exit trap, and remove them before this
-    run's own precheck sees the disk. Scoped tightly to the conductor's own
+    Remove the conductor's own leftover working files from a run that never
+    reached its exit trap. Scoped tightly to the conductor's own
     ``.seed``/``.incoming``/``.preprune-*`` naming -- NOT a blanket "anything
     after the db name" sweep, because the API's permanent cache sidecars
     (``semantic_index/api/database.py``'s ``f".{suffix}-cache.db"`` --
-    narrative-cache.db, bio-cache.db, preview-cache.db) live right next to the
-    graph DB using the identical dotted-suffix shape and must never be swept.
+    narrative-cache.db, bio-cache.db, preview-cache.db) share that exact
+    dotted-suffix shape and must never be swept up here.
 """
 
 from __future__ import annotations
