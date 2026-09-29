@@ -90,7 +90,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /ecs/semantic-index-build
-      RetentionInDays: 14
+      # 30, not the original 14 (WXYC/semantic-index#385): a missed-rebuild
+      # investigation can lag behind the incident by up to two weeks (the
+      # freshness canary only pages on the infra-tier, non-urgent path), and a
+      # 14-day retention had already aged out the one night's build log this
+      # investigation most needed.
+      RetentionInDays: 30
 
   Cluster:
     Type: AWS::ECS::Cluster

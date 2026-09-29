@@ -4,6 +4,9 @@
 # Runs on the Backend-Service EC2 serving host (installed via the systemd units
 # in deploy/). It is the single driver of the round-trip:
 #
+#   0. clear the conductor's own leftover artifacts from a run that never
+#      reached its exit trap (see cleanup() below), then confirm free disk
+#      space before each step that writes a DB-sized file locally
 #   1. snapshot the live production DB and capture its enrichment row counts
 #   2. upload the snapshot to S3 as the build's SEED
 #   3. launch the Fargate build task (aws ecs run-task) and wait for it
@@ -13,6 +16,12 @@
 # All heavy work (the ~4 GiB rebuild) happens in Fargate; the conductor only does
 # light, low-memory I/O. Every step is logged; any failure leaves the currently
 # serving DB untouched and exits non-zero.
+#
+# Disk-space and leftover-artifact checks (WXYC/semantic-index#385) live in
+# scripts/conductor_preflight.py, unit-tested like validate_graph_db.py, rather
+# than as inline bash — see that module's docstring for why the leftover-sweep
+# is scoped narrowly (the data dir also holds permanent API cache sidecars in
+# a naming shape that overlaps the conductor's own working files).
 #
 # Requires (on the host): aws CLI + instance-profile creds (see infra/README.md
 # step 3), docker, and the semantic-index image locally (the serving image).
@@ -65,7 +74,14 @@ BUILD_KEY="build/$DB_NAME"
 log() { echo "[conductor $(date -u +%FT%TZ)] $*"; }
 fail() { log "ERROR: $*"; exit 1; }
 
-cleanup() { rm -f "$SEED_DB" "$SEED_COUNTS" "$INCOMING_DB" 2>/dev/null || true; }
+# Clears this run's own working files, INCLUDING their SQLite -wal/-shm
+# companions (opened during the snapshot .backup() and the validation reads) --
+# previously omitted here, which is why a killed-not-exited run left
+# *.seed-wal/-shm and *.incoming-wal/-shm behind for step 0 below to find.
+cleanup() {
+  rm -f "$SEED_DB" "${SEED_DB}-wal" "${SEED_DB}-shm" "$SEED_COUNTS" \
+        "$INCOMING_DB" "${INCOMING_DB}-wal" "${INCOMING_DB}-shm" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 : "${SUBNETS:?set SUBNETS (comma-separated public subnet ids)}"
@@ -74,8 +90,19 @@ trap cleanup EXIT
 # Run a one-shot python in the semantic-index image against the mounted data dir.
 in_image() { docker run --rm -v "$DATA_DIR:/data" "$IMAGE" "$@"; }
 
+# --- 0. Clear stale artifacts from a run that never reached its exit trap ----
+log "Checking for leftover artifacts from a previous run..."
+in_image python scripts/conductor_preflight.py clear-stale \
+  --data-dir /data --db-name "$DB_NAME"
+
 # --- 1. Consistent snapshot of the live DB + capture enrichment baseline ------
 [[ -f "$PROD_DB" ]] || fail "production DB not found: $PROD_DB"
+PROD_DB_BYTES="$(stat -c%s "$PROD_DB")" || fail "could not stat production DB: $PROD_DB"
+log "Checking free disk space for snapshot (payload ${PROD_DB_BYTES} bytes)..."
+in_image python scripts/conductor_preflight.py check-space \
+  --path /data --needed-bytes "$PROD_DB_BYTES" --step snapshot \
+  || fail "insufficient disk space before snapshot — see the check-space message above"
+
 log "Snapshotting live DB -> $SEED_DB (sqlite .backup, consistent under concurrent reads)"
 in_image python -c "import sqlite3,sys; src=sqlite3.connect('/data/$DB_NAME'); dst=sqlite3.connect('/data/${DB_NAME}.seed'); src.backup(dst); dst.close(); src.close()" \
   || fail "snapshot failed"
@@ -130,6 +157,14 @@ log "task stopped: exitCode=${EXIT_CODE:-<none>} reason=${STOP_REASON:-<none>}"
 [[ "$EXIT_CODE" == "0" ]] || fail "build task exit '${EXIT_CODE:-<none>}' (${STOP_REASON:-no reason}) — NOT swapping"
 
 # --- 4. Download + validate (fail-closed) ------------------------------------
+BUILD_BYTES="$(aws s3api head-object --bucket "$BUCKET" --key "$BUILD_KEY" \
+  --query ContentLength --output text)" \
+  || fail "could not stat build artifact in S3: s3://$BUCKET/$BUILD_KEY"
+log "Checking free disk space for download (payload ${BUILD_BYTES} bytes)..."
+in_image python scripts/conductor_preflight.py check-space \
+  --path /data --needed-bytes "$BUILD_BYTES" --step download \
+  || fail "insufficient disk space before download — see the check-space message above"
+
 log "Downloading build artifact -> $INCOMING_DB"
 aws s3 cp "s3://$BUCKET/$BUILD_KEY" "$INCOMING_DB" --only-show-errors || fail "build download failed"
 
