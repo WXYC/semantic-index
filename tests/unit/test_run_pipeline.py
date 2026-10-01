@@ -20,6 +20,21 @@ class TestParseArgs:
         args = parse_args(["dump.sql", "--db-path", "/tmp/store.db"])
         assert args.db_path == "/tmp/store.db"
 
+    def test_api_base_url_default_unset(self, monkeypatch):
+        monkeypatch.delenv("LML_API_BASE_URL", raising=False)
+        args = parse_args(["dump.sql"])
+        assert args.api_base_url is None
+
+    def test_api_base_url_default_from_env(self, monkeypatch):
+        monkeypatch.setenv("LML_API_BASE_URL", "https://lml.example.com")
+        args = parse_args(["dump.sql"])
+        assert args.api_base_url == "https://lml.example.com"
+
+    def test_api_base_url_flag_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("LML_API_BASE_URL", "https://lml.example.com")
+        args = parse_args(["dump.sql", "--api-base-url", "https://explicit.example.com"])
+        assert args.api_base_url == "https://explicit.example.com"
+
     def test_compute_discogs_edges_default(self):
         args = parse_args(["dump.sql"])
         assert args.compute_discogs_edges is False

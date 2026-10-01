@@ -3,7 +3,8 @@
 
 Usage:
     python run_pipeline.py /path/to/wxycmusic.sql [--output-dir output/] [--min-count 2]
-    python run_pipeline.py dump.sql --discogs-cache-dsn postgresql://... --api-base-url https://...
+    python run_pipeline.py dump.sql --discogs-cache-dsn postgresql://...
+    LML_API_BASE_URL=https://... python run_pipeline.py dump.sql
 """
 
 import argparse
@@ -91,8 +92,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-base-url",
-        default="https://library-metadata-lookup-staging.up.railway.app",
-        help="Base URL for library-metadata-lookup API",
+        default=os.environ.get("LML_API_BASE_URL"),
+        help="Base URL for library-metadata-lookup API (default: LML_API_BASE_URL env var)",
     )
     parser.add_argument(
         "--wikidata-cache-dsn",
