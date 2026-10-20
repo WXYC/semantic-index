@@ -126,6 +126,104 @@ def test_create_app_from_settings_emits_json_to_stderr(monkeypatch, capsys) -> N
     assert payload["message"] == "scheduler started"
 
 
+def test_create_app_from_settings_disables_etl_posthog_handler(monkeypatch) -> None:
+    """The API reports through wxyc-fastapi's handler, so ``init_logger`` must not
+    attach wxyc-etl's own PostHog handler or each ERROR would be sent twice.
+    """
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+
+    with (
+        patch("semantic_index.api.app.init_logger") as mock_logger,
+        patch("semantic_index.api.app.init_sentry"),
+        patch("semantic_index.api.app.init_error_tracking"),
+        patch("semantic_index.api.app.create_app"),
+    ):
+        from semantic_index.api.app import _create_app_from_settings
+
+        _create_app_from_settings()
+
+    assert mock_logger.call_args.kwargs["posthog_errors"] is False
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected_ceiling"),
+    [("production", 100), ("local", 100), ("staging", 50), ("stage", 50)],
+)
+def test_create_app_from_settings_initializes_error_tracking(
+    monkeypatch, environment: str, expected_ceiling: int
+) -> None:
+    """``init_error_tracking`` gets the app, the service name, the environment and a
+    per-process daily ceiling of 50 in staging, else 100.
+    """
+    monkeypatch.setenv("SENTRY_ENVIRONMENT", environment)
+    monkeypatch.setenv("SENTRY_RELEASE", "test-1.2.3")
+
+    with (
+        patch("semantic_index.api.app.init_sentry"),
+        patch("semantic_index.api.app.init_error_tracking") as mock_track,
+        patch("semantic_index.api.app.create_app") as mock_create,
+    ):
+        from semantic_index.api.app import _create_app_from_settings
+
+        returned = _create_app_from_settings()
+
+    mock_track.assert_called_once()
+    kwargs = mock_track.call_args.kwargs
+    assert kwargs["service"] == "semantic-index"
+    assert kwargs["environment"] == environment
+    assert kwargs["daily_ceiling"] == expected_ceiling
+    assert kwargs["release"] == "test-1.2.3"
+    assert kwargs["app"] is mock_create.return_value
+    assert returned is mock_create.return_value
+
+
+def test_error_reaches_posthog_exactly_once(monkeypatch) -> None:
+    """With the key set, one ERROR logged in the API process is captured by a single
+    PostHog client; both the wxyc-etl and wxyc-fastapi clients are stubbed.
+    """
+    monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_test")
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.setenv("SENTRY_ENVIRONMENT", "production")
+
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    for handler in saved_handlers:
+        root.removeHandler(handler)
+    from wxyc_etl import logger as wxyc_logger
+
+    wxyc_logger._INITIALIZED = False
+
+    captures: list[str] = []
+
+    class StubClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def capture_exception(self, *args, **kwargs) -> None:
+            captures.append("capture")
+
+        def capture(self, *args, **kwargs) -> None:
+            captures.append("capture")
+
+    try:
+        with (
+            patch("posthog.Posthog", StubClient),
+            patch("semantic_index.api.app.create_app"),
+        ):
+            from semantic_index.api.app import _create_app_from_settings
+
+            _create_app_from_settings()
+
+            logging.getLogger("semantic_index.api").error("boom")
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+
+    assert len(captures) == 1
+
+
 @pytest.fixture(autouse=True)
 def _reset_logger_init_state():
     """Reset ``wxyc_etl.logger._INITIALIZED`` so each test can re-init cleanly."""
