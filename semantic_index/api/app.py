@@ -187,6 +187,17 @@ def create_app(
     return app
 
 
+def _daily_ceiling(environment: str) -> int:
+    """Per-process daily PostHog error ceiling: 50 in staging, else 100.
+
+    The environment is stripped and lowercased the same way wxyc-fastapi
+    normalizes it, so the ceiling always matches the tag on the events.
+    """
+    if environment.strip().lower() in ("staging", "stage"):
+        return 50
+    return 100
+
+
 def _create_app_from_settings() -> FastAPI:
     """Create the app from environment-based settings for uvicorn multiworker mode."""
     from semantic_index.api.config import Settings
@@ -223,7 +234,7 @@ def _create_app_from_settings() -> FastAPI:
     init_error_tracking(
         service="semantic-index",
         environment=settings.sentry_environment,
-        daily_ceiling=50 if settings.sentry_environment in ("staging", "stage") else 100,
+        daily_ceiling=_daily_ceiling(settings.sentry_environment),
         release=settings.sentry_release,
         app=app,
     )

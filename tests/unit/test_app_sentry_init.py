@@ -147,7 +147,15 @@ def test_create_app_from_settings_disables_etl_posthog_handler(monkeypatch) -> N
 
 @pytest.mark.parametrize(
     ("environment", "expected_ceiling"),
-    [("production", 100), ("local", 100), ("staging", 50), ("stage", 50)],
+    [
+        ("production", 100),
+        ("local", 100),
+        ("staging", 50),
+        ("stage", 50),
+        ("Staging", 50),
+        (" stage ", 50),
+        ("STAGING ", 50),
+    ],
 )
 def test_create_app_from_settings_initializes_error_tracking(
     monkeypatch, environment: str, expected_ceiling: int
@@ -205,6 +213,19 @@ def test_error_reaches_posthog_exactly_once(monkeypatch) -> None:
         def capture(self, *args, **kwargs) -> None:
             captures.append("capture")
 
+        def shutdown(self) -> None:
+            pass
+
+    import sys
+    import threading
+
+    from wxyc_fastapi.observability import error_tracking
+    from wxyc_fastapi.observability.errors import shutdown_posthog_errors
+
+    saved_excepthook = sys.excepthook
+    saved_thread_excepthook = threading.excepthook
+    saved_hooks_installed = error_tracking._hooks_installed
+
     try:
         with (
             patch("posthog.Posthog", StubClient),
@@ -216,6 +237,10 @@ def test_error_reaches_posthog_exactly_once(monkeypatch) -> None:
 
             logging.getLogger("semantic_index.api").error("boom")
     finally:
+        shutdown_posthog_errors()
+        sys.excepthook = saved_excepthook
+        threading.excepthook = saved_thread_excepthook
+        error_tracking._hooks_installed = saved_hooks_installed
         for handler in list(root.handlers):
             root.removeHandler(handler)
         for handler in saved_handlers:
