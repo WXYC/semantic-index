@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from wxyc_etl.logger import init_logger
 from wxyc_fastapi.healthcheck import Check, readiness_router
-from wxyc_fastapi.observability import init_sentry
+from wxyc_fastapi.observability import init_error_tracking, init_sentry
 
 from semantic_index.api.bio import bio_router
 from semantic_index.api.narrative import narrative_router
@@ -196,11 +196,14 @@ def _create_app_from_settings() -> FastAPI:
     # under semantic_index.* (including the sync scheduler) are visible from
     # the first line of process lifetime. Pass sentry_dsn="" so init_logger
     # does not double-init Sentry — init_sentry below owns the full SDK config
-    # (FastAPI + Httpx integrations, sample rates, service.name tag).
+    # (FastAPI + Httpx integrations, sample rates, service.name tag). Pass
+    # posthog_errors=False because init_error_tracking below owns the PostHog
+    # handler; a second one would report each ERROR twice.
     init_logger(
         repo="semantic-index",
         tool="semantic-index api",
         sentry_dsn="",
+        posthog_errors=False,
     )
     init_sentry(
         dsn=settings.sentry_dsn,
@@ -208,7 +211,7 @@ def _create_app_from_settings() -> FastAPI:
         environment=settings.sentry_environment,
         release=settings.sentry_release,
     )
-    return create_app(
+    app = create_app(
         settings.db_path,
         anthropic_api_key=settings.anthropic_api_key,
         sync_enabled=settings.sync_enabled,
@@ -217,6 +220,14 @@ def _create_app_from_settings() -> FastAPI:
         sync_min_count=settings.sync_min_count,
         enrichment_top_k=settings.enrichment_top_k,
     )
+    init_error_tracking(
+        service="semantic-index",
+        environment=settings.sentry_environment,
+        daily_ceiling=50 if settings.sentry_environment in ("staging", "stage") else 100,
+        release=settings.sentry_release,
+        app=app,
+    )
+    return app
 
 
 app = _create_app_from_settings()
