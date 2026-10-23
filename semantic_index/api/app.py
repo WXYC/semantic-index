@@ -221,6 +221,9 @@ def _create_app_from_settings() -> FastAPI:
         service_name="semantic-index",
         environment=settings.sentry_environment,
         release=settings.sentry_release,
+        # Errors only. Tracing is off until Sentry is removed (#396); the
+        # wxyc-fastapi default is 1.0, so the call site must pin it.
+        traces_sample_rate=0.0,
     )
     app = create_app(
         settings.db_path,

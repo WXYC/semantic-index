@@ -31,6 +31,29 @@ def test_create_app_from_settings_initializes_sentry(monkeypatch) -> None:
     assert kwargs["release"] == "test-1.2.3"
 
 
+def test_create_app_from_settings_disables_sentry_tracing(monkeypatch) -> None:
+    """Sentry gets errors only; tracing is pinned off until Sentry is removed (#396).
+
+    ``init_sentry`` defaults ``traces_sample_rate`` to 1.0, so the call site must
+    pass 0.0 explicitly. The env var ``SENTRY_TRACES_SAMPLE_RATE`` must not win.
+    """
+    monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+    monkeypatch.setenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")
+
+    with (
+        patch("semantic_index.api.app.init_sentry") as mock_init,
+        patch("semantic_index.api.app.create_app"),
+    ):
+        from semantic_index.api.app import _create_app_from_settings
+
+        _create_app_from_settings()
+
+    kwargs = mock_init.call_args.kwargs
+    assert kwargs.get("traces_sample_rate") == 0.0
+    assert "traces_sampler" not in kwargs
+    assert kwargs.get("sample_rate", 1.0) == 1.0
+
+
 def test_create_app_from_settings_passes_none_dsn_when_unset(monkeypatch) -> None:
     """Without ``SENTRY_DSN``, ``init_sentry`` is still called (it no-ops on None)."""
     monkeypatch.delenv("SENTRY_DSN", raising=False)
